@@ -1,0 +1,9 @@
+syntax="proto3"; package agentos.spec.v1;
+message LoopInput {
+  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
+  string input_event_cursor=5; string turn_id=6; bytes state=7; bytes events=8;
+}
+message LoopDecision {
+  string decision_id=1; string run_id=2; uint64 based_on_run_revision=3; uint64 loop_epoch=4;
+  uint64 step_sequence=5; string based_on_event_cursor=6; string turn_id=7; string decision_type=8; bytes payload=9;
+}

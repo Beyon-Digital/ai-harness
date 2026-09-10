@@ -1,0 +1,138 @@
+site_name: Personal AI Agent OS
+site_description: Canonical human-readable architecture and developer documentation.
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/README.md
+      - Principles: architecture/principles.md
+      - Persistence: architecture/persistence-model.md
+      - Effects: architecture/effect-model.md
+      - RunGraph: architecture/run-graph.md
+      - Binding Scopes: architecture/binding-scopes.md
+      - Data Flow: architecture/data-flow.md
+      - Replay & Reproducibility: architecture/replay-reproducibility.md
+  - Kernel:
+      - Index: kernel/README.md
+      - agentd: kernel/agentd.md
+      - Command Coordinator: kernel/command-coordinator.md
+      - KernelStore: kernel/kernel-store.md
+      - Runtime Manager: kernel/runtime-manager.md
+      - RunGraph Manager: kernel/run-graph-manager.md
+      - Effect Coordinator: kernel/effect-coordinator.md
+      - Identity & Fencing: kernel/identity-fencing.md
+      - Permissions: kernel/permissions.md
+      - Secrets Broker: kernel/secrets-broker.md
+      - Workspace Coordinator: kernel/workspace-coordinator.md
+      - Process Supervisor: kernel/process-supervisor.md
+      - Sandbox Manager: kernel/sandbox-manager.md
+      - Adapter Registry: kernel/adapter-registry.md
+      - Config Engine: kernel/config-engine.md
+      - Scheduler: kernel/scheduler.md
+      - Resource Accounting: kernel/resource-accounting.md
+      - Event System: kernel/event-system.md
+      - Recovery: kernel/recovery.md
+      - Shutdown: kernel/shutdown.md
+  - Runtime:
+      - Index: runtime/README.md
+      - AgentSpec: runtime/agent-spec.md
+      - AgentRun: runtime/agent-run.md
+      - Resolved Environment: runtime/resolved-run-environment.md
+      - Sessions & Tasks: runtime/session-task.md
+      - AgentLoop: runtime/agent-loop.md
+      - Planning & Delegation: runtime/planning-delegation.md
+      - Context & Memory: runtime/context-memory.md
+      - Tools & Skills: runtime/tools-skills.md
+      - Model Routing: runtime/model-routing.md
+  - Ports:
+      - Catalog: ports/README.md
+      - KernelStore: ports/kernel-store.md
+      - Event Journal: ports/event-journal.md
+      - Message Queue: ports/message-queue.md
+      - Sandbox: ports/sandbox.md
+      - Workspace: ports/workspace.md
+      - Artifact Store: ports/artifact-store.md
+      - Model: ports/model.md
+      - Memory Store: ports/memory-store.md
+      - Context: ports/context.md
+      - Tool Runtime: ports/tool-runtime.md
+      - Secret Store: ports/secret-store.md
+      - Transport: ports/transport.md
+      - Agent Loop: ports/agent-loop.md
+  - Adapters:
+      - Index: adapters/README.md
+      - Contract: adapters/contract.md
+      - Capability Negotiation: adapters/capability-negotiation.md
+      - Conformance: adapters/conformance.md
+      - Process Adapters: adapters/process-adapters.md
+      - WASM: adapters/wasm.md
+      - Built-ins: adapters/built-ins.md
+  - Extensions:
+      - Index: extensions/README.md
+      - Manifest: extensions/manifest.md
+      - SDK: extensions/sdk.md
+      - Generated: extensions/generated.md
+      - Supply Chain: extensions/supply-chain.md
+      - Custom Adapter: extensions/custom-adapter.md
+      - Custom Loop: extensions/custom-loop.md
+  - Configuration:
+      - Index: configuration/README.md
+      - Profiles: configuration/profiles.md
+      - Binding Scopes: configuration/binding-scopes.md
+      - Transactions: configuration/transactions.md
+      - Schema: configuration/schema.md
+  - Security:
+      - Index: security/README.md
+      - Threat Model: security/threat-model.md
+      - Sandbox Tiers: security/sandbox-tiers.md
+      - Capability Delegation: security/capability-delegation.md
+      - Secrets & Egress: security/secrets-egress.md
+      - Remote Approvals: security/remote-approvals.md
+      - Extension Integrity: security/extension-integrity.md
+      - Remote Access: security/remote-access.md
+      - Data Classification: security/data-classification.md
+  - Operations:
+      - Index: operations/README.md
+      - Observability: operations/observability.md
+      - Recovery: operations/recovery.md
+      - Single Writer: operations/single-writer.md
+      - Event Overflow: operations/event-overflow.md
+      - Backup: operations/backup.md
+      - Shutdown: operations/shutdown.md
+  - API:
+      - Index: api/README.md
+      - Control: api/control-api.md
+      - Effects: api/effect-api.md
+      - Events: api/events-api.md
+      - Resources: api/resource-uris.md
+      - Approvals: api/approvals-api.md
+  - Guides:
+      - Index: guides/README.md
+      - Local First: guides/local-first.md
+      - Multi-loop: guides/multi-loop.md
+      - Parallel Workspaces: guides/parallel-workspaces.md
+      - Cloud Deployment: guides/cloud-deployment.md
+      - Build Adapter: guides/build-adapter.md
+      - Build Loop: guides/build-loop.md
+      - Docs Site: guides/docs-site.md
+  - Reference:
+      - Index: reference/README.md
+      - Domain: reference/domain-model.md
+      - Events: reference/event-model.md
+      - Effects: reference/effect-semantics.md
+      - Errors: reference/error-model.md
+      - Compatibility: reference/compatibility.md
+      - Component Matrix: reference/component-matrix.md
+      - Glossary: reference/glossary.md

@@ -1,0 +1,356 @@
+schema_version: 1
+tasks:
+  FND-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  FND-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  FND-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  FND-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  FND-005:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  FND-006:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  PST-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  PST-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  PST-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  PST-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  PST-005:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  CMD-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EVT-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EVT-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EVT-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EVT-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-005:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EFF-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EFF-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EFF-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  EFF-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RES-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SCH-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SEC-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SEC-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SEC-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SEC-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-005:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  WRK-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  WRK-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  WRK-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  SBOX-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ART-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  CFG-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  CFG-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  CFG-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  LOOP-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  LOOP-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  API-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  API-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  API-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  API-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  INT-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  INT-002:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  INT-003:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  INT-004:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  INT-005:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  REL-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  QUE-001:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  ADP-006:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''
+  RUN-000:
+    status: pending
+    commit: null
+    tests: []
+    evidence: []
+    notes: ''

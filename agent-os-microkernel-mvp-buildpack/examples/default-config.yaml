@@ -1,0 +1,27 @@
+schema_version: 1
+
+kernel:
+  store: sqlite-kernel
+  daemon_identity: local-mac
+
+services:
+  event_journal: sqlite-events
+  message_queue: memory-queue
+  secret_store: macos-keychain
+  transport: local-uds
+
+profiles:
+  local-trusted:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: fixture-loop
+
+policies:
+  sandbox:
+    minimum_untrusted_tier: T2_UNTRUSTED
+  effects:
+    unknown_default: require_human_decision
+
+observability:
+  log_level: info

@@ -1,0 +1,9 @@
+syntax="proto3"; package agentos.spec.v1;
+service KernelStorePort {
+  rpc ExecuteTransaction(KernelTransactionRequest) returns (KernelTransactionResult);
+  rpc AcquireDaemonFence(AcquireFenceRequest) returns (AcquireFenceResult);
+}
+message KernelTransactionRequest { string transaction_id=1; bytes operations=2; }
+message KernelTransactionResult { bool committed=1; bytes results=2; }
+message AcquireFenceRequest { string daemon_instance_id=1; }
+message AcquireFenceResult { uint64 fencing_epoch=1; int64 lease_expires_unix_ms=2; }

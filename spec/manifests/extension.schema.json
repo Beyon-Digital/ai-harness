@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos.local/spec/extension-manifest/v1.json",
+  "title": "Extension Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "id",
+    "version",
+    "kind",
+    "runtime"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": 2
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "tool",
+        "skill",
+        "service",
+        "runtime",
+        "adapter"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "required": [
+        "type",
+        "entrypoint"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "process",
+            "wasm",
+            "native"
+          ]
+        },
+        "entrypoint": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "implements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exports": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requested_capabilities": {
+      "type": "object"
+    },
+    "effect_claims": {
+      "type": "object"
+    },
+    "config_schema": {
+      "type": "string"
+    },
+    "dependency_lock": {
+      "type": "string"
+    }
+  }
+}

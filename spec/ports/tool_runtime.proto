@@ -1,0 +1,5 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service ToolRuntimePort { rpc ListTools(ExecutionContext) returns (GenericResult); rpc Describe(ToolDescribeRequest) returns (GenericResult); rpc Invoke(ToolInvokeRequest) returns (ToolInvokeResult); rpc Status(StatusRequest) returns (StatusResponse); rpc Reconcile(StatusRequest) returns (StatusResponse); rpc Cancel(CancelRequest) returns (GenericResult); }
+message ToolDescribeRequest { ExecutionContext context=1; string tool_id=2; }
+message ToolInvokeRequest { ExecutionContext context=1; string tool_id=2; bytes arguments_json=3; }
+message ToolInvokeResult { string provider_operation_ref=1; bytes result_json=2; }

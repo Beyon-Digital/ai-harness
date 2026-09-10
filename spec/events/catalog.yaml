@@ -1,0 +1,10 @@
+version: 1
+runtime: [TaskCreated, RunCreated, RunReady, RunStarted, RunPaused, RunResumed, RunCompleted, RunFailed, RunCancelled]
+graph: [ChildRunCreated, DependencyAdded, RunClaimed, CancellationEpochAdvanced]
+loop: [LoopTurnIssued, LoopDecisionAccepted, LoopDecisionRejectedStale]
+effect: [EffectPrepared, EffectClaimed, EffectDispatched, EffectAcknowledged, EffectCommitted, EffectFailed, EffectCancelled, EffectUnknown, EffectReconciled]
+workspace: [WorkspaceLeaseGranted, WorkspaceLeaseTransferred, WorkspaceForked, WorkspaceMerged]
+security: [CapabilityRequested, CapabilityGranted, CapabilityDenied, ApprovalRequested, ApprovalResolved, SecretActionPerformed]
+adapter: [AdapterRegistered, AdapterStarted, AdapterHealthy, AdapterUnhealthy, AdapterStopped]
+config: [ConfigProposed, ConfigTested, ConfigActivated, ConfigRolledBack]
+recovery: [RecoveryStarted, RunRecoveryDispositionChanged, DaemonFenceAcquired, DaemonFenceLost]

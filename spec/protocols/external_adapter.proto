@@ -1,0 +1,9 @@
+syntax="proto3"; package agentos.spec.v1;
+message AdapterBootstrap {
+  string daemon_instance_id=1; uint64 daemon_fencing_epoch=2; string adapter_instance_id=3;
+  string expected_bundle_digest=4; string bootstrap_nonce=5; uint32 protocol_version=6;
+}
+message AdapterHello {
+  string adapter_instance_id=1; string adapter_id=2; string adapter_version=3; string bundle_digest=4;
+  uint32 protocol_version=5; repeated string implemented_ports=6; bytes capability_document=7;
+}

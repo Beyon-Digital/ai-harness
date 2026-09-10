@@ -1,0 +1,5 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto"; import "protocols/agent_loop.proto";
+service AgentLoopPort { rpc Next(LoopInput) returns (LoopDecision); rpc Checkpoint(LoopCheckpointRequest) returns (GenericResult); rpc Restore(LoopRestoreRequest) returns (GenericResult); rpc Shutdown(LoopShutdownRequest) returns (GenericResult); }
+message LoopCheckpointRequest { ExecutionContext context=1; bytes loop_private_state=2; }
+message LoopRestoreRequest { ExecutionContext context=1; string checkpoint_ref=2; }
+message LoopShutdownRequest { ExecutionContext context=1; string reason=2; }

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos.local/spec/config/v1.json",
+  "title": "Agent OS Configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kernel",
+    "services",
+    "profiles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store"
+      ],
+      "properties": {
+        "store": {
+          "type": "string"
+        },
+        "daemon_identity": {
+          "type": "string"
+        }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "event_journal": {
+          "type": "string"
+        },
+        "message_queue": {
+          "type": "string"
+        },
+        "secret_store": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "extends": {
+            "type": "string"
+          },
+          "sandbox": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          },
+          "artifact_store": {
+            "type": "string"
+          },
+          "memory_store": {
+            "type": "string"
+          },
+          "model_provider": {
+            "type": "string"
+          },
+          "tool_runtime": {
+            "type": "string"
+          },
+          "agent_loop": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "policies": {
+      "type": "object"
+    },
+    "remote_access": {
+      "type": "object"
+    },
+    "observability": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service WorkspacePort { rpc Create(WorkspaceCreateRequest) returns (WorkspaceResult); rpc Read(WorkspacePathRequest) returns (GenericResult); rpc Write(WorkspaceWriteRequest) returns (GenericResult); rpc List(WorkspacePathRequest) returns (GenericResult); rpc AcquireLease(WorkspaceLeaseRequest) returns (WorkspaceLeaseResult); rpc TransferExclusiveWrite(WorkspaceTransferRequest) returns (WorkspaceLeaseResult); rpc Fork(WorkspaceForkRequest) returns (WorkspaceResult); rpc Snapshot(WorkspaceRefRequest) returns (GenericResult); rpc Merge(WorkspaceMergeRequest) returns (GenericResult); }
+message WorkspaceCreateRequest { ExecutionContext context=1; bytes spec_json=2; }
+message WorkspaceResult { string workspace_uri=1; string base_revision=2; }
+message WorkspaceRefRequest { ExecutionContext context=1; string workspace_uri=2; }
+message WorkspacePathRequest { ExecutionContext context=1; string workspace_uri=2; string relative_path=3; }
+message WorkspaceWriteRequest { ExecutionContext context=1; string workspace_uri=2; string relative_path=3; bytes data=4; string expected_version=5; }
+message WorkspaceLeaseRequest { ExecutionContext context=1; string workspace_uri=2; string access_mode=3; }
+message WorkspaceLeaseResult { string lease_id=1; uint64 lease_epoch=2; string enforcement=3; }
+message WorkspaceTransferRequest { ExecutionContext context=1; string lease_id=2; string from_run_id=3; string to_run_id=4; uint64 expected_lease_epoch=5; }
+message WorkspaceForkRequest { ExecutionContext context=1; string parent_workspace_uri=2; string parent_revision=3; string child_run_id=4; }
+message WorkspaceMergeRequest { ExecutionContext context=1; string target_workspace_uri=2; string source_workspace_uri=3; bytes merge_policy_json=4; }

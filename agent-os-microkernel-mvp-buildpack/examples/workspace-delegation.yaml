@@ -1,0 +1,26 @@
+parent:
+  workspace: workspace://repo-main
+  mode: EXCLUSIVE_WRITE
+
+parallel_children:
+  - run: child-a
+    mode: ISOLATED_FORK
+    base: parent-current-revision
+  - run: child-b
+    mode: ISOLATED_FORK
+    base: parent-current-revision
+
+integration:
+  operation: explicit_merge
+  target: parent
+  sources: [child-a, child-b]
+  on_conflict: surface_to_parent
+
+exclusive_transfer_example:
+  from: parent
+  to: child-a
+  expected_parent_lease_epoch: 7
+  result:
+    new_owner: child-a
+    new_lease_epoch: 8
+    parent_old_write_token_valid: false

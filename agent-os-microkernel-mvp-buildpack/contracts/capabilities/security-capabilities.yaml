@@ -1,0 +1,10 @@
+version: 1
+families:
+  workspace: [read, write, fork, merge, transfer_exclusive_write, shared_coordinated_write]
+  network: [connect]
+  secret: [use, sign_or_act]
+  agent: [spawn]
+  extension: [install, enable, disable]
+  config: [propose, test, activate, rollback]
+  effect: [reconcile, resolve_unknown]
+  resource: [reserve]

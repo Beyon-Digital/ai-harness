@@ -1,0 +1,7 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service MemoryStorePort { rpc Put(MemoryPutRequest) returns (MemoryResult); rpc Get(MemoryRefRequest) returns (MemoryResult); rpc Search(MemorySearchRequest) returns (GenericResult); rpc Delete(MemoryRefRequest) returns (GenericResult); rpc List(MemoryListRequest) returns (GenericResult); }
+message MemoryPutRequest { ExecutionContext context=1; string namespace=2; bytes memory_record_json=3; }
+message MemoryRefRequest { ExecutionContext context=1; string memory_id=2; }
+message MemorySearchRequest { ExecutionContext context=1; string namespace=2; bytes query_json=3; }
+message MemoryListRequest { ExecutionContext context=1; string namespace=2; string cursor=3; }
+message MemoryResult { string memory_id=1; bytes memory_record_json=2; }

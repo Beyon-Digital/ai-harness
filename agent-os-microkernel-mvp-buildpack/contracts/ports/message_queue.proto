@@ -1,0 +1,8 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service MessageQueuePort { rpc Publish(QueuePublishRequest) returns (QueuePublishResult); rpc Consume(QueueConsumeRequest) returns (stream QueueDelivery); rpc Ack(QueueAckRequest) returns (GenericResult); rpc Nack(QueueNackRequest) returns (GenericResult); }
+message QueuePublishRequest { ExecutionContext context=1; string stream=2; string message_id=3; bytes payload=4; bytes options_json=5; }
+message QueuePublishResult { string message_id=1; }
+message QueueConsumeRequest { ExecutionContext context=1; string subscription=2; bytes options_json=3; }
+message QueueDelivery { string delivery_id=1; string message_id=2; bytes payload=3; }
+message QueueAckRequest { ExecutionContext context=1; string delivery_id=2; }
+message QueueNackRequest { ExecutionContext context=1; string delivery_id=2; bytes options_json=3; }

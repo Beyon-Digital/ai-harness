@@ -1,0 +1,10 @@
+syntax="proto3"; package agentos.spec.v1;
+import "events/event.proto";
+service EventJournalPort {
+  rpc Append(AppendEventsRequest) returns (AppendEventsResult);
+  rpc ReadStream(ReadStreamRequest) returns (ReadStreamResult);
+}
+message AppendEventsRequest { string stream_key=1; uint64 expected_sequence=2; repeated EventEnvelope events=3; }
+message AppendEventsResult { uint64 final_sequence=1; }
+message ReadStreamRequest { string stream_key=1; uint64 from_sequence=2; uint32 limit=3; }
+message ReadStreamResult { repeated EventEnvelope events=1; bool retention_gap=2; }

@@ -1,0 +1,70 @@
+syntax = "proto3";
+package agentos.spec.v1;
+
+import "domain/core.proto";
+
+message AgentSpecRevision {
+  string agent_spec_id = 1;
+  string version = 2;
+  string digest = 3;
+  bytes body = 4;
+  int64 created_unix_ms = 5;
+}
+
+message Session {
+  string session_id = 1;
+  string principal_id = 2;
+  bytes metadata = 3;
+  int64 created_unix_ms = 4;
+}
+
+message Task {
+  string task_id = 1;
+  string session_id = 2;
+  string created_by_actor_id = 3;
+  string task_kind = 4;
+  bytes payload = 5;
+  int64 created_unix_ms = 6;
+}
+
+enum DependencyCondition {
+  DEPENDENCY_CONDITION_UNSPECIFIED = 0;
+  COMPLETED_SUCCESSFULLY = 1;
+  ANY_TERMINAL = 2;
+  COMPLETED_OR_CANCELLED = 3;
+}
+
+message RunDependency {
+  string dependency_id = 1;
+  string task_id = 2;
+  string source_run_id = 3;
+  string target_run_id = 4;
+  DependencyCondition condition = 5;
+  uint64 created_graph_revision = 6;
+}
+
+message RunGraphView {
+  string task_id = 1;
+  uint64 graph_revision = 2;
+  repeated AgentRun runs = 3;
+  repeated RunDependency dependencies = 4;
+}
+
+message ConfigGeneration {
+  string generation_id = 1;
+  string digest = 2;
+  bytes document = 3;
+  string validation_state = 4;
+  string test_state = 5;
+  int64 created_unix_ms = 6;
+}
+
+message AdapterRegistrationView {
+  VersionedRef adapter = 1;
+  string manifest_digest = 2;
+  string runtime_type = 3;
+  repeated string implemented_ports = 4;
+  bytes capabilities_json = 5;
+  string trust_state = 6;
+  string conformance_state = 7;
+}

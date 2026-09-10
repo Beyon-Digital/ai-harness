@@ -1,0 +1,11 @@
+schema_version: 1
+tasks: {}
+# Example:
+# MK-001:
+#   status: complete # pending | in_progress | blocked | complete
+#   commit: abc123
+#   tests:
+#     - cargo test -p domain
+#   evidence:
+#     - "all acceptance criteria passed"
+#   notes: ""

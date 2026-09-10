@@ -1,0 +1,1391 @@
+{
+  "schema_version": 1,
+  "project": "agent-os-microkernel-control-plane-mvp",
+  "tasks": [
+    {
+      "id": "FND-001",
+      "title": "Bootstrap Rust workspace and quality gates",
+      "phase": "foundation",
+      "depends_on": [],
+      "goal": "Create the compilable Rust workspace, toolchain policy, shared dependency policy, CI commands, and empty crate boundaries without implementing runtime behavior.",
+      "files": [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        ".cargo/config.toml",
+        "crates/*/Cargo.toml",
+        ".github/workflows/ci.yml"
+      ],
+      "tests": [
+        "cargo check --workspace",
+        "cargo fmt --check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test --workspace"
+      ],
+      "accept": [
+        "All crates compile on macOS target.",
+        "No crate cycles.",
+        "CI configuration expresses the same quality gates documented in AGENTS.md."
+      ]
+    },
+    {
+      "id": "FND-002",
+      "title": "Install canonical contract snapshot and protobuf generation",
+      "phase": "foundation",
+      "depends_on": [
+        "FND-001"
+      ],
+      "goal": "Place the build-pack contract files into the implementation repo and generate Rust protobuf types deterministically.",
+      "files": [
+        "proto/**",
+        "build.rs or dedicated proto crate",
+        "crates/domain/src/generated/**"
+      ],
+      "tests": [
+        "cargo test -p domain contract_codegen",
+        "script verifies contract lock hashes",
+        "schema JSON parses and const version == 1"
+      ],
+      "accept": [
+        "Generated protobuf types compile.",
+        "Changing a contract without updating the lock fails validation.",
+        "No second hand-written copy of protobuf message structs is created."
+      ]
+    },
+    {
+      "id": "FND-003",
+      "title": "Implement domain IDs, core enums, and immutable value types",
+      "phase": "foundation",
+      "depends_on": [
+        "FND-002"
+      ],
+      "goal": "Create strong internal Rust types around canonical protocol fields so kernel APIs do not traffic in unvalidated strings.",
+      "files": [
+        "crates/domain/src/ids.rs",
+        "crates/domain/src/run.rs",
+        "crates/domain/src/effect.rs",
+        "crates/domain/src/security.rs",
+        "crates/domain/src/resource.rs"
+      ],
+      "tests": [
+        "round-trip protobuf conversion tests",
+        "invalid enum/ID tests",
+        "UUID uniqueness/time-order sanity test"
+      ],
+      "accept": [
+        "Internal APIs can use typed IDs/states without raw string parsing.",
+        "Unknown protobuf enum values fail safely rather than mapping to an unsafe default."
+      ]
+    },
+    {
+      "id": "FND-004",
+      "title": "Implement stable error model",
+      "phase": "foundation",
+      "depends_on": [
+        "FND-001"
+      ],
+      "goal": "Create a single typed error taxonomy usable across kernel crates and map it to gRPC status later without losing machine-readable codes.",
+      "files": [
+        "crates/errors/src/lib.rs",
+        "crates/errors/src/codes.rs"
+      ],
+      "tests": [
+        "unit tests for code/retry mapping",
+        "serialization tests if error envelope is serialized"
+      ],
+      "accept": [
+        "All kernel crates can depend on errors crate without cycles.",
+        "Retry safety is represented structurally."
+      ]
+    },
+    {
+      "id": "FND-005",
+      "title": "Build deterministic testkit and fault-injection hooks",
+      "phase": "foundation",
+      "depends_on": [
+        "FND-001",
+        "FND-003"
+      ],
+      "goal": "Provide reusable clocks, ID factories, temporary directories, barrier/race helpers, and named fault points needed to prove crash/concurrency semantics.",
+      "files": [
+        "crates/testkit/src/clock.rs",
+        "crates/testkit/src/ids.rs",
+        "crates/testkit/src/faults.rs",
+        "crates/testkit/src/process.rs"
+      ],
+      "tests": [
+        "manual clock tests",
+        "fault-point trigger-once tests",
+        "temp daemon harness smoke test"
+      ],
+      "accept": [
+        "Later crash tests can place deterministic faults without ad-hoc sleeps."
+      ]
+    },
+    {
+      "id": "FND-006",
+      "title": "Initialize classified tracing and metrics substrate",
+      "phase": "foundation",
+      "depends_on": [
+        "FND-001",
+        "FND-003",
+        "FND-004"
+      ],
+      "goal": "Create observability helpers that attach kernel correlation fields while preventing raw secret payload logging.",
+      "files": [
+        "crates/observability/src/lib.rs",
+        "crates/observability/src/classification.rs"
+      ],
+      "tests": [
+        "classification redaction tests",
+        "span creation smoke tests"
+      ],
+      "accept": [
+        "Kernel logs include IDs needed for diagnosis.",
+        "No secret value type implements accidental Display/Debug exposing contents."
+      ]
+    },
+    {
+      "id": "PST-001",
+      "title": "Create inception SQLite KernelStore schema",
+      "phase": "persistence",
+      "depends_on": [
+        "FND-003",
+        "FND-004"
+      ],
+      "goal": "Create `kernel.db` bootstrap schema exactly once from the inception SQL and assert structural invariants at startup.",
+      "files": [
+        "schema/kernel_store.sql",
+        "crates/kernel-store-sqlite/src/schema.rs"
+      ],
+      "tests": [
+        "fresh DB bootstrap test",
+        "reopen same version test",
+        "wrong schema version fails closed",
+        "foreign-key/unique constraint tests"
+      ],
+      "accept": [
+        "No runtime table is silently auto-created by individual repositories.",
+        "Only the exact inception schema is accepted."
+      ]
+    },
+    {
+      "id": "PST-002",
+      "title": "Define KernelStore transaction interfaces",
+      "phase": "persistence",
+      "depends_on": [
+        "FND-003",
+        "FND-004"
+      ],
+      "goal": "Define object-safe/asynchronous transaction contracts that allow the command coordinator to make multi-entity atomic mutations without exposing SQLite.",
+      "files": [
+        "crates/kernel-store/src/lib.rs",
+        "crates/kernel-store/src/txn.rs",
+        "crates/kernel-store/src/repositories.rs"
+      ],
+      "tests": [
+        "compile-time/object-safety tests",
+        "mock transaction implementation in testkit"
+      ],
+      "accept": [
+        "Command coordinator can perform a representative run+effect+outbox+idempotency mutation in one transaction interface."
+      ]
+    },
+    {
+      "id": "PST-003",
+      "title": "Implement SQLite KernelStore transactions and repositories",
+      "phase": "persistence",
+      "depends_on": [
+        "PST-001",
+        "PST-002",
+        "FND-005"
+      ],
+      "goal": "Implement all base repository operations and transaction semantics in SQLite.",
+      "files": [
+        "crates/kernel-store-sqlite/src/lib.rs",
+        "crates/kernel-store-sqlite/src/txn.rs",
+        "crates/kernel-store-sqlite/src/repos/*.rs"
+      ],
+      "tests": [
+        "repository CRUD tests",
+        "transaction rollback test",
+        "CAS conflict tests",
+        "concurrent writer contention test",
+        "outbox/stream sequence uniqueness tests"
+      ],
+      "accept": [
+        "A failed transaction leaves zero partial canonical rows.",
+        "Every correctness constraint is backed by DB condition/constraint, not only pre-check logic."
+      ]
+    },
+    {
+      "id": "PST-004",
+      "title": "Implement OS daemon lock and durable fencing epoch",
+      "phase": "persistence",
+      "depends_on": [
+        "PST-003",
+        "FND-005"
+      ],
+      "goal": "Guarantee one authoritative local daemon and give all workers a durable daemon fencing epoch.",
+      "files": [
+        "crates/agentd/src/lock.rs",
+        "crates/kernel-store-sqlite/src/fence.rs",
+        "crates/identity/src/daemon.rs"
+      ],
+      "tests": [
+        "two-process lock exclusion integration test",
+        "fencing epoch increments after restart",
+        "stale epoch write rejected"
+      ],
+      "accept": [
+        "Two daemon instances cannot both commit authoritative work."
+      ]
+    },
+    {
+      "id": "PST-005",
+      "title": "Implement idempotency and transactional outbox primitives",
+      "phase": "persistence",
+      "depends_on": [
+        "PST-003",
+        "PST-004"
+      ],
+      "goal": "Provide repository primitives used by every mutating command for replay safety and durable event projection.",
+      "files": [
+        "crates/kernel-store-sqlite/src/repos/idempotency.rs",
+        "crates/kernel-store-sqlite/src/repos/outbox.rs",
+        "crates/events/src/outbox.rs"
+      ],
+      "tests": [
+        "same key/same digest replay test",
+        "same key/different digest conflict",
+        "concurrent sequence allocation test",
+        "outbox duplicate event conflict test"
+      ],
+      "accept": [
+        "Primitives are safe under concurrent commands and ready for coordinator composition."
+      ]
+    },
+    {
+      "id": "CMD-001",
+      "title": "Implement Command Coordinator linearization path",
+      "phase": "control-core",
+      "depends_on": [
+        "PST-005",
+        "FND-006"
+      ],
+      "goal": "Create the sole state-changing command path and prove commit/replay semantics before higher-level commands are added.",
+      "files": [
+        "crates/command-coordinator/src/lib.rs",
+        "crates/command-coordinator/src/envelope.rs",
+        "crates/command-coordinator/src/handler.rs"
+      ],
+      "tests": [
+        "fault before commit => no mutation",
+        "fault after commit => replay returns stored outcome",
+        "idempotency conflict test",
+        "fence mismatch test"
+      ],
+      "accept": [
+        "No state-changing handler can obtain a raw store connection outside coordinator."
+      ]
+    },
+    {
+      "id": "EVT-001",
+      "title": "Implement event envelopes, stream keys, cursors, and sequence helpers",
+      "phase": "events",
+      "depends_on": [
+        "FND-003",
+        "PST-005"
+      ],
+      "goal": "Create validated durable event primitives and canonical stream-key/cursor encoding.",
+      "files": [
+        "crates/events/src/envelope.rs",
+        "crates/events/src/stream.rs",
+        "crates/events/src/cursor.rs"
+      ],
+      "tests": [
+        "stream key round-trip tests",
+        "cursor malformed input tests",
+        "event envelope protobuf round-trip"
+      ],
+      "accept": [
+        "No durable event can exist without event_id, stream_key, sequence, classification."
+      ]
+    },
+    {
+      "id": "EVT-002",
+      "title": "Implement EventJournalPort and SQLite Event Journal",
+      "phase": "events",
+      "depends_on": [
+        "EVT-001",
+        "FND-004"
+      ],
+      "goal": "Create downstream `events.db` projection with exact append/idempotency rules.",
+      "files": [
+        "crates/event-journal/src/lib.rs",
+        "crates/event-journal-sqlite/src/lib.rs",
+        "schema/event_journal.sql"
+      ],
+      "tests": [
+        "append/read tests",
+        "duplicate exact append test",
+        "conflicting duplicate test",
+        "gap rejection test"
+      ],
+      "accept": [
+        "Event Journal cannot mutate canonical run state."
+      ]
+    },
+    {
+      "id": "EVT-003",
+      "title": "Implement outbox dispatcher with journal-first publication",
+      "phase": "events",
+      "depends_on": [
+        "EVT-002",
+        "PST-005",
+        "FND-005"
+      ],
+      "goal": "Project committed outbox events safely to Event Journal, surviving duplicate work and crashes.",
+      "files": [
+        "crates/events/src/dispatcher.rs",
+        "crates/agentd/src/workers/outbox.rs"
+      ],
+      "tests": [
+        "crash/restart exact reappend test",
+        "journal unavailable => outbox backlog grows, commands still commit",
+        "per-stream order test"
+      ],
+      "accept": [
+        "No live durable cursor is emitted by this task before journal ack."
+      ]
+    },
+    {
+      "id": "EVT-004",
+      "title": "Implement durable Live Event Bus and lag semantics",
+      "phase": "events",
+      "depends_on": [
+        "EVT-003"
+      ],
+      "goal": "Provide bounded in-process subscriptions without allowing slow clients to block runtime or silently skip durable history.",
+      "files": [
+        "crates/events/src/live_bus.rs"
+      ],
+      "tests": [
+        "slow subscriber lag test",
+        "resume from Event Journal test",
+        "ephemeral drop metric test"
+      ],
+      "accept": [
+        "Durable subscriber can always resume from the last acknowledged/delivered cursor."
+      ]
+    },
+    {
+      "id": "RUN-000",
+      "title": "Implement AgentSpec, Session, Task, and initial AgentRun commands",
+      "phase": "runtime",
+      "depends_on": [
+        "CMD-001",
+        "PST-003"
+      ],
+      "goal": "Implement immutable AgentSpec revisions plus Session/Task/Created-Run creation commands so later runtime/graph logic has complete canonical roots.",
+      "files": [
+        "crates/runtime/src/agent_spec.rs",
+        "crates/runtime/src/session.rs",
+        "crates/runtime/src/task.rs",
+        "crates/runtime/src/create_run.rs",
+        "crates/kernel-store-sqlite/src/repos/agent_specs.rs",
+        "crates/kernel-store-sqlite/src/repos/tasks.rs"
+      ],
+      "tests": [
+        "immutable AgentSpec revision tests",
+        "session/task idempotent creation tests",
+        "child run parent linkage test",
+        "run starts Created without silently becoming Ready"
+      ],
+      "accept": [
+        "Existing AgentSpec revision bytes/digest can never be overwritten.",
+        "CreateTaskRun atomically creates required task/run/parent metadata/outbox/idempotency records.",
+        "A run cannot become Ready without a persisted ResolvedRunEnvironment."
+      ]
+    },
+    {
+      "id": "RUN-001",
+      "title": "Implement AgentRun state machine and revision rules",
+      "phase": "runtime",
+      "depends_on": [
+        "CMD-001",
+        "FND-003",
+        "RUN-000"
+      ],
+      "goal": "Implement pure transition validation plus transaction-backed run mutations.",
+      "files": [
+        "crates/runtime/src/state.rs",
+        "crates/runtime/src/run.rs"
+      ],
+      "tests": [
+        "table-driven allowed/forbidden transition tests",
+        "proptest arbitrary transition sequence",
+        "revision increment tests"
+      ],
+      "accept": [
+        "Illegal transitions cannot be persisted through runtime APIs."
+      ]
+    },
+    {
+      "id": "RUN-002",
+      "title": "Implement transactional RunGraph edge mutation and cycle prevention",
+      "phase": "runtime",
+      "depends_on": [
+        "RUN-001",
+        "PST-003"
+      ],
+      "goal": "Implement parent/child and dependency graph storage with serial cycle validation.",
+      "files": [
+        "crates/run-graph/src/graph.rs",
+        "crates/run-graph/src/repository.rs"
+      ],
+      "tests": [
+        "cycle rejection tests",
+        "concurrent opposite-edge race test",
+        "duplicate edge test",
+        "state restriction tests"
+      ],
+      "accept": [
+        "No committed dependency graph contains a directed cycle."
+      ]
+    },
+    {
+      "id": "RUN-003",
+      "title": "Implement dependency satisfaction and atomic ready-run claiming",
+      "phase": "runtime",
+      "depends_on": [
+        "RUN-002"
+      ],
+      "goal": "Provide deterministic readiness semantics and single-winner run claims.",
+      "files": [
+        "crates/run-graph/src/readiness.rs",
+        "crates/runtime/src/claim.rs"
+      ],
+      "tests": [
+        "all dependency condition tests",
+        "100-concurrent-claim single winner",
+        "claim blocked by recovery disposition test"
+      ],
+      "accept": [
+        "Exactly one authoritative claim exists for a runnable run."
+      ]
+    },
+    {
+      "id": "RUN-004",
+      "title": "Implement cancellation epochs and subtree cancellation",
+      "phase": "runtime",
+      "depends_on": [
+        "RUN-002",
+        "RUN-001"
+      ],
+      "goal": "Prevent child-spawn escape races and provide deterministic cancellation propagation.",
+      "files": [
+        "crates/run-graph/src/cancellation.rs",
+        "crates/runtime/src/cancel.rs"
+      ],
+      "tests": [
+        "barrier-controlled cancel/spawn race test",
+        "nested descendant propagation test",
+        "terminal child unchanged test"
+      ],
+      "accept": [
+        "No uncancelled child can be committed using a stale observed parent cancellation epoch."
+      ]
+    },
+    {
+      "id": "RUN-005",
+      "title": "Implement startup run reconstruction and recovery dispositions",
+      "phase": "runtime",
+      "depends_on": [
+        "RUN-003",
+        "RUN-004",
+        "PST-004"
+      ],
+      "goal": "Reconstruct non-terminal runs after daemon restart and persist whether they may safely resume.",
+      "files": [
+        "crates/runtime/src/recovery.rs",
+        "crates/agentd/src/recovery.rs"
+      ],
+      "tests": [
+        "restart with Running run/no effect",
+        "restart with unknown effect",
+        "restart with missing adapter binding",
+        "recovery disposition persistence tests"
+      ],
+      "accept": [
+        "Daemon never blindly resumes a run whose external effect outcome is ambiguous."
+      ]
+    },
+    {
+      "id": "EFF-001",
+      "title": "Implement effect contract model and conservative policy resolver",
+      "phase": "effects",
+      "depends_on": [
+        "FND-003",
+        "FND-004"
+      ],
+      "goal": "Compute the kernel-effective side-effect policy from port semantics, extension claims, trust, conformance, and policy.",
+      "files": [
+        "crates/effects/src/contract.rs",
+        "crates/effects/src/policy.rs"
+      ],
+      "tests": [
+        "truth-table policy tests",
+        "untrusted self-declared read-only cannot self-promote",
+        "trusted built-in known read-only remains read-only"
+      ],
+      "accept": [
+        "Resolver never returns safer retry/reconciliation semantics than evidence supports."
+      ]
+    },
+    {
+      "id": "EFF-002",
+      "title": "Implement EffectRecord transitions and preparation",
+      "phase": "effects",
+      "depends_on": [
+        "EFF-001",
+        "CMD-001",
+        "RUN-001"
+      ],
+      "goal": "Persist effect preparation atomically with the owning decision/command and enforce legal state transitions.",
+      "files": [
+        "crates/effects/src/record.rs",
+        "crates/effects/src/coordinator.rs",
+        "crates/kernel-store-sqlite/src/repos/effects.rs"
+      ],
+      "tests": [
+        "prepare transaction rollback test",
+        "duplicate logical effect identity test",
+        "illegal state transition tests"
+      ],
+      "accept": [
+        "No effect can be dispatched unless a committed Prepared record exists."
+      ]
+    },
+    {
+      "id": "EFF-003",
+      "title": "Implement effect executor leases and fencing",
+      "phase": "effects",
+      "depends_on": [
+        "EFF-002",
+        "PST-004"
+      ],
+      "goal": "Guarantee one current executor can authoritatively advance an effect.",
+      "files": [
+        "crates/effects/src/executor.rs",
+        "crates/kernel-store-sqlite/src/repos/effect_claims.rs"
+      ],
+      "tests": [
+        "100-worker single-current-claim test",
+        "stale executor acknowledge rejected",
+        "lease expiry/reclaim test",
+        "daemon fence change rejects old executor"
+      ],
+      "accept": [
+        "At most one fencing token can authoritatively progress an effect at a time."
+      ]
+    },
+    {
+      "id": "EFF-004",
+      "title": "Implement effect reconciliation and Unknown handling",
+      "phase": "effects",
+      "depends_on": [
+        "EFF-003",
+        "RUN-005"
+      ],
+      "goal": "Recover safely when dispatch outcome is ambiguous.",
+      "files": [
+        "crates/effects/src/reconcile.rs",
+        "crates/runtime/src/effect_recovery.rs"
+      ],
+      "tests": [
+        "reconcilable success after lost response",
+        "non-reconcilable => Unknown",
+        "explicit resolution audit test",
+        "never auto retry Unknown property test"
+      ],
+      "accept": [
+        "No ambiguous external effect is silently duplicated."
+      ]
+    },
+    {
+      "id": "RES-001",
+      "title": "Implement durable resource reservations and budget delegation",
+      "phase": "resources",
+      "depends_on": [
+        "CMD-001",
+        "RUN-001"
+      ],
+      "goal": "Persist reservations and enforce child budget subset constraints.",
+      "files": [
+        "crates/resources/src/lib.rs",
+        "crates/kernel-store-sqlite/src/repos/resources.rs"
+      ],
+      "tests": [
+        "over-delegation rejected",
+        "release/re-reserve test",
+        "concurrent children cannot exceed parent",
+        "unknown external allocation recovery test"
+      ],
+      "accept": [
+        "Budgets cannot be exceeded by racing child reservations."
+      ]
+    },
+    {
+      "id": "SCH-001",
+      "title": "Implement durable one-shot scheduler timers",
+      "phase": "scheduler",
+      "depends_on": [
+        "CMD-001",
+        "PST-003",
+        "FND-005"
+      ],
+      "goal": "Provide crash-safe timers with linearized fire/cancel semantics.",
+      "files": [
+        "crates/scheduler/src/lib.rs",
+        "crates/kernel-store-sqlite/src/repos/timers.rs",
+        "crates/agentd/src/workers/scheduler.rs"
+      ],
+      "tests": [
+        "fire/cancel race exactly one winner",
+        "restart after claim recovers safely",
+        "double-fire prevention"
+      ],
+      "accept": [
+        "Timer worker never mutates run state directly."
+      ]
+    },
+    {
+      "id": "SEC-001",
+      "title": "Implement principals, actors, delegation chains, and grant lineage",
+      "phase": "security",
+      "depends_on": [
+        "FND-003",
+        "PST-003"
+      ],
+      "goal": "Create persisted authority lineage used by every privileged call.",
+      "files": [
+        "crates/identity/src/lib.rs",
+        "crates/identity/src/delegation.rs",
+        "crates/kernel-store-sqlite/src/repos/security.rs"
+      ],
+      "tests": [
+        "subset delegation tests",
+        "tampered/missing parent grant tests",
+        "serialization/persistence tests"
+      ],
+      "accept": [
+        "A child cannot construct an authority chain containing capabilities absent from ancestors."
+      ]
+    },
+    {
+      "id": "SEC-002",
+      "title": "Implement capability and permission engine",
+      "phase": "security",
+      "depends_on": [
+        "SEC-001",
+        "FND-004"
+      ],
+      "goal": "Centralize authorization decisions including joint secret+egress evaluation.",
+      "files": [
+        "crates/permissions/src/lib.rs",
+        "crates/permissions/src/capabilities.rs",
+        "crates/permissions/src/policy.rs"
+      ],
+      "tests": [
+        "capability subset tests",
+        "path/domain scope tests",
+        "confused deputy scenario",
+        "secret+egress requires approval test"
+      ],
+      "accept": [
+        "Every privileged coordinator/service can call one permission API with execution context."
+      ]
+    },
+    {
+      "id": "SEC-003",
+      "title": "Implement immutable approval request/response flow",
+      "phase": "security",
+      "depends_on": [
+        "SEC-002",
+        "CMD-001"
+      ],
+      "goal": "Persist approval requests whose authorization cannot be replayed against changed content.",
+      "files": [
+        "crates/approvals/src/lib.rs",
+        "crates/kernel-store-sqlite/src/repos/approvals.rs"
+      ],
+      "tests": [
+        "digest mismatch rejected",
+        "expired request rejected",
+        "double response rejected",
+        "changed bundle/config digest invalidates prior approval"
+      ],
+      "accept": [
+        "Approval is never represented internally as only `bool approved`."
+      ]
+    },
+    {
+      "id": "SEC-004",
+      "title": "Implement Secrets Broker and macOS Keychain store",
+      "phase": "security",
+      "depends_on": [
+        "SEC-002",
+        "SEC-003",
+        "FND-006"
+      ],
+      "goal": "Provide safe secret mediation for trusted local adapters without global environment leakage.",
+      "files": [
+        "crates/secrets/src/lib.rs",
+        "crates/secrets/src/broker.rs",
+        "crates/secrets/src/keychain.rs"
+      ],
+      "tests": [
+        "keychain integration test guarded for macOS/test keychain",
+        "secret redaction test",
+        "unauthorized secret denied",
+        "joint egress policy test"
+      ],
+      "accept": [
+        "External adapter environment contains only explicitly injected scoped secret material."
+      ]
+    },
+    {
+      "id": "ADP-001",
+      "title": "Implement supervised external process lifecycle and private socketpair IPC",
+      "phase": "adapters",
+      "depends_on": [
+        "PST-004",
+        "FND-006"
+      ],
+      "goal": "Create the secure process-launch substrate for external loops/adapters.",
+      "files": [
+        "crates/process-supervisor/src/lib.rs",
+        "crates/process-supervisor/src/spawn.rs",
+        "crates/process-supervisor/src/child.rs"
+      ],
+      "tests": [
+        "private IPC works",
+        "unrelated local process cannot race a listener because none exists",
+        "child crash captured",
+        "descendant cleanup fixture"
+      ],
+      "accept": [
+        "Do not expose a well-known unauthenticated adapter socket."
+      ]
+    },
+    {
+      "id": "ADP-002",
+      "title": "Implement framed protobuf external adapter protocol",
+      "phase": "adapters",
+      "depends_on": [
+        "ADP-001",
+        "FND-002"
+      ],
+      "goal": "Implement bootstrap/hello identity validation and request/response/cancel/health framing.",
+      "files": [
+        "crates/adapter-protocol/src/lib.rs",
+        "crates/adapter-protocol/src/framing.rs",
+        "crates/adapter-protocol/src/handshake.rs"
+      ],
+      "tests": [
+        "wrong digest handshake fails",
+        "wrong instance/nonce/protocol fails",
+        "oversized frame rejected",
+        "cancel frame delivered",
+        "deadline closes request"
+      ],
+      "accept": [
+        "Adapter self-assertion cannot override supervisor expected identity."
+      ]
+    },
+    {
+      "id": "ADP-003",
+      "title": "Implement content-addressed adapter registry",
+      "phase": "adapters",
+      "depends_on": [
+        "ADP-002",
+        "PST-003"
+      ],
+      "goal": "Register immutable adapter identities and persist trust/conformance metadata.",
+      "files": [
+        "crates/adapter-registry/src/registry.rs",
+        "crates/adapter-registry/src/manifest.rs"
+      ],
+      "tests": [
+        "mutating bundle changes digest",
+        "same name/version different digest treated as different identity",
+        "spawn-time digest mismatch rejected"
+      ],
+      "accept": [
+        "Name/version alone never authorizes execution."
+      ]
+    },
+    {
+      "id": "ADP-004",
+      "title": "Implement port capability negotiation and deterministic resolver",
+      "phase": "adapters",
+      "depends_on": [
+        "ADP-003"
+      ],
+      "goal": "Resolve requested port semantics against installed adapters without vendor-name branching.",
+      "files": [
+        "crates/adapter-registry/src/capabilities.rs",
+        "crates/adapter-registry/src/resolver.rs"
+      ],
+      "tests": [
+        "capability match/miss tests",
+        "deterministic tie-break test",
+        "sandbox T2 fail-closed test",
+        "port version mismatch"
+      ],
+      "accept": [
+        "Resolver returns immutable adapter identity + negotiated capability document."
+      ]
+    },
+    {
+      "id": "ADP-005",
+      "title": "Build fixture external effect adapter",
+      "phase": "adapters",
+      "depends_on": [
+        "ADP-004",
+        "EFF-004"
+      ],
+      "goal": "Provide a real external process used to prove protocol, effect idempotency, status lookup, crashes, and fencing.",
+      "files": [
+        "fixtures/effect-adapter/**"
+      ],
+      "tests": [
+        "normal execution",
+        "duplicate operation ID idempotency",
+        "crash-after-side-effect then status reconciliation",
+        "wrong handshake digest"
+      ],
+      "accept": [
+        "Fixture can demonstrate the exact ambiguity the Effect Coordinator is designed to solve."
+      ]
+    },
+    {
+      "id": "WRK-001",
+      "title": "Implement logical Resource URI parser/resolver",
+      "phase": "workspace",
+      "depends_on": [
+        "FND-003",
+        "SEC-002"
+      ],
+      "goal": "Provide typed logical resource references and capability-checked resolver dispatch.",
+      "files": [
+        "crates/resource-uri/src/lib.rs",
+        "crates/resource-uri/src/parser.rs",
+        "crates/resource-uri/src/resolver.rs"
+      ],
+      "tests": [
+        "URI property tests",
+        "path traversal corpus",
+        "wrong scheme/type test",
+        "permission-denied resolution"
+      ],
+      "accept": [
+        "No internal domain record needs an absolute workspace/artifact path."
+      ]
+    },
+    {
+      "id": "WRK-002",
+      "title": "Implement local workspace adapter and Git worktree primitives",
+      "phase": "workspace",
+      "depends_on": [
+        "WRK-001",
+        "ADP-004"
+      ],
+      "goal": "Create local mutable workspaces with reproducible base revision and isolated fork capability.",
+      "files": [
+        "crates/workspace/src/local.rs",
+        "crates/workspace/src/git.rs"
+      ],
+      "tests": [
+        "create/read/write/list",
+        "Git fork starts at parent base revision",
+        "non-Git fork capability label",
+        "path traversal denied"
+      ],
+      "accept": [
+        "Adapter reports actual capabilities; it does not pretend copy fork is Git-semantic."
+      ]
+    },
+    {
+      "id": "WRK-003",
+      "title": "Implement Workspace Coordinator leases, transfer, fork, and merge",
+      "phase": "workspace",
+      "depends_on": [
+        "WRK-002",
+        "RUN-004",
+        "SEC-002"
+      ],
+      "goal": "Coordinate write authority so subagents can receive useful parent scope without unsafe concurrent mutation.",
+      "files": [
+        "crates/workspace/src/coordinator.rs",
+        "crates/kernel-store-sqlite/src/repos/workspace_leases.rs"
+      ],
+      "tests": [
+        "exclusive transfer stale token rejected",
+        "two active exclusive leases impossible",
+        "parallel forks independent",
+        "merge success and conflict tests",
+        "shared mode rejected by local adapter"
+      ],
+      "accept": [
+        "Parent can delegate useful exclusive/forked scope while authority never amplifies."
+      ]
+    },
+    {
+      "id": "SBOX-001",
+      "title": "Implement Sandbox Manager and T0 trusted local-process adapter",
+      "phase": "sandbox",
+      "depends_on": [
+        "ADP-004",
+        "WRK-003",
+        "SEC-004"
+      ],
+      "goal": "Provide trusted local execution plus strict tier resolution semantics.",
+      "files": [
+        "crates/sandbox/src/manager.rs",
+        "crates/sandbox/src/local_process.rs"
+      ],
+      "tests": [
+        "T0 command execution",
+        "deadline/cancel",
+        "env allowlist",
+        "T2 fail-closed",
+        "revoked workspace lease prevents coordinator-mediated exec/write path"
+      ],
+      "accept": [
+        "Documentation/API reports T0 is not a security boundary."
+      ]
+    },
+    {
+      "id": "ART-001",
+      "title": "Implement local ArtifactStore and metadata",
+      "phase": "artifacts",
+      "depends_on": [
+        "WRK-001",
+        "PST-003"
+      ],
+      "goal": "Persist durable outputs by logical artifact URI with digest/classification metadata.",
+      "files": [
+        "crates/artifacts/src/lib.rs",
+        "crates/artifacts/src/local.rs"
+      ],
+      "tests": [
+        "put/get digest test",
+        "atomic write failure leaves no partial visible artifact",
+        "logical URI no physical path leak"
+      ],
+      "accept": [
+        "Agent-facing APIs only return artifact URIs/metadata."
+      ]
+    },
+    {
+      "id": "CFG-001",
+      "title": "Implement inception config parser and schema validation",
+      "phase": "config",
+      "depends_on": [
+        "ADP-004",
+        "ADP-006",
+        "FND-002",
+        "QUE-001"
+      ],
+      "goal": "Load one internally consistent version-1 config model with explicit binding scopes.",
+      "files": [
+        "crates/config-engine/src/schema.rs",
+        "crates/config-engine/src/model.rs",
+        "config/default.yaml"
+      ],
+      "tests": [
+        "valid default config",
+        "version 2 rejected",
+        "profile cycle test",
+        "unknown sensitive field rejected"
+      ],
+      "accept": [
+        "KernelStore selection cannot be changed through runtime profile."
+      ]
+    },
+    {
+      "id": "CFG-002",
+      "title": "Implement immutable config generations and tested activation",
+      "phase": "config",
+      "depends_on": [
+        "CFG-001",
+        "CMD-001"
+      ],
+      "goal": "Persist proposed generations and activate only validated/tested immutable documents.",
+      "files": [
+        "crates/config-engine/src/generations.rs",
+        "crates/config-engine/src/activate.rs"
+      ],
+      "tests": [
+        "untested generation cannot activate",
+        "CAS race one winner",
+        "failed smoke leaves pointer unchanged",
+        "reactivation test",
+        "generation-global service change returns DAEMON_RESTART_REQUIRED and does not move pointer"
+      ],
+      "accept": [
+        "Existing run records are never rewritten on activation."
+      ]
+    },
+    {
+      "id": "CFG-003",
+      "title": "Implement runtime profile resolution and frozen ResolvedRunEnvironment",
+      "phase": "config",
+      "depends_on": [
+        "CFG-002",
+        "WRK-003",
+        "SBOX-001",
+        "ART-001"
+      ],
+      "goal": "Resolve exact run-scoped dependencies once and persist them immutably before a run executes.",
+      "files": [
+        "crates/config-engine/src/profile.rs",
+        "crates/runtime/src/resolved_environment.rs"
+      ],
+      "tests": [
+        "Run A under G1, activate G2, A still returns G1 bindings",
+        "DB update attempt rejected by repository API/constraint policy",
+        "missing required adapter fails run start before execution"
+      ],
+      "accept": [
+        "Historical audit needs no mutable current registry/config to know original bindings."
+      ]
+    },
+    {
+      "id": "LOOP-001",
+      "title": "Build fixture external AgentLoop process",
+      "phase": "loop",
+      "depends_on": [
+        "ADP-004",
+        "RUN-001"
+      ],
+      "goal": "Provide a deterministic external loop fixture that can emit Complete, SpawnAgent, Wait, and InvokeEffect decisions.",
+      "files": [
+        "fixtures/agent-loop/**"
+      ],
+      "tests": [
+        "normal complete decision",
+        "spawn child decision",
+        "effect decision",
+        "delayed decision fixture",
+        "bundle digest validation"
+      ],
+      "accept": [
+        "Fixture never directly spawns processes or performs privileged side effects."
+      ]
+    },
+    {
+      "id": "LOOP-002",
+      "title": "Implement loop turn supervisor and fenced decision acceptance",
+      "phase": "loop",
+      "depends_on": [
+        "LOOP-001",
+        "RUN-005",
+        "EFF-002",
+        "RUN-004"
+      ],
+      "goal": "Issue turns to resolved loop process and atomically accept only current decisions.",
+      "files": [
+        "crates/runtime/src/loop_turn.rs",
+        "crates/runtime/src/decision.rs",
+        "crates/agentd/src/workers/loops.rs"
+      ],
+      "tests": [
+        "stale revision/epoch/step/cursor each rejected",
+        "duplicate decision does not duplicate effect/child",
+        "loop crash increments/recovery behavior"
+      ],
+      "accept": [
+        "Delayed response from old epoch can never affect current run."
+      ]
+    },
+    {
+      "id": "API-001",
+      "title": "Implement local gRPC server over Unix-domain socket",
+      "phase": "api",
+      "depends_on": [
+        "PST-004",
+        "FND-006",
+        "FND-002"
+      ],
+      "goal": "Expose the base control plane locally without bypassing internal command semantics.",
+      "files": [
+        "crates/control-api/src/server.rs",
+        "crates/control-api/src/uds.rs",
+        "crates/agentd/src/api.rs"
+      ],
+      "tests": [
+        "socket permission test",
+        "second daemon cannot steal socket",
+        "graceful shutdown test",
+        "client connection smoke test"
+      ],
+      "accept": [
+        "Handlers cannot receive raw KernelStore handle."
+      ]
+    },
+    {
+      "id": "API-002",
+      "title": "Implement command/query Control API methods",
+      "phase": "api",
+      "depends_on": [
+        "API-001",
+        "CMD-001",
+        "CFG-003",
+        "EFF-004",
+        "SEC-003"
+      ],
+      "goal": "Expose typed base commands and read queries needed to drive the MVP.",
+      "files": [
+        "crates/control-api/src/control_service.rs",
+        "proto/control/**"
+      ],
+      "tests": [
+        "API idempotency replay test",
+        "query not found mapping",
+        "approval digest mismatch over API",
+        "health reports fencing/config/outbox status"
+      ],
+      "accept": [
+        "No public state-changing method performs direct repository mutation."
+      ]
+    },
+    {
+      "id": "API-003",
+      "title": "Implement Event API read and live subscription",
+      "phase": "api",
+      "depends_on": [
+        "API-001",
+        "EVT-004",
+        "EVT-002"
+      ],
+      "goal": "Expose durable history and journal-backed resumable live subscriptions.",
+      "files": [
+        "crates/control-api/src/event_service.rs",
+        "proto/events/**"
+      ],
+      "tests": [
+        "replay-then-live no-gap test",
+        "subscriber lag/resume test",
+        "journal unavailable behavior"
+      ],
+      "accept": [
+        "Client never gets a durable cursor that journal cannot serve."
+      ]
+    },
+    {
+      "id": "API-004",
+      "title": "Build local control CLI",
+      "phase": "api",
+      "depends_on": [
+        "API-002",
+        "API-003"
+      ],
+      "goal": "Provide a deterministic operator/developer client used by integration tests and manual inspection.",
+      "files": [
+        "crates/agentctl/src/main.rs"
+      ],
+      "tests": [
+        "CLI smoke tests against temp daemon",
+        "JSON output parse tests"
+      ],
+      "accept": [
+        "Integration tests can drive the full system without internal test-only DB mutation."
+      ]
+    },
+    {
+      "id": "INT-001",
+      "title": "Compose agentd startup/shutdown and basic end-to-end run",
+      "phase": "integration",
+      "depends_on": [
+        "API-004",
+        "LOOP-002",
+        "SCH-001",
+        "RES-001"
+      ],
+      "goal": "Wire the composition root and prove a simple fixture run reaches terminal state through real processes/DB/API.",
+      "files": [
+        "crates/agentd/src/main.rs",
+        "crates/agentd/src/bootstrap.rs",
+        "tests/e2e_basic.rs"
+      ],
+      "tests": [
+        "full process-level e2e basic test",
+        "restart after completed run retains audit data",
+        "shutdown while idle"
+      ],
+      "accept": [
+        "No fixture test reaches into DB to force normal runtime progress."
+      ]
+    },
+    {
+      "id": "INT-002",
+      "title": "Verify hierarchical children and workspace delegation end-to-end",
+      "phase": "integration",
+      "depends_on": [
+        "INT-001",
+        "WRK-003"
+      ],
+      "goal": "Prove parent/child RunGraph and workspace authority semantics with fixture loops.",
+      "files": [
+        "tests/e2e_children_workspace.rs"
+      ],
+      "tests": [
+        "parallel fork/merge e2e",
+        "exclusive transfer e2e",
+        "cancel/spawn race e2e"
+      ],
+      "accept": [
+        "Parallel children remain useful because forks inherit exact parent scope/base."
+      ]
+    },
+    {
+      "id": "INT-003",
+      "title": "Verify effect crash/restart and reconciliation end-to-end",
+      "phase": "integration",
+      "depends_on": [
+        "INT-001",
+        "ADP-005"
+      ],
+      "goal": "Prove the hardest external-side-effect failure paths with real daemon restart and fixture adapter.",
+      "files": [
+        "tests/e2e_effect_recovery.rs"
+      ],
+      "tests": [
+        "all described process-level scenarios"
+      ],
+      "accept": [
+        "No test permits automatic duplicate mutation after ambiguous dispatch."
+      ]
+    },
+    {
+      "id": "INT-004",
+      "title": "Run concurrency and property invariant suite",
+      "phase": "integration",
+      "depends_on": [
+        "RUN-004",
+        "EFF-004",
+        "RES-001",
+        "SCH-001",
+        "WRK-003",
+        "CFG-002"
+      ],
+      "goal": "Stress every kernel linearization point under randomized/concurrent schedules.",
+      "files": [
+        "tests/concurrency/*.rs",
+        "tests/property/*.rs"
+      ],
+      "tests": [
+        "cargo test --test concurrency",
+        "cargo test --test property"
+      ],
+      "accept": [
+        "No graph cycle, double effect commit, double timer winner, budget amplification, capability amplification, or double exclusive lease can be produced."
+      ]
+    },
+    {
+      "id": "INT-005",
+      "title": "Run security and protocol invariant suite",
+      "phase": "integration",
+      "depends_on": [
+        "SEC-004",
+        "SBOX-001",
+        "ADP-005",
+        "API-003"
+      ],
+      "goal": "Prove the MVP fails closed at its stated security boundaries.",
+      "files": [
+        "tests/security/*.rs"
+      ],
+      "tests": [
+        "full security integration suite"
+      ],
+      "accept": [
+        "Every security claim made by MVP docs has an executable test or is explicitly labeled non-boundary (T0)."
+      ]
+    },
+    {
+      "id": "REL-001",
+      "title": "Implement automated MVP release gate",
+      "phase": "release",
+      "depends_on": [
+        "INT-002",
+        "INT-003",
+        "INT-004",
+        "INT-005"
+      ],
+      "goal": "Create one command that proves the microkernel/base-control-plane MVP satisfies all exit criteria.",
+      "files": [
+        "scripts/release_gate.sh",
+        "docs/verification-report-template.md"
+      ],
+      "tests": [
+        "execute release gate on clean checkout"
+      ],
+      "accept": [
+        "All criteria in MVP_EXIT_CRITERIA.md are linked to passing test names/evidence.",
+        "No skipped required test is reported as pass."
+      ]
+    },
+    {
+      "id": "QUE-001",
+      "title": "Implement MessageQueuePort and in-memory generation-global adapter",
+      "phase": "queue",
+      "depends_on": [
+        "FND-002",
+        "FND-003"
+      ],
+      "goal": "Provide the inception queue contract and a non-durable in-memory adapter for internal/MVP uses without making the queue authoritative for run correctness.",
+      "files": [
+        "crates/message-queue/src/lib.rs",
+        "crates/message-queue/src/in_memory.rs"
+      ],
+      "tests": [
+        "publish/consume/ack/nack tests",
+        "bounded backpressure test",
+        "adapter reports durable=false/replay=false"
+      ],
+      "accept": [
+        "Queue payload identity is stable and duplicate message IDs are handled deterministically according to the adapter contract.",
+        "No canonical runtime mutation depends solely on queue delivery.",
+        "Adapter capability document truthfully reports in-memory limitations."
+      ]
+    },
+    {
+      "id": "ADP-006",
+      "title": "Implement adapter conformance harness and activation gate",
+      "phase": "adapters",
+      "depends_on": [
+        "ADP-005"
+      ],
+      "goal": "Run machine-readable port/capability tests before an external adapter can become eligible for profile/config resolution.",
+      "files": [
+        "crates/adapter-registry/src/conformance.rs",
+        "crates/testkit/src/conformance.rs",
+        "tests/adapter_conformance.rs"
+      ],
+      "tests": [
+        "fixture adapter conformance pass",
+        "lying capability declaration fails",
+        "protocol cancellation/deadline conformance",
+        "bundle digest mutation invalidates prior report"
+      ],
+      "accept": [
+        "Conformance report is bound to exact adapter ID/version/bundle digest.",
+        "Resolver can require a passing conformance state.",
+        "An adapter cannot advertise a stronger capability merely by editing its manifest after testing."
+      ]
+    }
+  ]
+}

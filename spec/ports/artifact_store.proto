@@ -1,0 +1,6 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service ArtifactStorePort { rpc Put(ArtifactPutRequest) returns (ArtifactResult); rpc Get(ArtifactRefRequest) returns (GenericResult); rpc Head(ArtifactRefRequest) returns (GenericResult); rpc List(ArtifactListRequest) returns (GenericResult); rpc Delete(ArtifactRefRequest) returns (GenericResult); }
+message ArtifactPutRequest { ExecutionContext context=1; string logical_name=2; bytes data=3; bytes metadata_json=4; }
+message ArtifactResult { string artifact_uri=1; string version=2; }
+message ArtifactRefRequest { ExecutionContext context=1; string artifact_uri=2; }
+message ArtifactListRequest { ExecutionContext context=1; bytes query_json=2; }

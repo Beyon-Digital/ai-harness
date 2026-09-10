@@ -1,0 +1,5 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service ContextPort { rpc Build(ContextBuildRequest) returns (ContextResult); rpc Stream(ContextBuildRequest) returns (stream ContextChunk); }
+message ContextBuildRequest { ExecutionContext context=1; uint64 token_budget=2; repeated string source_uris=3; bytes request_json=4; }
+message ContextResult { bytes bundle_json=1; }
+message ContextChunk { uint64 sequence=1; bytes chunk_json=2; bool terminal=3; }

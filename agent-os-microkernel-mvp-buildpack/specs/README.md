@@ -1,0 +1,38 @@
+> **Navigation:** [Home](../README.md) · [Plan](../PLAN.md) · [DAG](../DAG.md) · [Architecture](../architecture/README.md) · [Specs](../specs/README.md) · [Testing](../testing/README.md)
+
+
+# Implementation Specifications
+
+These specifications translate the canonical inception architecture into concrete MVP behavior.
+
+- [Types and IDs](types-and-ids.md)
+- [AgentSpec, Session, Task, Run creation](agent-task-session.md)
+- [Error model](error-model.md)
+- [KernelStore](kernel-store.md)
+- [Initial SQLite schema](kernel-store-schema.sql)
+- [Command Coordinator](command-coordinator.md)
+- [Kernel command catalog](command-catalog.md)
+- [Critical transaction recipes](transaction-recipes.md)
+- [Event pipeline](event-pipeline.md)
+- [MVP event catalog](event-catalog.md)
+- [Runtime Manager](runtime-manager.md)
+- [RunGraph](run-graph.md)
+- [Effect Coordinator](effect-coordinator.md)
+- [Resources](resources.md)
+- [Scheduler](scheduler.md)
+- [Identity/delegation](identity-delegation.md)
+- [Permissions](permissions.md)
+- [Approvals](approvals.md)
+- [Secrets Broker](secrets.md)
+- [Process Supervisor](process-supervisor.md)
+- [Adapter Registry/protocol](adapter-registry.md)
+- [Resource URIs](resource-uri.md)
+- [Workspace](workspace.md)
+- [Sandbox](sandbox.md)
+- [Artifacts](artifacts.md)
+- [Config Engine](config-engine.md)
+- [Resolved run environment](resolved-run-environment.md)
+- [Control API](control-api.md)
+- [Observability](observability.md)
+- [Startup/shutdown/recovery](lifecycle.md)
+- [Recovery decision table](recovery-table.md)

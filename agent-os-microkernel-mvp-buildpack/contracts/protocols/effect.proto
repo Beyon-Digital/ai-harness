@@ -1,0 +1,5 @@
+syntax="proto3"; package agentos.spec.v1;
+message EffectExecutionRequest { string effect_id=1; string operation_id=2; string request_hash=3; uint64 fencing_token=4; bytes payload=5; }
+message EffectExecutionResponse { string effect_id=1; string status=2; string result_ref=3; string provider_operation_ref=4; string error_code=5; }
+message EffectStatusRequest { string effect_id=1; string operation_id=2; string provider_operation_ref=3; }
+message EffectStatusResponse { string status=1; string result_ref=2; string error_code=3; }

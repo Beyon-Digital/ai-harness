@@ -1,0 +1,24 @@
+syntax = "proto3";
+package agentos.spec.v1;
+
+enum EffectClass { EFFECT_CLASS_UNSPECIFIED=0; READ_ONLY=1; LOCAL_MUTATION=2; EXTERNAL_MUTATION=3; OPAQUE=4; }
+enum IdempotencySemantics { IDEMPOTENCY_UNSPECIFIED=0; NATURALLY_IDEMPOTENT=1; IDEMPOTENCY_KEY_SUPPORTED=2; NOT_IDEMPOTENT=3; UNKNOWN_IDEMPOTENCY=4; }
+enum ReconciliationSemantics { RECONCILIATION_UNSPECIFIED=0; STATUS_LOOKUP=1; RESULT_LOOKUP=2; DETERMINISTIC_INSPECTION=3; IMPOSSIBLE=4; UNKNOWN_RECONCILIATION=5; }
+enum EffectState { EFFECT_STATE_UNSPECIFIED=0; PREPARED=1; CLAIMED=2; DISPATCHED=3; ACKNOWLEDGED=4; COMMITTED=5; FAILED=6; CANCELLED=7; UNKNOWN=8; }
+
+message EffectContract {
+  EffectClass effect_class = 1; IdempotencySemantics idempotency = 2; ReconciliationSemantics reconciliation = 3;
+  string cancellation_semantics = 4; string compensation_capability = 5;
+}
+message EffectRecord {
+  string effect_id = 1; string run_id = 2; uint64 step_sequence = 3; string decision_id = 4;
+  string operation = 5; string request_hash = 6; EffectContract effective_contract = 7;
+  string adapter_id = 8; string adapter_version = 9; string adapter_digest = 10;
+  EffectState state = 11; string executor_id = 12; uint64 executor_fencing_token = 13;
+  int64 lease_expires_unix_ms = 14; string result_ref = 15; string error_code = 16;
+}
+
+message ResourceReservation {
+  string reservation_id = 1; string run_id = 2; string resource_type = 3; string state = 4;
+  int64 amount = 5; string unit = 6; uint64 fencing_token = 7;
+}

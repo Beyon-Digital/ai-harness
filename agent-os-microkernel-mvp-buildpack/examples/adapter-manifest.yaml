@@ -1,0 +1,17 @@
+manifest_version: 1
+id: fixture-effect-adapter
+version: "1.0.0"
+kind: adapter
+runtime:
+  type: process
+  language: rust
+  entrypoint: bin/fixture-effect-adapter
+implements:
+  - fixture-effect@1
+requested_capabilities: {}
+effect_claims:
+  fixture.increment_counter:
+    effect_class: external_mutation
+    idempotency: idempotency_key_supported
+    reconciliation: status_lookup
+dependency_lock: bundle.lock

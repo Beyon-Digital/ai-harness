@@ -1,0 +1,45 @@
+version: 1
+sandbox:
+  required_for_t2:
+  - host_fs_default_deny
+  - network_default_deny
+  - host_socket_deny
+  - process_tree_containment
+  - cpu_limit
+  - memory_limit
+  - pid_limit
+  - disk_quota
+  - wall_clock_limit
+  - descendant_cleanup
+  optional:
+  - checkpoint
+  - restore
+  - suspend_resume
+  - gpu
+workspace:
+  optional:
+  - git
+  - snapshot
+  - atomic_rename
+  - locking
+  - version_checks
+  - conflict_detection
+  - shared_coordinated_write
+  - enforced_write_lease
+message_queue:
+  optional:
+  - durable
+  - strict_ordering
+  - replay
+  - delayed_delivery
+  - consumer_groups
+  - dead_letter
+model:
+  optional:
+  - streaming
+  - tools
+  - structured_output
+  - reasoning_controls
+  - multimodal
+  - status_lookup
+  - provider_idempotency

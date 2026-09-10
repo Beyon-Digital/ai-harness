@@ -1,0 +1,23 @@
+effect:
+  operation: fixture.increment_counter
+  request:
+    counter: demo
+    delta: 1
+  expected_effective_contract:
+    effect_class: EXTERNAL_MUTATION
+    idempotency: IDEMPOTENCY_KEY_SUPPORTED
+    reconciliation: STATUS_LOOKUP
+
+expected_lifecycle:
+  - PREPARED
+  - CLAIMED
+  - DISPATCHED
+  - ACKNOWLEDGED
+  - COMMITTED
+
+crash_variant:
+  crash_after_external_side_effect_before_ack: true
+  expected_after_restart:
+    - reconcile_same_operation_id
+    - no_second_counter_increment
+    - COMMITTED

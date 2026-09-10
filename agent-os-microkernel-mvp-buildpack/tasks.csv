@@ -1,0 +1,60 @@
+id,phase,title,depends_on
+FND-001,foundation,Bootstrap Rust workspace and quality gates,
+FND-002,foundation,Install canonical contract snapshot and protobuf generation,FND-001
+FND-003,foundation,"Implement domain IDs, core enums, and immutable value types",FND-002
+FND-004,foundation,Implement stable error model,FND-001
+FND-005,foundation,Build deterministic testkit and fault-injection hooks,FND-001 FND-003
+FND-006,foundation,Initialize classified tracing and metrics substrate,FND-001 FND-003 FND-004
+PST-001,persistence,Create inception SQLite KernelStore schema,FND-003 FND-004
+PST-002,persistence,Define KernelStore transaction interfaces,FND-003 FND-004
+PST-003,persistence,Implement SQLite KernelStore transactions and repositories,PST-001 PST-002 FND-005
+PST-004,persistence,Implement OS daemon lock and durable fencing epoch,PST-003 FND-005
+PST-005,persistence,Implement idempotency and transactional outbox primitives,PST-003 PST-004
+CMD-001,control-core,Implement Command Coordinator linearization path,PST-005 FND-006
+EVT-001,events,"Implement event envelopes, stream keys, cursors, and sequence helpers",FND-003 PST-005
+EVT-002,events,Implement EventJournalPort and SQLite Event Journal,EVT-001 FND-004
+EVT-003,events,Implement outbox dispatcher with journal-first publication,EVT-002 PST-005 FND-005
+EVT-004,events,Implement durable Live Event Bus and lag semantics,EVT-003
+RUN-000,runtime,"Implement AgentSpec, Session, Task, and initial AgentRun commands",CMD-001 PST-003
+RUN-001,runtime,Implement AgentRun state machine and revision rules,CMD-001 FND-003 RUN-000
+RUN-002,runtime,Implement transactional RunGraph edge mutation and cycle prevention,RUN-001 PST-003
+RUN-003,runtime,Implement dependency satisfaction and atomic ready-run claiming,RUN-002
+RUN-004,runtime,Implement cancellation epochs and subtree cancellation,RUN-002 RUN-001
+RUN-005,runtime,Implement startup run reconstruction and recovery dispositions,RUN-003 RUN-004 PST-004
+EFF-001,effects,Implement effect contract model and conservative policy resolver,FND-003 FND-004
+EFF-002,effects,Implement EffectRecord transitions and preparation,EFF-001 CMD-001 RUN-001
+EFF-003,effects,Implement effect executor leases and fencing,EFF-002 PST-004
+EFF-004,effects,Implement effect reconciliation and Unknown handling,EFF-003 RUN-005
+RES-001,resources,Implement durable resource reservations and budget delegation,CMD-001 RUN-001
+SCH-001,scheduler,Implement durable one-shot scheduler timers,CMD-001 PST-003 FND-005
+SEC-001,security,"Implement principals, actors, delegation chains, and grant lineage",FND-003 PST-003
+SEC-002,security,Implement capability and permission engine,SEC-001 FND-004
+SEC-003,security,Implement immutable approval request/response flow,SEC-002 CMD-001
+SEC-004,security,Implement Secrets Broker and macOS Keychain store,SEC-002 SEC-003 FND-006
+ADP-001,adapters,Implement supervised external process lifecycle and private socketpair IPC,PST-004 FND-006
+ADP-002,adapters,Implement framed protobuf external adapter protocol,ADP-001 FND-002
+ADP-003,adapters,Implement content-addressed adapter registry,ADP-002 PST-003
+ADP-004,adapters,Implement port capability negotiation and deterministic resolver,ADP-003
+ADP-005,adapters,Build fixture external effect adapter,ADP-004 EFF-004
+WRK-001,workspace,Implement logical Resource URI parser/resolver,FND-003 SEC-002
+WRK-002,workspace,Implement local workspace adapter and Git worktree primitives,WRK-001 ADP-004
+WRK-003,workspace,"Implement Workspace Coordinator leases, transfer, fork, and merge",WRK-002 RUN-004 SEC-002
+SBOX-001,sandbox,Implement Sandbox Manager and T0 trusted local-process adapter,ADP-004 WRK-003 SEC-004
+ART-001,artifacts,Implement local ArtifactStore and metadata,WRK-001 PST-003
+CFG-001,config,Implement inception config parser and schema validation,ADP-004 ADP-006 FND-002 QUE-001
+CFG-002,config,Implement immutable config generations and tested activation,CFG-001 CMD-001
+CFG-003,config,Implement runtime profile resolution and frozen ResolvedRunEnvironment,CFG-002 WRK-003 SBOX-001 ART-001
+LOOP-001,loop,Build fixture external AgentLoop process,ADP-004 RUN-001
+LOOP-002,loop,Implement loop turn supervisor and fenced decision acceptance,LOOP-001 RUN-005 EFF-002 RUN-004
+API-001,api,Implement local gRPC server over Unix-domain socket,PST-004 FND-006 FND-002
+API-002,api,Implement command/query Control API methods,API-001 CMD-001 CFG-003 EFF-004 SEC-003
+API-003,api,Implement Event API read and live subscription,API-001 EVT-004 EVT-002
+API-004,api,Build local control CLI,API-002 API-003
+INT-001,integration,Compose agentd startup/shutdown and basic end-to-end run,API-004 LOOP-002 SCH-001 RES-001
+INT-002,integration,Verify hierarchical children and workspace delegation end-to-end,INT-001 WRK-003
+INT-003,integration,Verify effect crash/restart and reconciliation end-to-end,INT-001 ADP-005
+INT-004,integration,Run concurrency and property invariant suite,RUN-004 EFF-004 RES-001 SCH-001 WRK-003 CFG-002
+INT-005,integration,Run security and protocol invariant suite,SEC-004 SBOX-001 ADP-005 API-003
+REL-001,release,Implement automated MVP release gate,INT-002 INT-003 INT-004 INT-005
+QUE-001,queue,Implement MessageQueuePort and in-memory generation-global adapter,FND-002 FND-003
+ADP-006,adapters,Implement adapter conformance harness and activation gate,ADP-005

@@ -1,0 +1,37 @@
+syntax = "proto3";
+package agentos.spec.v1;
+
+import "protocols/external_adapter.proto";
+import "ports/common.proto";
+
+message PortCallRequest {
+  string call_id = 1;
+  string port_id = 2;
+  string operation = 3;
+  ExecutionContext context = 4;
+  bytes payload = 5;
+}
+
+message PortCallResponse {
+  string call_id = 1;
+  bytes payload = 2;
+  string error_code = 3;
+}
+
+message CancelCall { string call_id = 1; }
+message AdapterPing { string nonce = 1; }
+message AdapterPong { string nonce = 1; }
+message AdapterShutdown { string reason = 1; }
+
+message AdapterFrame {
+  oneof body {
+    AdapterBootstrap bootstrap = 1;
+    AdapterHello hello = 2;
+    PortCallRequest request = 3;
+    PortCallResponse response = 4;
+    CancelCall cancel = 5;
+    AdapterPing ping = 6;
+    AdapterPong pong = 7;
+    AdapterShutdown shutdown = 8;
+  }
+}

@@ -1,0 +1,11 @@
+syntax="proto3";
+package agentos.spec.v1;
+message ExecutionContext {
+  string call_id=1; string operation_id=2; string effect_id=3; string actor_id=4; string run_id=5;
+  string delegation_chain_ref=6; int64 deadline_unix_ms=7; uint64 fencing_token=8; repeated string capability_grant_ids=9;
+}
+message Empty {}
+message StatusRequest { ExecutionContext context=1; string provider_operation_ref=2; }
+message StatusResponse { string status=1; string result_ref=2; string error_code=3; }
+message CancelRequest { ExecutionContext context=1; string provider_operation_ref=2; }
+message GenericResult { bytes payload=1; string error_code=2; }

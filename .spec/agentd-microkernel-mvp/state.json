@@ -1,0 +1,9 @@
+{
+  "feature": "agentd-microkernel-mvp",
+  "phase": "implement",
+  "gates": {
+    "requirements": "2026-09-10T20:51:55Z",
+    "implement": "2026-09-10T21:40:25Z"
+  },
+  "created": "2026-09-10T18:15:14Z"
+}
