@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 domain.workspace = true
 errors.workspace = true
+kernel-store.workspace = true
