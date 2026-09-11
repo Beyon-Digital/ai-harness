@@ -17,6 +17,21 @@ impl fmt::Display for UnknownEnumValue {
 
 impl std::error::Error for UnknownEnumValue {}
 
+/// Error returned when a persisted state string has no matching variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownStateValue {
+    pub value: String,
+    pub enum_name: &'static str,
+}
+
+impl fmt::Display for UnknownStateValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown {} state {:?}", self.enum_name, self.value)
+    }
+}
+
+impl std::error::Error for UnknownStateValue {}
+
 macro_rules! mirror_enum {
     (
         $(#[$meta:meta])*
@@ -53,6 +68,65 @@ macro_rules! mirror_enum {
 }
 
 pub(crate) use mirror_enum;
+
+macro_rules! state_enum {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $enum_name:literal, {
+            $( $(#[$variant_meta:meta])* $variant:ident = $wire:literal => $text:literal ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[doc = ""]
+        #[doc = "The integer mapping (`from_wire`/`to_wire`) is **provisional** and must not be"]
+        #[doc = "used for persistence: the backing column is `TEXT` with a `CHECK` domain."]
+        #[doc = "Use [`as_str`](Self::as_str) and [`from_state_str`](Self::from_state_str) for"]
+        #[doc = "stored state; [`from_wire`](Self::from_wire) never guesses an unknown integer."]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+        }
+
+        impl $name {
+            /// Converts a provisional wire integer into the matching variant.
+            ///
+            /// A value that has no variant in this enum is rejected with
+            /// [`UnknownEnumValue`]; it is never mapped to a default.
+            pub fn from_wire(value: i32) -> Result<Self, UnknownEnumValue> {
+                match value {
+                    $( $wire => Ok(Self::$variant), )+
+                    _ => Err(UnknownEnumValue { value, enum_name: $enum_name }),
+                }
+            }
+
+            /// Returns the provisional wire integer for this variant.
+            ///
+            /// Not for persistence; use [`as_str`](Self::as_str) for the stored form.
+            pub fn to_wire(self) -> i32 {
+                match self {
+                    $( Self::$variant => $wire, )+
+                }
+            }
+
+            /// Returns the exact persisted state string (the schema `CHECK` literal).
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $( Self::$variant => $text, )+
+                }
+            }
+
+            /// Parses an exact persisted state string (the schema `CHECK` literal).
+            pub fn from_state_str(value: &str) -> Result<Self, UnknownStateValue> {
+                match value {
+                    $( $text => Ok(Self::$variant), )+
+                    _ => Err(UnknownStateValue { value: value.to_owned(), enum_name: $enum_name }),
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use state_enum;
 
 mirror_enum! {
     /// Lifecycle state of an agent run, mirroring `contract::RunState`.

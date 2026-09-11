@@ -14,6 +14,109 @@ use proptest::prelude::*;
 mod prop_enums {
     use super::*;
 
+    fn schema_check_literals(schema: &str, marker: &str) -> Vec<String> {
+        let start = schema
+            .find(marker)
+            .expect("schema CHECK marker must be present");
+        let rest = &schema[start..];
+        let open = rest.find('(').expect("CHECK clause must open a set");
+        let close = rest[open..]
+            .find("))")
+            .expect("CHECK clause must close a set");
+        rest[open + 1..open + close]
+            .split(',')
+            .map(|literal| literal.trim().trim_matches('\'').to_owned())
+            .collect()
+    }
+
+    macro_rules! assert_state_domain {
+        ($schema:expr, $ty:ty, $marker:literal, [$($variant:expr),+ $(,)?]) => {{
+            let expected = schema_check_literals($schema, $marker);
+            let variants = [$($variant),+];
+            let actual: Vec<&str> = variants.iter().map(|variant| variant.as_str()).collect();
+            assert_eq!(
+                actual, expected,
+                "{} strings must equal the schema CHECK set exactly",
+                stringify!($ty)
+            );
+            for (variant, text) in variants.iter().zip(expected.iter()) {
+                assert_eq!(&<$ty>::from_state_str(text).unwrap(), variant);
+            }
+            let error = <$ty>::from_state_str("__not_a_state__").unwrap_err();
+            assert_eq!(error.value, "__not_a_state__");
+            assert_eq!(error.enum_name, stringify!($ty));
+        }};
+    }
+
+    #[test]
+    fn state_strings_equal_the_schema_check_domains() {
+        let schema = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schema/kernel_store.sql"
+        ))
+        .expect("kernel store schema mirror must be readable");
+
+        assert_state_domain!(
+            &schema,
+            TrustState,
+            "trust_state IN (",
+            [TrustState::Trusted, TrustState::Untrusted]
+        );
+        assert_state_domain!(
+            &schema,
+            ConformanceState,
+            "conformance_state IN (",
+            [
+                ConformanceState::Untested,
+                ConformanceState::Passed,
+                ConformanceState::Failed
+            ]
+        );
+        assert_state_domain!(
+            &schema,
+            ApprovalState,
+            "state IN ('pending'",
+            [
+                ApprovalState::Pending,
+                ApprovalState::Approved,
+                ApprovalState::Denied,
+                ApprovalState::Expired
+            ]
+        );
+        assert_state_domain!(
+            &schema,
+            LeaseEnforcementState,
+            "enforcement_state IN (",
+            [
+                LeaseEnforcementState::Active,
+                LeaseEnforcementState::Revoked
+            ]
+        );
+        assert_state_domain!(
+            &schema,
+            TimerState,
+            "state IN ('scheduled'",
+            [
+                TimerState::Scheduled,
+                TimerState::Claimed,
+                TimerState::Fired,
+                TimerState::Cancelled
+            ]
+        );
+        assert_state_domain!(
+            &schema,
+            ReservationState,
+            "state IN ('reserved'",
+            [
+                ReservationState::Reserved,
+                ReservationState::Allocated,
+                ReservationState::Released,
+                ReservationState::Expired,
+                ReservationState::Unknown
+            ]
+        );
+    }
+
     macro_rules! wire_round_trip_prop {
         ($fn_name:ident, $mirror:ty) => {
             proptest! {
@@ -126,16 +229,13 @@ mod prop_enums {
         assert_eq!(RetentionClass::Audit.to_wire(), 3);
         assert_eq!(RetentionClass::Durable.to_wire(), 4);
 
-        assert_eq!(TrustState::Unspecified.to_wire(), 0);
         assert_eq!(TrustState::Trusted.to_wire(), 1);
         assert_eq!(TrustState::Untrusted.to_wire(), 2);
 
-        assert_eq!(ConformanceState::Unspecified.to_wire(), 0);
         assert_eq!(ConformanceState::Untested.to_wire(), 1);
         assert_eq!(ConformanceState::Passed.to_wire(), 2);
         assert_eq!(ConformanceState::Failed.to_wire(), 3);
 
-        assert_eq!(ApprovalState::Unspecified.to_wire(), 0);
         assert_eq!(ApprovalState::Pending.to_wire(), 1);
         assert_eq!(ApprovalState::Approved.to_wire(), 2);
         assert_eq!(ApprovalState::Denied.to_wire(), 3);
@@ -147,17 +247,14 @@ mod prop_enums {
         assert_eq!(WorkspaceAccessMode::IsolatedFork.to_wire(), 3);
         assert_eq!(WorkspaceAccessMode::SharedCoordinatedWrite.to_wire(), 4);
 
-        assert_eq!(LeaseEnforcementState::Unspecified.to_wire(), 0);
         assert_eq!(LeaseEnforcementState::Active.to_wire(), 1);
         assert_eq!(LeaseEnforcementState::Revoked.to_wire(), 2);
 
-        assert_eq!(TimerState::Unspecified.to_wire(), 0);
         assert_eq!(TimerState::Scheduled.to_wire(), 1);
         assert_eq!(TimerState::Claimed.to_wire(), 2);
         assert_eq!(TimerState::Fired.to_wire(), 3);
         assert_eq!(TimerState::Cancelled.to_wire(), 4);
 
-        assert_eq!(ReservationState::Unspecified.to_wire(), 0);
         assert_eq!(ReservationState::Reserved.to_wire(), 1);
         assert_eq!(ReservationState::Allocated.to_wire(), 2);
         assert_eq!(ReservationState::Released.to_wire(), 3);

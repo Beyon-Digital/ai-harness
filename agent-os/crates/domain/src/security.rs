@@ -1,8 +1,8 @@
 //! Security mirror enums and immutable value types.
 
-pub use crate::run::UnknownEnumValue;
+pub use crate::run::{UnknownEnumValue, UnknownStateValue};
 
-use crate::run::mirror_enum;
+use crate::run::{mirror_enum, state_enum};
 
 mirror_enum! {
     /// Sensitivity of an event, mirroring `contract::Sensitivity`.
@@ -26,33 +26,30 @@ mirror_enum! {
     }
 }
 
-mirror_enum! {
+state_enum! {
     /// Trust state of a registered adapter.
     TrustState, "TrustState", {
-        Unspecified = 0,
-        Trusted = 1,
-        Untrusted = 2,
+        Trusted = 1 => "trusted",
+        Untrusted = 2 => "untrusted",
     }
 }
 
-mirror_enum! {
+state_enum! {
     /// Conformance state of a registered adapter.
     ConformanceState, "ConformanceState", {
-        Unspecified = 0,
-        Untested = 1,
-        Passed = 2,
-        Failed = 3,
+        Untested = 1 => "untested",
+        Passed = 2 => "passed",
+        Failed = 3 => "failed",
     }
 }
 
-mirror_enum! {
+state_enum! {
     /// State of an approval request.
     ApprovalState, "ApprovalState", {
-        Unspecified = 0,
-        Pending = 1,
-        Approved = 2,
-        Denied = 3,
-        Expired = 4,
+        Pending = 1 => "pending",
+        Approved = 2 => "approved",
+        Denied = 3 => "denied",
+        Expired = 4 => "expired",
     }
 }
 
@@ -71,8 +68,26 @@ mod tests {
     #[test]
     fn unknown_values_are_not_guessed() {
         assert!(SensitivityClass::from_wire(5).is_err());
+        assert!(TrustState::from_wire(0).is_err());
         assert!(TrustState::from_wire(3).is_err());
         assert!(ConformanceState::from_wire(4).is_err());
+        assert!(ApprovalState::from_wire(0).is_err());
         assert!(ApprovalState::from_wire(5).is_err());
+    }
+
+    #[test]
+    fn persisted_state_strings_round_trip() {
+        assert_eq!(TrustState::Trusted.as_str(), "trusted");
+        assert_eq!(
+            TrustState::from_state_str("untrusted"),
+            Ok(TrustState::Untrusted)
+        );
+        assert_eq!(ConformanceState::Failed.as_str(), "failed");
+        assert_eq!(
+            ApprovalState::from_state_str("pending"),
+            Ok(ApprovalState::Pending)
+        );
+        assert!(TrustState::from_state_str("trusted ").is_err());
+        assert!(ApprovalState::from_state_str("superseded").is_err());
     }
 }
