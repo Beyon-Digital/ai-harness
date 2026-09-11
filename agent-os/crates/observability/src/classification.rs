@@ -5,12 +5,28 @@
 //! value. `Redacted` hides its content from `Debug` but permits access.
 
 /// Sensitivity of a value, ordered from lowest to highest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Classification {
     Public = 0,
+    #[default]
     Internal = 1,
     Confidential = 2,
     Secret = 3,
+}
+
+impl Classification {
+    /// Reports whether this classification is more sensitive than
+    /// `threshold`.
+    pub fn exceeds(self, threshold: Classification) -> bool {
+        self > threshold
+    }
+}
+
+/// Reports whether a payload classified `payload` may be emitted by a sink
+/// whose sensitivity threshold is `sink`. Payloads above the threshold are
+/// redacted or omitted (R18.3).
+pub fn is_visible(payload: Classification, sink: Classification) -> bool {
+    !payload.exceeds(sink)
 }
 
 /// Reports the [`Classification`] of a value.

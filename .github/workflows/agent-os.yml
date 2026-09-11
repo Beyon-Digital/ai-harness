@@ -1,0 +1,50 @@
+name: agent-os
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validators:
+    name: Repository validators and contract mirror
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate repository invariants
+        run: python3 tools/validate_repo.py
+      - name: Validate build pack (contract lock and derived sources)
+        run: python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
+      - name: Check contract mirror freshness and lock
+        run: bash agent-os/scripts/check-contract-mirror.sh
+
+  quality:
+    name: Rust quality gates
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: agent-os
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Check
+        run: cargo check --workspace
+      - name: "Hygiene grep (N2: no wall-clock sleep in tests)"
+        run: |
+          violations=$(grep -RIlE 'thread::sleep|tokio::time::sleep' crates --include='*.rs' | while read -r file; do
+            case "$file" in
+              */tests/*) echo "$file" ;;
+              *) if grep -q '#\[cfg(test)\]' "$file"; then echo "$file"; fi ;;
+            esac
+          done)
+          if [ -n "$violations" ]; then
+            echo "N2 violation: wall-clock sleep in test code:"
+            echo "$violations"
+            exit 1
+          fi

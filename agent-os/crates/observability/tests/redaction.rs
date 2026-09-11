@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use observability::classification::{Classification, Classified, Redacted, Secret};
+use observability::classification::{Classification, Classified, Redacted, Secret, is_visible};
 use observability::{KernelFields, init_tracing, kernel_span};
 
 const SECRET_VALUE: &str = "hunter2";
@@ -55,19 +55,15 @@ fn classification_orders_public_below_secret() {
 }
 
 #[test]
-fn classification_ordering_redacts_at_or_above_sink_threshold() {
-    fn redacted_at_sink(level: Classification, sink_threshold: Classification) -> bool {
-        level >= sink_threshold
-    }
-
-    let sink_threshold = Classification::Confidential;
-    assert!(redacted_at_sink(Classification::Secret, sink_threshold));
-    assert!(redacted_at_sink(
-        Classification::Confidential,
-        sink_threshold
-    ));
-    assert!(!redacted_at_sink(Classification::Internal, sink_threshold));
-    assert!(!redacted_at_sink(Classification::Public, sink_threshold));
+fn classification_ordering_redacts_payloads_above_sink_threshold() {
+    let sink = Classification::Confidential;
+    assert!(Classification::Secret.exceeds(sink));
+    assert!(!Classification::Confidential.exceeds(sink));
+    assert!(!Classification::Internal.exceeds(sink));
+    assert!(!is_visible(Classification::Secret, sink));
+    assert!(is_visible(Classification::Confidential, sink));
+    assert!(is_visible(Classification::Internal, sink));
+    assert!(is_visible(Classification::Public, sink));
 }
 
 struct ClassifiedThing;
@@ -133,6 +129,7 @@ fn kernel_span_attaches_kernel_field_ids() {
         run_id: Some("run-1".to_string()),
         task_id: Some("task-1".to_string()),
         effect_id: Some("eff-1".to_string()),
+        ..KernelFields::default()
     };
     let output = capture_span_output(&fields);
     assert!(
@@ -159,6 +156,30 @@ fn kernel_span_omits_absent_kernel_field_ids() {
     for field in ["correlation_id", "run_id", "task_id", "effect_id"] {
         assert!(!output.contains(field), "unexpected {field}: {output}");
     }
+}
+
+#[test]
+fn kernel_span_records_the_classification() {
+    let fields = KernelFields {
+        classification: Classification::Secret,
+        ..KernelFields::default()
+    };
+    let output = capture_span_output(&fields);
+    assert!(
+        output.contains("classification=Secret"),
+        "missing classification: {output}"
+    );
+}
+
+#[test]
+fn kernel_span_defaults_classification_to_internal() {
+    let fields = KernelFields::default();
+    assert_eq!(fields.classification, Classification::Internal);
+    let output = capture_span_output(&fields);
+    assert!(
+        output.contains("classification=Internal"),
+        "missing default classification: {output}"
+    );
 }
 
 #[test]

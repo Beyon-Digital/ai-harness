@@ -2,15 +2,18 @@
 #![forbid(unsafe_code)]
 
 pub mod classification;
-pub use classification::{Classification, Classified, Redacted, Secret};
+pub use classification::{Classification, Classified, Redacted, Secret, is_visible};
 
-/// Kernel correlation identifiers attached to every signal.
+/// Kernel correlation identifiers and data classification attached to every
+/// signal.
 #[derive(Clone, Debug, Default)]
 pub struct KernelFields {
     pub correlation_id: Option<String>,
     pub run_id: Option<String>,
     pub task_id: Option<String>,
     pub effect_id: Option<String>,
+    /// Sensitivity of the signal; defaults to [`Classification::Internal`].
+    pub classification: Classification,
 }
 
 /// Installs a `tracing_subscriber` sink, JSON-encoded when `json` is true.
@@ -28,7 +31,7 @@ pub fn init_tracing(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Builds a span carrying the correlation, run, task, and effect ids when
-/// present.
+/// present, plus the signal's data classification.
 pub fn kernel_span(fields: &KernelFields) -> tracing::Span {
     let span = tracing::info_span!(
         "kernel.span",
@@ -36,6 +39,7 @@ pub fn kernel_span(fields: &KernelFields) -> tracing::Span {
         run_id = tracing::field::Empty,
         task_id = tracing::field::Empty,
         effect_id = tracing::field::Empty,
+        classification = tracing::field::Empty,
     );
     if let Some(correlation_id) = fields.correlation_id.as_deref() {
         span.record("correlation_id", correlation_id);
@@ -49,5 +53,9 @@ pub fn kernel_span(fields: &KernelFields) -> tracing::Span {
     if let Some(effect_id) = fields.effect_id.as_deref() {
         span.record("effect_id", effect_id);
     }
+    span.record(
+        "classification",
+        tracing::field::debug(fields.classification),
+    );
     span
 }
