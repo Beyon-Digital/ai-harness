@@ -20,3 +20,13 @@
 - 2026-09-11T20:48:40Z PST-000 -> in_progress (@agent-pst000)
 - 2026-09-11T21:02:16Z PST-000 -> review (@agent-pst000)
 - 2026-09-11T21:06:37Z PST-000 -> done (@agent-pst000)
+- 2026-09-11T21:06:47Z PST-001 -> claimed (@agent-pst001)
+- 2026-09-11T21:06:50Z PST-001 -> in_progress (@agent-pst001)
+- 2026-09-11T21:06:57Z PST-002 -> claimed (@agent-pst002)
+- 2026-09-11T21:06:57Z PST-002 -> in_progress (@agent-pst002)
+- 2026-09-11T21:35:30Z PST-002 -> review (@agent-pst002)
+- 2026-09-11T21:38:42Z PST-001 -> review (@agent-pst001)
+- 2026-09-11T21:46:15Z PST-001 -> done (@agent-pst001)
+- 2026-09-11T21:46:16Z Round-1 review: PST-001 approved; PST-002 approved with 3 Important fidelity items (mock epoch assertion, optimistic-revision semantics, head-advance semantics) — fix round dispatched.
+- 2026-09-11T21:57:25Z PST-002 -> done (@agent-pst002)
+- 2026-09-11T21:57:26Z PST-002 approved after two fix rounds; wave 2 complete; PST-003A dispatched.

@@ -1,0 +1,308 @@
+diff --git a/agent-os/crates/testkit/src/store.rs b/agent-os/crates/testkit/src/store.rs
+index 8dc7122..12e8695 100644
+--- a/agent-os/crates/testkit/src/store.rs
++++ b/agent-os/crates/testkit/src/store.rs
+@@ -14,23 +14,23 @@
+ //! whole-store revision, so any overlapping writer conflicts rather than
+ //! receiving the row-level serialization `BEGIN IMMEDIATE` would provide.
+ 
+ use std::collections::hash_map::Entry;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ 
+ use async_trait::async_trait;
+ use domain::ids::{
+     AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+-    ConfigGenerationId, DecisionId, DelegationChainId, DependencyId, EffectId, EnvironmentId,
+-    EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId,
+-    TaskId, TimerId, TurnId, WorkspaceId,
++    ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
++    EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
++    RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
+ };
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::*;
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ 
+ #[derive(Clone, Default)]
+ struct MockState {
+@@ -89,26 +89,36 @@ struct MockState {
+ pub struct MockStore {
+     state: Arc<Mutex<MockState>>,
+ }
+ 
+ impl MockStore {
+     /// Creates an empty store with persisted daemon epoch `0` (no fence).
+     pub fn new() -> Self {
+         Self::default()
+     }
+ 
+-    /// Sets the persisted daemon epoch, simulating an epoch recorded by
+-    /// [`KernelStore::acquire_daemon_fence`]. The initial value is `0`; a
+-    /// write transaction presenting epoch `0` or a non-matching epoch is
+-    /// rejected with `FailedPrecondition`.
+-    pub fn set_daemon_epoch(&self, epoch: u64) -> errors::Result<()> {
+-        lock(&self.state)?.daemon_epoch = epoch;
++    /// Sets the persisted daemon epoch and fence, simulating state left by
++    /// [`KernelStore::acquire_daemon_fence`]. Pass `0` to clear the fence.
++    /// Any change bumps the store revision, so in-flight write transactions
++    /// fail their commit with `Conflict` and cannot restore the old epoch.
++    /// The initial value is `0` with no fence; a write transaction presenting
++    /// epoch `0` or a non-matching epoch is rejected with
++    /// `FailedPrecondition`.
++    pub fn set_daemon_epoch(&self, epoch: u64, instance: DaemonInstanceId) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if epoch == 0 {
++            state.daemon_epoch = 0;
++            state.daemon_fence = None;
++            state.revision = state.revision.saturating_add(1);
++        } else {
++            install_fence(&mut state, epoch, instance);
++        }
+         Ok(())
+     }
+ }
+ 
+ fn lock<T>(mutex: &Mutex<T>) -> errors::Result<MutexGuard<'_, T>> {
+     mutex
+         .lock()
+         .map_err(|_| internal("mock store lock poisoned"))
+ }
+ 
+@@ -121,20 +131,34 @@ fn conflict(message: &'static str) -> KernelError {
+ }
+ 
+ fn not_found(message: &'static str) -> KernelError {
+     KernelError::new(ErrorCode::NotFound, RetryClass::Never, message)
+ }
+ 
+ fn failed_precondition(message: &'static str) -> KernelError {
+     KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, message)
+ }
+ 
++/// Persists a fence and bumps the store revision, invalidating any write
++/// transaction opened before the change.
++fn install_fence(state: &mut MockState, epoch: u64, instance: DaemonInstanceId) -> DaemonFence {
++    let fence = DaemonFence {
++        instance_id: instance,
++        epoch: DaemonEpoch(epoch),
++        lease_expires_unix_ms: i64::MAX,
++    };
++    state.daemon_epoch = epoch;
++    state.daemon_fence = Some(fence.clone());
++    state.revision = state.revision.saturating_add(1);
++    fence
++}
++
+ fn insert_unique<K, V>(
+     map: &mut HashMap<K, V>,
+     key: K,
+     value: V,
+     message: &'static str,
+ ) -> errors::Result<()>
+ where
+     K: std::hash::Hash + Eq,
+ {
+     match map.entry(key) {
+@@ -299,32 +323,25 @@ impl KernelStore for MockStore {
+     async fn begin_read(&self) -> errors::Result<Box<dyn KernelReadTxn + '_>> {
+         let snapshot = {
+             let state = lock(&self.state)?;
+             state.clone()
+         };
+         Ok(Box::new(MockReadTxn::new(Arc::new(Mutex::new(snapshot)))))
+     }
+ 
+     async fn acquire_daemon_fence(
+         &self,
+-        instance: domain::ids::DaemonInstanceId,
++        instance: DaemonInstanceId,
+     ) -> errors::Result<DaemonFence> {
+         let mut state = lock(&self.state)?;
+         let epoch = state.daemon_epoch.saturating_add(1);
+-        let fence = DaemonFence {
+-            instance_id: instance,
+-            epoch: DaemonEpoch(epoch),
+-            lease_expires_unix_ms: i64::MAX,
+-        };
+-        state.daemon_epoch = epoch;
+-        state.daemon_fence = Some(fence.clone());
+-        Ok(fence)
++        Ok(install_fence(&mut state, epoch, instance))
+     }
+ 
+     async fn current_fence(&self) -> errors::Result<Option<DaemonFence>> {
+         Ok(lock(&self.state)?.daemon_fence.clone())
+     }
+ }
+ 
+ #[async_trait]
+ impl KernelTxn for MockWriteTxn {
+     fn context(&self) -> &TxContext {
+diff --git a/agent-os/crates/testkit/tests/store_mock.rs b/agent-os/crates/testkit/tests/store_mock.rs
+index c978692..2e95470 100644
+--- a/agent-os/crates/testkit/tests/store_mock.rs
++++ b/agent-os/crates/testkit/tests/store_mock.rs
+@@ -24,20 +24,29 @@ const SEED_MS: i64 = 1_700_000_000_000;
+ 
+ fn context(ids: &DeterministicIds) -> TxContext {
+     TxContext {
+         daemon_epoch: 1,
+         principal_id: PrincipalId::new(ids),
+         command_id: CommandId::new(ids),
+         correlation_id: Some("corr-1".to_owned()),
+     }
+ }
+ 
++fn context_with_epoch(ids: &DeterministicIds, epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch: epoch,
++        principal_id: PrincipalId::new(ids),
++        command_id: CommandId::new(ids),
++        correlation_id: None,
++    }
++}
++
+ fn stream_key(run: RunId) -> EventStreamKey {
+     match EventStreamKey::new(format!("run/{run}")) {
+         Ok(key) => key,
+         Err(error) => panic!("stream key rejected: {error}"),
+     }
+ }
+ 
+ fn cursor(run: RunId) -> EventCursor {
+     EventCursor::new(stream_key(run), 0)
+ }
+@@ -50,21 +59,21 @@ struct Fixture {
+     run_id: RunId,
+     effect_id: EffectId,
+     event_id: EventId,
+     principal_id: PrincipalId,
+ }
+ 
+ fn fixture() -> Fixture {
+     let ids = DeterministicIds::new(SEED_MS);
+     let store = MockStore::new();
+     store
+-        .set_daemon_epoch(1)
++        .set_daemon_epoch(1, DaemonInstanceId::new(&ids))
+         .expect("seed the persisted daemon epoch");
+     Fixture {
+         session_id: SessionId::new(&ids),
+         task_id: TaskId::new(&ids),
+         run_id: RunId::new(&ids),
+         effect_id: EffectId::new(&ids),
+         event_id: EventId::new(&ids),
+         principal_id: PrincipalId::new(&ids),
+         store,
+         ids,
+@@ -521,54 +530,94 @@ async fn stream_allocation_is_contiguous_across_transactions() {
+         .expect("begin write");
+     assert_eq!(txn.streams().allocate(run_stream).await.expect("d"), 3);
+     assert_eq!(txn.streams().allocate(config_stream).await.expect("e"), 2);
+     txn.commit().await.expect("commit");
+ }
+ 
+ #[tokio::test]
+ async fn begin_write_asserts_the_persisted_daemon_epoch() {
+     let ids = DeterministicIds::new(SEED_MS);
+     let store = MockStore::new();
+-    let context_with_epoch = |epoch: u64| TxContext {
+-        daemon_epoch: epoch,
+-        principal_id: PrincipalId::new(&ids),
+-        command_id: CommandId::new(&ids),
+-        correlation_id: None,
+-    };
+ 
+-    let error = match store.begin_write(context_with_epoch(1)).await {
++    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
+         Ok(_) => panic!("epoch 1 must be refused while no fence is recorded"),
+         Err(error) => error,
+     };
+     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+-    let error = match store.begin_write(context_with_epoch(0)).await {
++    let error = match store.begin_write(context_with_epoch(&ids, 0)).await {
+         Ok(_) => panic!("epoch 0 is the absent epoch and must be refused"),
+         Err(error) => error,
+     };
+     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+ 
+     store
+-        .set_daemon_epoch(2)
++        .set_daemon_epoch(2, DaemonInstanceId::new(&ids))
+         .expect("simulate a persisted fence epoch");
+-    let error = match store.begin_write(context_with_epoch(1)).await {
++    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
+         Ok(_) => panic!("stale epoch 1 must be refused"),
+         Err(error) => error,
+     };
+     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+ 
+     let txn = store
+-        .begin_write(context_with_epoch(2))
++        .begin_write(context_with_epoch(&ids, 2))
+         .await
+         .expect("matching epoch must open a write transaction");
+     txn.rollback().await.expect("rollback");
+ 
+     let fence = store
+         .acquire_daemon_fence(DaemonInstanceId::new(&ids))
+         .await
+         .expect("acquire fence");
+     assert_eq!(fence.epoch.0, 3);
+     let txn = store
+-        .begin_write(context_with_epoch(3))
++        .begin_write(context_with_epoch(&ids, 3))
+         .await
+         .expect("epoch recorded by acquire must open a write transaction");
+     txn.rollback().await.expect("rollback");
+ }
++
++#[tokio::test]
++async fn fence_acquisition_invalidates_in_flight_write() {
++    let ids = DeterministicIds::new(SEED_MS);
++    let store = MockStore::new();
++    let instance = DaemonInstanceId::new(&ids);
++    store
++        .set_daemon_epoch(1, instance)
++        .expect("seed the persisted fence at epoch 1");
++
++    let txn = store
++        .begin_write(context_with_epoch(&ids, 1))
++        .await
++        .expect("open a write transaction at epoch 1");
++    let fence = store
++        .acquire_daemon_fence(instance)
++        .await
++        .expect("acquire fence");
++    assert_eq!(fence.epoch.0, 2);
++
++    let error = match txn.commit().await {
++        Ok(()) => panic!("in-flight transaction must fail after fence acquisition"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::Conflict);
++
++    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
++        Ok(_) => panic!("stale epoch 1 must be refused after the fence moved to 2"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++
++    let txn = store
++        .begin_write(context_with_epoch(&ids, 2))
++        .await
++        .expect("epoch 2 must open a write transaction");
++    txn.rollback().await.expect("rollback");
++
++    let current = store
++        .current_fence()
++        .await
++        .expect("current fence")
++        .expect("the new fence must survive the failed commit");
++    assert_eq!(current.epoch.0, 2);
++    assert_eq!(current.instance_id, instance);
++}

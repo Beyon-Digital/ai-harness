@@ -77,8 +77,8 @@
 
 ### Task PST-001: Bootstrap the kernel database
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst001
 - depends_on: PST-000
 - files: `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/schema.rs`, `agent-os/crates/kernel-store-sqlite/tests/bootstrap.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, N1, N3, G1, G2
@@ -126,8 +126,8 @@
 
 ### Task PST-002: Define the transaction contract and the testkit mock
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst002
 - depends_on: PST-000
 - files: `agent-os/crates/kernel-store/src/lib.rs`, `agent-os/crates/kernel-store/src/types.rs`, `agent-os/crates/kernel-store/src/txn.rs`, `agent-os/crates/kernel-store/src/repositories.rs`, `agent-os/crates/kernel-store/src/models.rs`, `agent-os/crates/testkit/src/store.rs`, `agent-os/crates/testkit/src/lib.rs`, `agent-os/crates/testkit/tests/store_mock.rs`
 - requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, P2

@@ -1,0 +1,363 @@
+diff --git a/agent-os/crates/kernel-store/src/repositories.rs b/agent-os/crates/kernel-store/src/repositories.rs
+index 1fd1bc5..955305c 100644
+--- a/agent-os/crates/kernel-store/src/repositories.rs
++++ b/agent-os/crates/kernel-store/src/repositories.rs
+@@ -73,22 +73,31 @@ pub trait SessionRepo: SessionRead {
+ 
+ #[async_trait]
+ pub trait GraphRead: Send + Sync {
+     async fn get_head(&mut self, task: TaskId) -> Result<Option<RunGraphHeadRow>>;
+     async fn list_dependencies(&mut self, task: TaskId) -> Result<Vec<RunDependencyRow>>;
+     async fn is_reachable(&mut self, from: RunId, to: RunId) -> Result<bool>;
+ }
+ 
+ #[async_trait]
+ pub trait GraphRepo: GraphRead {
++    /// Returns the task's graph head, creating it at revision `0` when absent.
+     async fn ensure_head(&mut self, task: TaskId) -> Result<RunGraphHeadRow>;
++    /// Advances `graph_revision` from `expected` to `expected + 1` when the
++    /// persisted revision equals `expected`. Returns `false`, leaving the head
++    /// unchanged, when no head row exists or the revision differs.
+     async fn cas_head_revision(&mut self, task: TaskId, expected: u64) -> Result<bool>;
++    /// Requires an existing head whose `graph_revision` equals
++    /// `expected_revision` (`NotFound` when the head is absent, `Conflict` on
++    /// revision mismatch), inserts the dependency with
++    /// `created_graph_revision = expected_revision`, and advances the head to
++    /// `expected_revision + 1` in the same operation.
+     async fn insert_dependency(
+         &mut self,
+         new: NewRunDependency,
+         expected_revision: u64,
+     ) -> Result<()>;
+ }
+ 
+ #[async_trait]
+ pub trait EnvironmentRead: Send + Sync {
+     async fn get_environment(
+@@ -279,29 +288,35 @@ pub trait LoopRepo: LoopRead {
+     async fn insert_turn(&mut self, turn: NewLoopTurn) -> Result<()>;
+     async fn cas_turn(
+         &mut self,
+         id: TurnId,
+         expect_state: &str,
+         patch: LoopTurnPatch,
+     ) -> Result<bool>;
+     async fn insert_decision(&mut self, decision: NewDecision) -> Result<()>;
+ }
+ 
++/// Write-only in the port surface: [`crate::txn::KernelReadTxn`] does not
++/// expose this group because replay lookups happen inside write transactions,
++/// so there is no read trait to extend.
+ #[async_trait]
+ pub trait IdempotencyRepo: Send + Sync {
+     async fn lookup(
+         &mut self,
+         principal: PrincipalId,
+         key: &IdempotencyKey,
+     ) -> Result<Option<IdempotencyRecordRow>>;
+     async fn insert(&mut self, record: NewIdempotencyRecord) -> Result<()>;
+ }
+ 
++/// Write-only in the port surface: [`crate::txn::KernelReadTxn`] does not
++/// expose this group because stream allocation and outbox staging happen
++/// inside write transactions, so there is no read trait to extend.
+ #[async_trait]
+ pub trait StreamRepo: Send + Sync {
+     /// Allocates and returns the next contiguous sequence for `stream_key`.
+     async fn allocate(&mut self, stream_key: EventStreamKey) -> Result<u64>;
+     async fn insert_outbox(&mut self, event: NewOutboxEvent) -> Result<()>;
+     /// Returns events awaiting journal publication ordered by stream then sequence.
+     async fn scan_unpublished(&mut self, limit: u32) -> Result<Vec<OutboxEventRow>>;
+     async fn mark_published(&mut self, event_id: EventId, kind: PublishKind) -> Result<()>;
+ }
+diff --git a/agent-os/crates/testkit/src/store.rs b/agent-os/crates/testkit/src/store.rs
+index d132bb7..8dc7122 100644
+--- a/agent-os/crates/testkit/src/store.rs
++++ b/agent-os/crates/testkit/src/store.rs
+@@ -1,17 +1,25 @@
+ //! In-memory implementation of the `kernel_store` port for tests.
+ //!
+ //! `MockStore` mirrors the observable contract of the SQLite store without
+ //! SQL: write transactions mutate a private snapshot, commit publishes the
+ //! snapshot atomically, drop or rollback discards it, CAS operations check the
+ //! expected revision/state/token, idempotency keys are unique, and stream
+-//! allocation hands out contiguous sequences per stream key.
++//! allocation hands out contiguous sequences per stream key. Write
++//! transactions assert the persisted daemon epoch at begin, like the storage
++//! layer (R4.3, D6).
++//!
++//! Two behaviours are intentionally coarser than SQLite and are documented on
++//! [`MockStore`]: the epoch assertion rejects absent or stale epochs instead
++//! of comparing a live fence lease, and commit is guarded by a single
++//! whole-store revision, so any overlapping writer conflicts rather than
++//! receiving the row-level serialization `BEGIN IMMEDIATE` would provide.
+ 
+ use std::collections::hash_map::Entry;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ 
+ use async_trait::async_trait;
+ use domain::ids::{
+     AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+     ConfigGenerationId, DecisionId, DelegationChainId, DependencyId, EffectId, EnvironmentId,
+     EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId,
+@@ -21,20 +29,21 @@ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::*;
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ 
+ #[derive(Clone, Default)]
+ struct MockState {
+     revision: u64,
+     logical_now_ms: i64,
++    daemon_epoch: u64,
+     daemon_fence: Option<DaemonFence>,
+     sessions: HashMap<SessionId, SessionRow>,
+     tasks: HashMap<TaskId, TaskRow>,
+     environments: HashMap<EnvironmentId, ResolvedEnvironmentRow>,
+     bindings: HashMap<(EnvironmentId, String), ResolvedBindingRow>,
+     runs: HashMap<RunId, RunRow>,
+     graph_heads: HashMap<TaskId, RunGraphHeadRow>,
+     dependencies: HashMap<DependencyId, RunDependencyRow>,
+     workspaces: HashMap<WorkspaceId, WorkspaceRow>,
+     leases: HashMap<LeaseId, WorkspaceLeaseRow>,
+@@ -54,30 +63,54 @@ struct MockState {
+     active_config: Option<ActiveConfigGenerationRow>,
+     turns: HashMap<TurnId, LoopTurnRow>,
+     decisions: HashMap<(RunId, DecisionId), DecisionRow>,
+     idempotency: HashMap<(PrincipalId, IdempotencyKey), IdempotencyRecordRow>,
+     stream_heads: HashMap<EventStreamKey, u64>,
+     outbox: HashMap<EventId, OutboxEventRow>,
+     outbox_sequences: HashSet<(EventStreamKey, u64)>,
+ }
+ 
+ /// In-memory `KernelStore` double.
++///
++/// The persisted daemon epoch starts at `0`, meaning no daemon fence has been
++/// recorded. Use [`MockStore::set_daemon_epoch`] or
++/// [`KernelStore::acquire_daemon_fence`] before opening a write transaction:
++/// `begin_write` rejects an absent (`0`) or mismatched context epoch with
++/// `FailedPrecondition`, mirroring the storage-layer epoch assertion (R4.3,
++/// D6).
++///
++/// Concurrency limitation: commits are guarded by one whole-store revision.
++/// Any overlapping write transaction started from an older revision fails
++/// with `Conflict`/`Safe` even when CAS expectations match and the rows
++/// touched are disjoint. The SQLite store serializes writers with
++/// `BEGIN IMMEDIATE` and would permit disjoint or non-conflicting commits, so
++/// mock-based concurrency tests must stay conservative and must not assume
++/// that two overlapping writers both succeed.
+ #[derive(Clone, Default)]
+ pub struct MockStore {
+     state: Arc<Mutex<MockState>>,
+ }
+ 
+ impl MockStore {
+-    /// Creates an empty store.
++    /// Creates an empty store with persisted daemon epoch `0` (no fence).
+     pub fn new() -> Self {
+         Self::default()
+     }
++
++    /// Sets the persisted daemon epoch, simulating an epoch recorded by
++    /// [`KernelStore::acquire_daemon_fence`]. The initial value is `0`; a
++    /// write transaction presenting epoch `0` or a non-matching epoch is
++    /// rejected with `FailedPrecondition`.
++    pub fn set_daemon_epoch(&self, epoch: u64) -> errors::Result<()> {
++        lock(&self.state)?.daemon_epoch = epoch;
++        Ok(())
++    }
+ }
+ 
+ fn lock<T>(mutex: &Mutex<T>) -> errors::Result<MutexGuard<'_, T>> {
+     mutex
+         .lock()
+         .map_err(|_| internal("mock store lock poisoned"))
+ }
+ 
+ fn internal(message: &'static str) -> KernelError {
+     KernelError::new(ErrorCode::Internal, RetryClass::Never, message)
+@@ -239,20 +272,25 @@ impl MockReadTxn {
+             loop_turns: MockLoopRepo::new(state),
+         }
+     }
+ }
+ 
+ #[async_trait]
+ impl KernelStore for MockStore {
+     async fn begin_write(&self, ctx: TxContext) -> errors::Result<Box<dyn KernelTxn + '_>> {
+         let snapshot = {
+             let state = lock(&self.state)?;
++            if ctx.daemon_epoch == 0 || ctx.daemon_epoch != state.daemon_epoch {
++                return Err(failed_precondition(
++                    "write transaction rejected: daemon epoch is absent or stale",
++                ));
++            }
+             state.clone()
+         };
+         let base_revision = snapshot.revision;
+         let txn_state = Arc::new(Mutex::new(snapshot));
+         Ok(Box::new(MockWriteTxn::new(
+             ctx,
+             base_revision,
+             self.state.clone(),
+             txn_state,
+         )))
+@@ -264,29 +302,27 @@ impl KernelStore for MockStore {
+             state.clone()
+         };
+         Ok(Box::new(MockReadTxn::new(Arc::new(Mutex::new(snapshot)))))
+     }
+ 
+     async fn acquire_daemon_fence(
+         &self,
+         instance: domain::ids::DaemonInstanceId,
+     ) -> errors::Result<DaemonFence> {
+         let mut state = lock(&self.state)?;
+-        let epoch = match &state.daemon_fence {
+-            Some(fence) => fence.epoch.0.saturating_add(1),
+-            None => 1,
+-        };
++        let epoch = state.daemon_epoch.saturating_add(1);
+         let fence = DaemonFence {
+             instance_id: instance,
+             epoch: DaemonEpoch(epoch),
+             lease_expires_unix_ms: i64::MAX,
+         };
++        state.daemon_epoch = epoch;
+         state.daemon_fence = Some(fence.clone());
+         Ok(fence)
+     }
+ 
+     async fn current_fence(&self) -> errors::Result<Option<DaemonFence>> {
+         Ok(lock(&self.state)?.daemon_fence.clone())
+     }
+ }
+ 
+ #[async_trait]
+diff --git a/agent-os/crates/testkit/tests/store_mock.rs b/agent-os/crates/testkit/tests/store_mock.rs
+index 321316e..c978692 100644
+--- a/agent-os/crates/testkit/tests/store_mock.rs
++++ b/agent-os/crates/testkit/tests/store_mock.rs
+@@ -1,21 +1,21 @@
+ //! Contract test for the in-memory `KernelStore` mock.
+ //!
+ //! The mock is the second implementation of the port. These tests prove the
+ //! contract is implementable: atomic visibility on commit, no residue on drop,
+-//! CAS conditions that reject stale expectations, idempotency replay, and
+-//! contiguous stream allocation.
++//! CAS conditions that reject stale expectations, idempotency replay,
++//! contiguous stream allocation, and the daemon-epoch assertion at write begin.
+ 
+ use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
+ use domain::ids::{
+-    ActorId, AdapterId, CommandId, DecisionId, EffectId, EventCursor, EventId, EventStreamKey,
+-    IdempotencyKey, PrincipalId, RunId, SessionId, TaskId,
++    ActorId, AdapterId, CommandId, DaemonInstanceId, DecisionId, EffectId, EventCursor, EventId,
++    EventStreamKey, IdempotencyKey, PrincipalId, RunId, SessionId, TaskId,
+ };
+ use domain::run::{RecoveryDisposition, RunState};
+ use domain::security::{RetentionClass, SensitivityClass};
+ use errors::codes::ErrorCode;
+ use kernel_store::{
+     EffectPatch, KernelStore, NewEffect, NewIdempotencyRecord, NewOutboxEvent, NewRun, NewSession,
+     NewTask, RunCas, RunPatch, TxContext,
+ };
+ use testkit::ids::DeterministicIds;
+ use testkit::store::MockStore;
+@@ -48,28 +48,32 @@ struct Fixture {
+     session_id: SessionId,
+     task_id: TaskId,
+     run_id: RunId,
+     effect_id: EffectId,
+     event_id: EventId,
+     principal_id: PrincipalId,
+ }
+ 
+ fn fixture() -> Fixture {
+     let ids = DeterministicIds::new(SEED_MS);
++    let store = MockStore::new();
++    store
++        .set_daemon_epoch(1)
++        .expect("seed the persisted daemon epoch");
+     Fixture {
+         session_id: SessionId::new(&ids),
+         task_id: TaskId::new(&ids),
+         run_id: RunId::new(&ids),
+         effect_id: EffectId::new(&ids),
+         event_id: EventId::new(&ids),
+         principal_id: PrincipalId::new(&ids),
+-        store: MockStore::new(),
++        store,
+         ids,
+     }
+ }
+ 
+ fn new_session(f: &Fixture) -> NewSession {
+     NewSession {
+         session_id: f.session_id,
+         principal_id: f.principal_id,
+         created_at_ms: SEED_MS,
+         metadata: None,
+@@ -512,10 +516,59 @@ async fn stream_allocation_is_contiguous_across_transactions() {
+ 
+     let mut txn = f
+         .store
+         .begin_write(context(&f.ids))
+         .await
+         .expect("begin write");
+     assert_eq!(txn.streams().allocate(run_stream).await.expect("d"), 3);
+     assert_eq!(txn.streams().allocate(config_stream).await.expect("e"), 2);
+     txn.commit().await.expect("commit");
+ }
++
++#[tokio::test]
++async fn begin_write_asserts_the_persisted_daemon_epoch() {
++    let ids = DeterministicIds::new(SEED_MS);
++    let store = MockStore::new();
++    let context_with_epoch = |epoch: u64| TxContext {
++        daemon_epoch: epoch,
++        principal_id: PrincipalId::new(&ids),
++        command_id: CommandId::new(&ids),
++        correlation_id: None,
++    };
++
++    let error = match store.begin_write(context_with_epoch(1)).await {
++        Ok(_) => panic!("epoch 1 must be refused while no fence is recorded"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    let error = match store.begin_write(context_with_epoch(0)).await {
++        Ok(_) => panic!("epoch 0 is the absent epoch and must be refused"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++
++    store
++        .set_daemon_epoch(2)
++        .expect("simulate a persisted fence epoch");
++    let error = match store.begin_write(context_with_epoch(1)).await {
++        Ok(_) => panic!("stale epoch 1 must be refused"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++
++    let txn = store
++        .begin_write(context_with_epoch(2))
++        .await
++        .expect("matching epoch must open a write transaction");
++    txn.rollback().await.expect("rollback");
++
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&ids))
++        .await
++        .expect("acquire fence");
++    assert_eq!(fence.epoch.0, 3);
++    let txn = store
++        .begin_write(context_with_epoch(3))
++        .await
++        .expect("epoch recorded by acquire must open a write transaction");
++    txn.rollback().await.expect("rollback");
++}
