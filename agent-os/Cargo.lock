@@ -148,10 +148,12 @@ dependencies = [
 name = "domain"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
  "serde",
+ "tempfile",
  "uuid",
 ]
 

@@ -13,3 +13,9 @@ uuid.workspace = true
 [build-dependencies]
 prost-build.workspace = true
 protoc-bin-vendored.workspace = true
+
+[dev-dependencies]
+prost-build.workspace = true
+proptest.workspace = true
+protoc-bin-vendored.workspace = true
+tempfile.workspace = true
