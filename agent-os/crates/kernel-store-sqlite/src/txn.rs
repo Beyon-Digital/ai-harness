@@ -24,9 +24,12 @@ use sqlx::Sqlite;
 use crate::SqliteKernelStore;
 use crate::mapping;
 use crate::repos::{
-    ReadConn, SharedConn, UnavailableRepo, WriteConn, environments::SqliteEnvironmentRepo,
-    graph::SqliteGraphRepo, runs::SqliteRunRepo, sessions::SqliteSessionRepo,
-    tasks::SqliteTaskRepo,
+    ReadConn, SharedConn, UnavailableRepo, WriteConn, adapters::SqliteAdapterRepo,
+    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
+    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo, loop_turns::SqliteLoopRepo,
+    resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
+    sessions::SqliteSessionRepo, tasks::SqliteTaskRepo, timers::SqliteTimerRepo,
+    workspaces::SqliteWorkspaceRepo,
 };
 
 /// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
@@ -38,6 +41,15 @@ pub(crate) struct SqliteWriteTxn {
     sessions: SqliteSessionRepo,
     graph: SqliteGraphRepo,
     environments: SqliteEnvironmentRepo,
+    effects: SqliteEffectRepo,
+    resources: SqliteResourceRepo,
+    timers: SqliteTimerRepo,
+    security: SqliteSecurityRepo,
+    config: SqliteConfigRepo,
+    workspaces: SqliteWorkspaceRepo,
+    adapters: SqliteAdapterRepo,
+    artifacts: SqliteArtifactRepo,
+    loop_turns: SqliteLoopRepo,
     unavailable: UnavailableRepo,
 }
 
@@ -52,7 +64,16 @@ impl SqliteWriteTxn {
             tasks: SqliteTaskRepo::new(shared.clone()),
             sessions: SqliteSessionRepo::new(shared.clone()),
             graph: SqliteGraphRepo::new(shared.clone()),
-            environments: SqliteEnvironmentRepo::new(shared),
+            environments: SqliteEnvironmentRepo::new(shared.clone()),
+            effects: SqliteEffectRepo::new(shared.clone()),
+            resources: SqliteResourceRepo::new(shared.clone()),
+            timers: SqliteTimerRepo::new(shared.clone()),
+            security: SqliteSecurityRepo::new(shared.clone()),
+            config: SqliteConfigRepo::new(shared.clone()),
+            workspaces: SqliteWorkspaceRepo::new(shared.clone()),
+            adapters: SqliteAdapterRepo::new(shared.clone()),
+            artifacts: SqliteArtifactRepo::new(shared.clone()),
+            loop_turns: SqliteLoopRepo::new(shared),
             unavailable: UnavailableRepo,
         }
     }
@@ -96,39 +117,39 @@ impl KernelTxn for SqliteWriteTxn {
     }
 
     fn effects(&mut self) -> &mut dyn EffectRepo {
-        &mut self.unavailable
+        &mut self.effects
     }
 
     fn resources(&mut self) -> &mut dyn ResourceRepo {
-        &mut self.unavailable
+        &mut self.resources
     }
 
     fn timers(&mut self) -> &mut dyn TimerRepo {
-        &mut self.unavailable
+        &mut self.timers
     }
 
     fn security(&mut self) -> &mut dyn SecurityRepo {
-        &mut self.unavailable
+        &mut self.security
     }
 
     fn config(&mut self) -> &mut dyn ConfigRepo {
-        &mut self.unavailable
+        &mut self.config
     }
 
     fn workspaces(&mut self) -> &mut dyn WorkspaceRepo {
-        &mut self.unavailable
+        &mut self.workspaces
     }
 
     fn adapters(&mut self) -> &mut dyn AdapterRepo {
-        &mut self.unavailable
+        &mut self.adapters
     }
 
     fn artifacts(&mut self) -> &mut dyn ArtifactRepo {
-        &mut self.unavailable
+        &mut self.artifacts
     }
 
     fn loop_turns(&mut self) -> &mut dyn LoopRepo {
-        &mut self.unavailable
+        &mut self.loop_turns
     }
 
     fn idempotency(&mut self) -> &mut dyn IdempotencyRepo {
@@ -157,7 +178,15 @@ pub(crate) struct SqliteReadTxn {
     sessions: SqliteSessionRepo,
     graph: SqliteGraphRepo,
     environments: SqliteEnvironmentRepo,
-    unavailable: UnavailableRepo,
+    effects: SqliteEffectRepo,
+    resources: SqliteResourceRepo,
+    timers: SqliteTimerRepo,
+    security: SqliteSecurityRepo,
+    config: SqliteConfigRepo,
+    workspaces: SqliteWorkspaceRepo,
+    adapters: SqliteAdapterRepo,
+    artifacts: SqliteArtifactRepo,
+    loop_turns: SqliteLoopRepo,
 }
 
 impl SqliteReadTxn {
@@ -168,8 +197,16 @@ impl SqliteReadTxn {
             tasks: SqliteTaskRepo::new(shared.clone()),
             sessions: SqliteSessionRepo::new(shared.clone()),
             graph: SqliteGraphRepo::new(shared.clone()),
-            environments: SqliteEnvironmentRepo::new(shared),
-            unavailable: UnavailableRepo,
+            environments: SqliteEnvironmentRepo::new(shared.clone()),
+            effects: SqliteEffectRepo::new(shared.clone()),
+            resources: SqliteResourceRepo::new(shared.clone()),
+            timers: SqliteTimerRepo::new(shared.clone()),
+            security: SqliteSecurityRepo::new(shared.clone()),
+            config: SqliteConfigRepo::new(shared.clone()),
+            workspaces: SqliteWorkspaceRepo::new(shared.clone()),
+            adapters: SqliteAdapterRepo::new(shared.clone()),
+            artifacts: SqliteArtifactRepo::new(shared.clone()),
+            loop_turns: SqliteLoopRepo::new(shared),
         }
     }
 }
@@ -197,39 +234,39 @@ impl KernelReadTxn for SqliteReadTxn {
     }
 
     fn effects(&mut self) -> &mut dyn EffectRead {
-        &mut self.unavailable
+        &mut self.effects
     }
 
     fn resources(&mut self) -> &mut dyn ResourceRead {
-        &mut self.unavailable
+        &mut self.resources
     }
 
     fn timers(&mut self) -> &mut dyn TimerRead {
-        &mut self.unavailable
+        &mut self.timers
     }
 
     fn security(&mut self) -> &mut dyn SecurityRead {
-        &mut self.unavailable
+        &mut self.security
     }
 
     fn config(&mut self) -> &mut dyn ConfigRead {
-        &mut self.unavailable
+        &mut self.config
     }
 
     fn workspaces(&mut self) -> &mut dyn WorkspaceRead {
-        &mut self.unavailable
+        &mut self.workspaces
     }
 
     fn adapters(&mut self) -> &mut dyn AdapterRead {
-        &mut self.unavailable
+        &mut self.adapters
     }
 
     fn artifacts(&mut self) -> &mut dyn ArtifactRead {
-        &mut self.unavailable
+        &mut self.artifacts
     }
 
     fn loop_turns(&mut self) -> &mut dyn LoopRead {
-        &mut self.unavailable
+        &mut self.loop_turns
     }
 }
 
