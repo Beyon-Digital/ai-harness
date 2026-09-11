@@ -42,6 +42,14 @@ proposed immutable document
 
 A failed activation can reactivate the prior known-good generation. This is limited to safe activation of immutable runtime configuration generations. Live activation is restricted to changes that do not alter daemon-instance-frozen generation-global service bindings.
 
+`RollbackConfigGeneration` is the explicit Control API command for that path. It is capability-gated by the config rollback grant, CASes the active-generation pointer against `expected_active_revision` back to a prior known-good generation, and emits `ConfigRolledBack`. Like activation, it does not touch running runs; each run keeps the `ResolvedRunEnvironment` it captured.
+
+## Normative limits
+
+Every threshold in this pack has exactly one machine-readable value in [`limits.yaml`](limits.yaml). That file is the source of truth for tests, defaults, and validators; no threshold may be hard-coded inline elsewhere.
+
+The matching `limits` object is typed in `contracts/config/agent-os.schema.json` with the same key paths and integer minima, and `examples/default-config.yaml` mirrors every value. The GC-7 validator fails when a normative key is missing.
+
 ## Inception version
 
 `schema_version` is exactly `1`.

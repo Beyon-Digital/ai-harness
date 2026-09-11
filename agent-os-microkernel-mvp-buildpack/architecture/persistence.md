@@ -9,7 +9,7 @@
 
 ## SQLite operating mode
 
-Recommended inception settings:
+These inception settings are normative:
 
 ```text
 PRAGMA foreign_keys = ON;
@@ -17,6 +17,8 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
 PRAGMA busy_timeout = 5000;
 ```
+
+File modes for the database, runtime directory, and control socket are normative values from [`specs/limits.yaml`](../specs/limits.yaml).
 
 All correctness-critical write sequences use explicit write transactions. For operations that require writer reservation before reading/modifying shared graph/head state, use `BEGIN IMMEDIATE` semantics.
 
