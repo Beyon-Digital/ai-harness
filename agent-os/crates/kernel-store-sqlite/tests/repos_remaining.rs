@@ -115,6 +115,24 @@ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch:
     Seeded { run }
 }
 
+fn new_exclusive_lease(
+    lease: LeaseId,
+    workspace: WorkspaceId,
+    owner_run: RunId,
+    enforcement_state: LeaseEnforcementState,
+) -> NewWorkspaceLease {
+    NewWorkspaceLease {
+        lease_id: lease,
+        workspace_id: workspace,
+        owner_run_id: owner_run,
+        mode: WorkspaceAccessMode::ExclusiveWrite,
+        lease_epoch: 1,
+        enforcement_state,
+        delegated_from: vec![],
+        created_at_ms: 20,
+    }
+}
+
 fn new_effect(provider: &DeterministicIds, effect: EffectId, run: RunId) -> NewEffect {
     NewEffect {
         effect_id: effect,
@@ -590,6 +608,81 @@ async fn workspace_repo_crud_and_cas_lease() {
 }
 
 #[tokio::test]
+async fn exclusive_lease_index_rejects_second_active_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, epoch) = open_store(dir.path()).await;
+    let provider = DeterministicIds::new(1_700_000_000_000);
+    let seeded = seed_run(&store, &provider, epoch).await;
+    let workspace = WorkspaceId::new(&provider);
+    let first = LeaseId::new(&provider);
+    let second = LeaseId::new(&provider);
+
+    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+    txn.workspaces()
+        .insert_workspace(NewWorkspace {
+            workspace_id: workspace,
+            kind: "git".to_owned(),
+            base_revision: None,
+            parent_workspace_id: None,
+            created_at_ms: 20,
+        })
+        .await
+        .unwrap();
+    txn.workspaces()
+        .insert_lease(new_exclusive_lease(
+            first,
+            workspace,
+            seeded.run,
+            LeaseEnforcementState::Active,
+        ))
+        .await
+        .unwrap();
+    let conflict = txn
+        .workspaces()
+        .insert_lease(new_exclusive_lease(
+            second,
+            workspace,
+            seeded.run,
+            LeaseEnforcementState::Active,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code(), ErrorCode::Conflict);
+    assert_eq!(conflict.retry_class(), RetryClass::Never);
+
+    assert!(
+        txn.workspaces()
+            .cas_lease(
+                first,
+                1,
+                LeasePatch {
+                    enforcement_state: Some(LeaseEnforcementState::Revoked),
+                    ..LeasePatch::default()
+                },
+            )
+            .await
+            .unwrap(),
+        "the rejected insert must not disturb the active lease"
+    );
+    txn.workspaces()
+        .insert_lease(new_exclusive_lease(
+            second,
+            workspace,
+            seeded.run,
+            LeaseEnforcementState::Active,
+        ))
+        .await
+        .expect("a revoked exclusive lease releases the workspace");
+    txn.commit().await.unwrap();
+
+    let mut read = store.begin_read().await.unwrap();
+    let first_row = read.workspaces().get_lease(first).await.unwrap().unwrap();
+    assert_eq!(first_row.enforcement_state, LeaseEnforcementState::Revoked);
+    let second_row = read.workspaces().get_lease(second).await.unwrap().unwrap();
+    assert_eq!(second_row.enforcement_state, LeaseEnforcementState::Active);
+}
+
+#[tokio::test]
 async fn adapter_repo_crud_and_cas_instance_state() {
     let dir = tempfile::tempdir().unwrap();
     let (store, epoch) = open_store(dir.path()).await;
@@ -914,4 +1007,170 @@ async fn unknown_persisted_values_fail_closed() {
     let timer_error = read.timers().get(timer).await.unwrap_err();
     assert_eq!(timer_error.code(), ErrorCode::Internal);
     assert_eq!(timer_error.retry_class(), RetryClass::Never);
+}
+
+#[tokio::test]
+async fn unknown_text_literals_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join(DB_FILE);
+    let (store, epoch) = open_store(dir.path()).await;
+    let provider = DeterministicIds::new(1_700_000_000_000);
+    let seeded = seed_run(&store, &provider, epoch).await;
+    let turn = TurnId::new(&provider);
+    let decision = DecisionId::new(&provider);
+    let adapter = AdapterId::new(&provider);
+    let instance = AdapterInstanceId::new(&provider);
+    let valid = ConfigGenerationId::new(&provider);
+    let bad_test_state = ConfigGenerationId::new(&provider);
+
+    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+    txn.loop_turns()
+        .insert_turn(NewLoopTurn {
+            turn_id: turn,
+            run_id: seeded.run,
+            run_revision: 0,
+            loop_epoch: 0,
+            step_sequence: 0,
+            input_event_cursor: cursor(seeded.run),
+            state: "issued".to_owned(),
+            issued_at_ms: 20,
+        })
+        .await
+        .unwrap();
+    txn.loop_turns()
+        .insert_decision(NewDecision {
+            decision_id: decision,
+            run_id: seeded.run,
+            turn_id: turn,
+            decision_type: "InvokeEffect".to_owned(),
+            decision_digest: "decision-digest".to_owned(),
+            decision_bytes: vec![1],
+            run_revision: 0,
+            loop_epoch: 0,
+            step_sequence: 0,
+            input_event_cursor: cursor(seeded.run),
+            accepted_at_ms: 21,
+        })
+        .await
+        .unwrap();
+    txn.adapters()
+        .insert_registration(NewAdapterRegistration {
+            adapter_id: adapter,
+            version: "1.0.0".to_owned(),
+            bundle_digest: "bundle-1".to_owned(),
+            manifest_digest: "manifest-1".to_owned(),
+            runtime_type: "process".to_owned(),
+            implemented_ports: vec![],
+            capabilities: vec![],
+            trust_state: TrustState::Trusted,
+            conformance_state: ConformanceState::Untested,
+            created_at_ms: 20,
+        })
+        .await
+        .unwrap();
+    txn.adapters()
+        .insert_instance(NewAdapterInstance {
+            adapter_instance_id: instance,
+            adapter_id: adapter,
+            adapter_version: "1.0.0".to_owned(),
+            bundle_digest: "bundle-1".to_owned(),
+            daemon_instance_id: DaemonInstanceId::new(&provider),
+            pid: None,
+            process_start_identity: None,
+            state: "starting".to_owned(),
+            exit_reason: None,
+            last_heartbeat_ms: None,
+            started_at_ms: 21,
+            ended_at_ms: None,
+        })
+        .await
+        .unwrap();
+    txn.config()
+        .insert_generation(NewConfigGeneration {
+            generation_id: valid,
+            digest: "digest-valid".to_owned(),
+            document: vec![7],
+            validation_state: "validated".to_owned(),
+            test_state: "passed".to_owned(),
+            created_by_actor_id: ActorId::new(&provider),
+            created_at_ms: 22,
+        })
+        .await
+        .unwrap();
+    txn.config()
+        .insert_generation(NewConfigGeneration {
+            generation_id: bad_test_state,
+            digest: "digest-bad-test-state".to_owned(),
+            document: vec![8],
+            validation_state: "proposed".to_owned(),
+            test_state: "untested".to_owned(),
+            created_by_actor_id: ActorId::new(&provider),
+            created_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    drop(store);
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(false);
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for statement in [
+        "UPDATE loop_turns SET state = 'bogus'",
+        "UPDATE decisions SET decision_type = 'Bogus'",
+        "UPDATE adapter_instances SET state = 'bogus'",
+        "UPDATE config_generations SET validation_state = 'bogus' WHERE digest = 'digest-valid'",
+        "UPDATE config_generations SET test_state = 'bogus' \
+         WHERE digest = 'digest-bad-test-state'",
+    ] {
+        sqlx::query(statement).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    drop(pool);
+
+    let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
+    let mut read = store.begin_read().await.unwrap();
+    let turn_error = read.loop_turns().get_turn(turn).await.unwrap_err();
+    assert_eq!(turn_error.code(), ErrorCode::Internal);
+    assert_eq!(turn_error.retry_class(), RetryClass::Never);
+    let decision_error = read
+        .loop_turns()
+        .get_decision(seeded.run, decision)
+        .await
+        .unwrap_err();
+    assert_eq!(decision_error.code(), ErrorCode::Internal);
+    assert_eq!(decision_error.retry_class(), RetryClass::Never);
+    let validation_error = read.config().get_generation(valid).await.unwrap_err();
+    assert_eq!(validation_error.code(), ErrorCode::Internal);
+    assert_eq!(validation_error.retry_class(), RetryClass::Never);
+    let test_state_error = read
+        .config()
+        .get_generation(bad_test_state)
+        .await
+        .unwrap_err();
+    assert_eq!(test_state_error.code(), ErrorCode::Internal);
+    assert_eq!(test_state_error.retry_class(), RetryClass::Never);
+    drop(read);
+
+    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+    let instance_error = txn
+        .adapters()
+        .cas_instance_state(
+            instance,
+            "starting",
+            AdapterInstanceStatePatch {
+                state: Some("ready".to_owned()),
+                ..AdapterInstanceStatePatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(instance_error.code(), ErrorCode::Internal);
+    assert_eq!(instance_error.retry_class(), RetryClass::Never);
 }

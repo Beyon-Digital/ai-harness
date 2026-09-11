@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use domain::ids::ConfigGenerationId;
+use domain::run::UnknownStateValue;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::{ActiveConfigGenerationRow, ConfigGenerationRow, NewConfigGeneration};
@@ -27,6 +28,28 @@ impl SqliteConfigRepo {
     }
 }
 
+/// Parses the exact `config_generations.validation_state` CHECK literal set.
+fn validation_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "proposed" | "validated" | "rejected" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "ConfigValidationState",
+        }),
+    }
+}
+
+/// Parses the exact `config_generations.test_state` CHECK literal set.
+fn test_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "untested" | "passed" | "failed" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "ConfigTestState",
+        }),
+    }
+}
+
 fn decode_generation(row: &SqliteRow) -> errors::Result<ConfigGenerationRow> {
     Ok(ConfigGenerationRow {
         generation_id: mapping::decode_id(
@@ -35,8 +58,16 @@ fn decode_generation(row: &SqliteRow) -> errors::Result<ConfigGenerationRow> {
         )?,
         digest: mapping::text(row, "digest")?,
         document: mapping::blob(row, "document")?,
-        validation_state: mapping::text(row, "validation_state")?,
-        test_state: mapping::text(row, "test_state")?,
+        validation_state: mapping::decode_state(
+            "config_generations.validation_state",
+            &mapping::text(row, "validation_state")?,
+            validation_state_from_state,
+        )?,
+        test_state: mapping::decode_state(
+            "config_generations.test_state",
+            &mapping::text(row, "test_state")?,
+            test_state_from_state,
+        )?,
         created_by_actor_id: mapping::decode_id(
             "config_generations.created_by_actor_id",
             &mapping::text(row, "created_by_actor_id")?,
@@ -117,6 +148,9 @@ impl ConfigRepo for SqliteConfigRepo {
         generation: ConfigGenerationId,
         activated_at_ms: i64,
     ) -> errors::Result<bool> {
+        // Read-then-upsert is race-free only because every writer holds
+        // `BEGIN IMMEDIATE` on this connection; the revision cannot change
+        // between the read below and the upsert.
         let mut guard = self.conn.lock().await;
         let conn = guard.connection()?;
         let current: Option<i64> =

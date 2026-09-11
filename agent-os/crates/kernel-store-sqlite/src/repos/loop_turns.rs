@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use domain::ids::{DecisionId, RunId, TurnId};
+use domain::run::UnknownStateValue;
 use kernel_store::models::{DecisionRow, LoopTurnPatch, LoopTurnRow, NewDecision, NewLoopTurn};
 use kernel_store::repositories::{LoopRead, LoopRepo};
 use sqlx::sqlite::SqliteRow;
@@ -21,6 +22,30 @@ impl SqliteLoopRepo {
     /// Creates a repository view over a transaction connection.
     pub(crate) fn new(conn: SharedConn) -> Self {
         Self { conn }
+    }
+}
+
+/// Parses the exact `loop_turns.state` CHECK literal set.
+fn turn_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "issued" | "accepted" | "stale" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "LoopTurnState",
+        }),
+    }
+}
+
+/// Parses the exact `decisions.decision_type` CHECK literal set.
+fn decision_type_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "Complete" | "Fail" | "Wait" | "SpawnAgent" | "InvokeEffect" | "RequestApproval" => {
+            Ok(value.to_owned())
+        }
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "DecisionType",
+        }),
     }
 }
 
@@ -44,7 +69,11 @@ fn decode_turn(row: &SqliteRow) -> errors::Result<LoopTurnRow> {
             "loop_turns.input_event_cursor",
             &mapping::text(row, "input_event_cursor")?,
         )?,
-        state: mapping::text(row, "state")?,
+        state: mapping::decode_state(
+            "loop_turns.state",
+            &mapping::text(row, "state")?,
+            turn_state_from_state,
+        )?,
         issued_at_ms: mapping::int(row, "issued_at_ms")?,
     })
 }
@@ -57,7 +86,11 @@ fn decode_decision(row: &SqliteRow) -> errors::Result<DecisionRow> {
         )?,
         run_id: mapping::decode_id("decisions.run_id", &mapping::text(row, "run_id")?)?,
         turn_id: mapping::decode_id("decisions.turn_id", &mapping::text(row, "turn_id")?)?,
-        decision_type: mapping::text(row, "decision_type")?,
+        decision_type: mapping::decode_state(
+            "decisions.decision_type",
+            &mapping::text(row, "decision_type")?,
+            decision_type_from_state,
+        )?,
         decision_digest: mapping::text(row, "decision_digest")?,
         decision_bytes: mapping::blob(row, "decision_bytes")?,
         run_revision: mapping::decode_u64(

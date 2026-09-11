@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use domain::ids::{AdapterId, AdapterInstanceId};
+use domain::run::UnknownStateValue;
 use domain::security::{ConformanceState, TrustState};
 use kernel_store::models::{
     AdapterInstanceStatePatch, AdapterRegistrationRow, ConformanceReportRow, NewAdapterInstance,
@@ -26,6 +27,17 @@ impl SqliteAdapterRepo {
     /// Creates a repository view over a transaction connection.
     pub(crate) fn new(conn: SharedConn) -> Self {
         Self { conn }
+    }
+}
+
+/// Parses the exact `adapter_instances.state` CHECK literal set.
+fn instance_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "starting" | "ready" | "exited" | "failed" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "AdapterInstanceState",
+        }),
     }
 }
 
@@ -180,6 +192,26 @@ impl AdapterRepo for SqliteAdapterRepo {
         patch: AdapterInstanceStatePatch,
     ) -> errors::Result<bool> {
         let mut guard = self.conn.lock().await;
+        let conn = guard.connection()?;
+
+        // Validate the persisted literal before mutating; an unknown value
+        // fails closed instead of being compared as an opaque string.
+        let persisted: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM adapter_instances WHERE adapter_instance_id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        let Some(persisted) = persisted else {
+            return Ok(false);
+        };
+        mapping::decode_state(
+            "adapter_instances.state",
+            &persisted,
+            instance_state_from_state,
+        )?;
+
         let result = sqlx::query(
             "UPDATE adapter_instances SET \
              state = COALESCE(?1, state), \
@@ -194,7 +226,7 @@ impl AdapterRepo for SqliteAdapterRepo {
         .bind(patch.ended_at_ms)
         .bind(id.to_string())
         .bind(expect_state)
-        .execute(guard.connection()?)
+        .execute(conn)
         .await
         .map_err(mapping::from_sqlx)?;
         Ok(result.rows_affected() == 1)
