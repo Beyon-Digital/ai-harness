@@ -14,6 +14,8 @@ message AgentRun {
   uint64 run_revision = 7; uint64 loop_epoch = 8; uint64 step_sequence = 9;
   string input_event_cursor = 10; uint64 cancellation_epoch = 11;
   string resolved_environment_id = 12;
+  string output_ref = 13;
+  string current_turn_id = 14;
 }
 
 message ResolvedBinding {
