@@ -113,13 +113,14 @@ tasks:
   goal: Place the build-pack contract files into the implementation repo and generate Rust protobuf types deterministically.
   files:
   - agent-os/crates/domain/build.rs
+  - proto/README.md
   - proto/capabilities/adapter-capabilities.yaml
   - proto/capabilities/security-capabilities.yaml
   - proto/catalog.yaml
   - proto/config/agent-os.schema.json
   - proto/contract-lock.sha256
-  - proto/control/commands.proto
-  - proto/control/mvp_control.proto
+  - proto/control-api/commands.proto
+  - proto/control-api/mvp_control.proto
   - proto/domain/core.proto
   - proto/domain/effects.proto
   - proto/domain/entities.proto
@@ -993,8 +994,8 @@ tasks:
   goal: Expose typed base commands and read queries needed to drive the MVP.
   files:
   - crates/control-api/src/control_service.rs
-  - proto/control/commands.proto
-  - proto/control/mvp_control.proto
+  - proto/control-api/commands.proto
+  - proto/control-api/mvp_control.proto
   tests:
   - API idempotency replay test
   - query not found mapping
