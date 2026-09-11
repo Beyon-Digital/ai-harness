@@ -1,0 +1,331 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+index cec624f..194c249 100644
+--- a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
++++ b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+@@ -1,10 +1,28 @@
+ # Source Contract Corrections Applied in This Build Pack
+ 
++## Inception version normalization
++
+ The canonical inception docs describe both the configuration schema and extension manifest as version 1, but the source JSON Schemas contained stale `const: 2` values.
+ 
+ For this inception implementation pack:
+ 
+ - `config.schema_version == 1`.
+ - `extension.manifest_version == 1`.
+ 
+ These are inception-contract consistency corrections only.
++
++## Contract snapshot unification
++
++- Removed `contracts/control-api/control.proto`. It declared the same `agentos.spec.v1` package and the same six message names (`CommandRequest`, `CommandResponse`, `GetRunRequest`, `GetRunResponse`, `GetEffectRequest`, `GetEffectResponse`, `ApprovalResponseRequest`, `ApprovalResponseResult`) as `contracts/control-api/mvp_control.proto`, so the snapshot could not compile. `mvp_control.proto` is the single normative Control API definition; the removal applies to this pack snapshot only.
++- Added `contracts/control-api/commands.proto`: one payload message per command in `specs/command-catalog.md` (16) plus the two commands added by design D9 (`RollbackConfigGeneration`, `ResolveBlockedRun`), for 18 messages total. `CommandRequest.command_type` is the fully-qualified name of one of these messages (design D2).
++- Replaced the free-string `decision_type` and `bytes payload` in `contracts/protocols/agent_loop.proto` with the fenced `LoopDecision` tuple plus a `oneof decision` over `Complete`, `Fail`, `Wait`, `SpawnAgent`, `InvokeEffect`, and `RequestApproval`.
++- Added `AgentRun.output_ref = 13` and `AgentRun.current_turn_id = 14` in `contracts/domain/core.proto` so loop output can be persisted on the run.
++- Replaced the `EventEnvelope` subscription stream element with `EventStreamFrame` (an `EventEnvelope` or a `LagNotice`) in `contracts/control-api/mvp_control.proto` so a lagging subscriber receives a resumable cursor (design D15).
++
++The following snapshot files existed but were previously undocumented:
++
++- `contracts/control-api/mvp_control.proto`;
++- `contracts/domain/entities.proto`;
++- `contracts/protocols/adapter_frames.proto`.
++
++The repo-root canonical sources under `spec/` are unchanged.
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/README.md b/agent-os-microkernel-mvp-buildpack/contracts/README.md
+index 0272807..496ecc0 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/README.md
++++ b/agent-os-microkernel-mvp-buildpack/contracts/README.md
+@@ -1,10 +1,30 @@
+ # Frozen MVP Contract Snapshot
+ 
+ This directory is the implementation-pack snapshot of the canonical inception contracts used by the microkernel/control-plane MVP.
+ 
+-Rules:
++## Authority
++
++- `control-api/mvp_control.proto` is the single normative Control API definition in this snapshot. It is the only file that declares a Control API service; the duplicate `control-api/control.proto` was removed from this pack only (see `../SOURCE_CORRECTIONS.md`).
++- `protocols/agent_loop.proto` is the normative loop contract: `LoopInput`, the fenced `LoopDecision`, and its six decision variants.
++- `CommandRequest.command_type` is the fully-qualified protobuf message name of a payload message declared in `control-api/commands.proto` (design D2).
++
++## Snapshot inventory
++
++- `control-api/mvp_control.proto` — Control API and event API services, command envelope, and subscription frames.
++- `control-api/commands.proto` — one payload message per catalogued command (18 total).
++- `domain/core.proto`, `domain/entities.proto`, `domain/effects.proto`, `domain/security.proto` — canonical domain records and enums.
++- `events/event.proto`, `events/catalog.yaml` — event envelope and event catalog.
++- `protocols/agent_loop.proto`, `protocols/effect.proto`, `protocols/external_adapter.proto`, `protocols/adapter_frames.proto` — loop, effect, and adapter protocol frames.
++- `ports/*.proto` — public port contracts.
++- `capabilities/*.yaml` — capability declarations.
++- `config/agent-os.schema.json` — configuration schema.
++- `manifests/extension.schema.json` — extension manifest schema.
++- `catalog.yaml` — port version catalog.
++- `contract-lock.sha256` — snapshot hash lock.
++
++## Rules
+ 
+ - Protocol/domain/public port fields come from here, not from ad-hoc hand-written duplicates.
+ - `config.schema_version` and `extension.manifest_version` are normalized to inception version `1` as documented in `../SOURCE_CORRECTIONS.md`.
+ - Implementation-specific semantics live in `../specs/` and must not contradict these contracts.
+ - Re-run `scripts/validate_buildpack.py` after any intentional contract edit and update `contract-lock.sha256`.
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/control-api/commands.proto b/agent-os-microkernel-mvp-buildpack/contracts/control-api/commands.proto
+new file mode 100644
+index 0000000..b5a0be6
+--- /dev/null
++++ b/agent-os-microkernel-mvp-buildpack/contracts/control-api/commands.proto
+@@ -0,0 +1,139 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++import "domain/core.proto";
++import "domain/entities.proto";
++import "domain/effects.proto";
++import "protocols/agent_loop.proto";
++
++message CreateSession {
++  string session_id = 1;
++  bytes metadata = 2;
++}
++
++message PutAgentSpecRevision {
++  string agent_spec_id = 1;
++  string version = 2;
++  bytes body_bytes = 3;
++  string body_digest = 4;
++}
++
++message CreateTaskRun {
++  string task_id = 1;
++  string run_id = 2;
++  string session_id = 3;
++  string task_kind = 4;
++  bytes task_payload = 5;
++  VersionedRef agent_spec_ref = 6;
++  string parent_run_id = 7;
++  uint64 observed_parent_cancellation_epoch = 8;
++  string requested_profile = 9;
++  string workspace_uri = 10;
++  repeated string requested_capabilities = 11;
++  bytes requested_budget = 12;
++}
++
++message BindRun {
++  string run_id = 1;
++  uint64 expected_run_revision = 2;
++  string config_generation_id = 3;
++  ResolvedRunEnvironment resolved_environment = 4;
++}
++
++message ClaimReadyRun {
++  string run_id = 1;
++  string claim_owner = 2;
++  uint64 claim_ttl_ms = 3;
++}
++
++message AddRunDependency {
++  string source_run_id = 1;
++  string target_run_id = 2;
++  DependencyCondition condition = 3;
++  uint64 expected_graph_revision = 4;
++}
++
++message CancelRun {
++  string run_id = 1;
++  uint64 expected_run_revision = 2;
++  string reason = 3;
++}
++
++message SubmitLoopDecision {
++  LoopDecision decision = 1;
++}
++
++message ResolveUnknownEffect {
++  string effect_id = 1;
++  EffectState expected_effect_state = 2;
++  string action = 3;
++  string result_ref = 4;
++  string reason = 5;
++  string approval_request_id = 6;
++}
++
++message CreateApprovalRequest {
++  string request_id = 1;
++  string request_digest = 2;
++  string principal_id = 3;
++  string actor_id = 4;
++  string run_id = 5;
++  string operation = 6;
++  string target_resource = 7;
++  repeated string capability_ids = 8;
++  string extension_bundle_digest = 9;
++  string config_generation_digest = 10;
++  int64 expires_at_ms = 11;
++  string nonce = 12;
++}
++
++message RespondApproval {
++  string request_id = 1;
++  string request_digest = 2;
++  string decision = 3;
++  string device_id = 4;
++  string responder_principal_id = 5;
++}
++
++message ProposeConfigGeneration {
++  string generation_id = 1;
++  bytes document_bytes = 2;
++  string digest = 3;
++}
++
++message MarkConfigTested {
++  string generation_id = 1;
++  string digest = 2;
++  string test_report_digest = 3;
++  string test_result = 4;
++}
++
++message ActivateConfigGeneration {
++  string generation_id = 1;
++  uint64 expected_active_revision = 2;
++}
++
++message ScheduleTimer {
++  string timer_id = 1;
++  string run_id = 2;
++  string timer_kind = 3;
++  int64 due_at_ms = 4;
++  bytes payload = 5;
++}
++
++message CancelTimer {
++  string timer_id = 1;
++  uint64 expected_version = 2;
++}
++
++message RollbackConfigGeneration {
++  string generation_id = 1;
++  uint64 expected_active_revision = 2;
++  string reason = 3;
++}
++
++message ResolveBlockedRun {
++  string run_id = 1;
++  string action = 2;
++  string reason = 3;
++}
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/control-api/control.proto b/agent-os-microkernel-mvp-buildpack/contracts/control-api/control.proto
+deleted file mode 100644
+index 9575be9..0000000
+--- a/agent-os-microkernel-mvp-buildpack/contracts/control-api/control.proto
++++ /dev/null
+@@ -1,13 +0,0 @@
+-syntax="proto3"; package agentos.spec.v1;
+-service ControlApi {
+-  rpc SubmitCommand(CommandRequest) returns (CommandResponse);
+-  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+-  rpc GetEffect(GetEffectRequest) returns (GetEffectResponse);
+-  rpc RespondApproval(ApprovalResponseRequest) returns (ApprovalResponseResult);
+-}
+-message CommandRequest { string command_id=1; string idempotency_key=2; string actor_id=3; string request_digest=4; string command_type=5; bytes payload=6; }
+-message CommandResponse { string command_id=1; string outcome_code=2; bytes payload=3; }
+-message GetRunRequest { string run_id=1; } message GetRunResponse { bytes run=1; }
+-message GetEffectRequest { string effect_id=1; } message GetEffectResponse { bytes effect=1; }
+-message ApprovalResponseRequest { string request_id=1; string request_digest=2; string decision=3; string device_id=4; }
+-message ApprovalResponseResult { string status=1; }
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/control-api/mvp_control.proto b/agent-os-microkernel-mvp-buildpack/contracts/control-api/mvp_control.proto
+index 1ccabe9..733a5e8 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/control-api/mvp_control.proto
++++ b/agent-os-microkernel-mvp-buildpack/contracts/control-api/mvp_control.proto
+@@ -13,21 +13,21 @@ service MvpControlApi {
+   rpc GetEffect(GetEffectRequest) returns (GetEffectResponse);
+   rpc GetRunGraph(GetRunGraphRequest) returns (GetRunGraphResponse);
+   rpc GetActiveConfig(GetActiveConfigRequest) returns (GetActiveConfigResponse);
+   rpc ListAdapters(ListAdaptersRequest) returns (ListAdaptersResponse);
+   rpc RespondApproval(ApprovalResponseRequest) returns (ApprovalResponseResult);
+   rpc Health(HealthRequest) returns (HealthResponse);
+ }
+ 
+ service MvpEventApi {
+   rpc ReadStream(ReadEventStreamRequest) returns (ReadEventStreamResponse);
+-  rpc Subscribe(SubscribeEventsRequest) returns (stream EventEnvelope);
++  rpc Subscribe(SubscribeEventsRequest) returns (stream EventStreamFrame);
+ }
+ 
+ message CommandRequest {
+   string command_id = 1;
+   string idempotency_key = 2;
+   string principal_id = 3;
+   string actor_id = 4;
+   string device_id = 5;
+   string request_digest = 6;
+   string correlation_id = 7;
+@@ -65,10 +65,17 @@ message HealthResponse {
+   string status = 1;
+   string daemon_instance_id = 2;
+   uint64 daemon_fencing_epoch = 3;
+   string active_config_generation_id = 4;
+   uint64 outbox_unpublished_count = 5;
+ }
+ 
+ message ReadEventStreamRequest { string stream_key = 1; uint64 from_sequence = 2; uint32 limit = 3; }
+ message ReadEventStreamResponse { repeated EventEnvelope events = 1; bool retention_gap = 2; }
+ message SubscribeEventsRequest { string stream_key = 1; uint64 after_sequence = 2; }
++message EventStreamFrame {
++  oneof frame {
++    EventEnvelope event = 1;
++    LagNotice lag = 2;
++  }
++}
++message LagNotice { string stream_key = 1; uint64 resume_sequence = 2; }
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto b/agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto
+index 00627f5..9ff980a 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto
++++ b/agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto
+@@ -7,20 +7,22 @@ message ResourceUri { string uri = 1; }
+ enum RunState { RUN_STATE_UNSPECIFIED=0; CREATED=1; READY=2; RUNNING=3; WAITING_TOOL=4; WAITING_CHILD=5; WAITING_HUMAN=6; SUSPENDED=7; CANCELLING=8; COMPLETED=9; FAILED=10; CANCELLED=11; }
+ enum RecoveryDisposition { RECOVERY_UNSPECIFIED=0; NORMAL=1; NEEDS_RECONCILIATION=2; RECOVERING=3; BLOCKED_UNKNOWN_EFFECT=4; BLOCKED_MISSING_RESOURCE=5; REQUIRES_HUMAN_DECISION=6; }
+ enum WorkspaceAccessMode { WORKSPACE_MODE_UNSPECIFIED=0; READ_ONLY=1; EXCLUSIVE_WRITE=2; ISOLATED_FORK=3; SHARED_COORDINATED_WRITE=4; }
+ 
+ message AgentRun {
+   string run_id = 1; string task_id = 2; string session_id = 3; string parent_run_id = 4;
+   RunState state = 5; RecoveryDisposition recovery = 6;
+   uint64 run_revision = 7; uint64 loop_epoch = 8; uint64 step_sequence = 9;
+   string input_event_cursor = 10; uint64 cancellation_epoch = 11;
+   string resolved_environment_id = 12;
++  string output_ref = 13;
++  string current_turn_id = 14;
+ }
+ 
+ message ResolvedBinding {
+   string port_id = 1; VersionedRef adapter = 2; map<string,string> capabilities = 3;
+ }
+ message ResolvedRunEnvironment {
+   string id = 1; string run_id = 2; VersionedRef agent_spec = 3; VersionedRef agent_loop = 4;
+   string config_generation_id = 5; repeated ResolvedBinding bindings = 6;
+   ResourceUri workspace_uri = 7; string workspace_base_revision = 8; WorkspaceAccessMode workspace_mode = 9;
+   string model_provider = 10; string model_id = 11; bytes model_parameters_json = 12;
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/protocols/agent_loop.proto b/agent-os-microkernel-mvp-buildpack/contracts/protocols/agent_loop.proto
+index 8351f9d..5c42ac6 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/protocols/agent_loop.proto
++++ b/agent-os-microkernel-mvp-buildpack/contracts/protocols/agent_loop.proto
+@@ -1,9 +1,19 @@
+ syntax="proto3"; package agentos.spec.v1;
+ message LoopInput {
+   string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
+   string input_event_cursor=5; string turn_id=6; bytes state=7; bytes events=8;
+ }
+ message LoopDecision {
+-  string decision_id=1; string run_id=2; uint64 based_on_run_revision=3; uint64 loop_epoch=4;
+-  uint64 step_sequence=5; string based_on_event_cursor=6; string turn_id=7; string decision_type=8; bytes payload=9;
++  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
++  string input_event_cursor=5; string turn_id=6; string decision_id=7;
++  oneof decision {
++    Complete complete=8; Fail fail=9; Wait wait=10; SpawnAgent spawn_agent=11;
++    InvokeEffect invoke_effect=12; RequestApproval request_approval=13;
++  }
+ }
++message Complete { string output_ref=1; }
++message Fail { string reason_code=1; }
++message Wait { string reason=1; string timer_id=2; }
++message SpawnAgent { bytes child_request=1; }
++message InvokeEffect { string operation=1; bytes payload=2; bytes effect_claim=3; }
++message RequestApproval { bytes approval_draft=1; }

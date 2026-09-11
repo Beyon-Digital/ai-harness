@@ -1,0 +1,52 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 2283fd1..e4ef577 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -141,24 +141,26 @@ dependencies = [
+  "command-coordinator",
+  "domain",
+  "errors",
+  "events",
+ ]
+ 
+ [[package]]
+ name = "domain"
+ version = "0.1.0"
+ dependencies = [
++ "proptest",
+  "prost",
+  "prost-build",
+  "protoc-bin-vendored",
+  "serde",
++ "tempfile",
+  "uuid",
+ ]
+ 
+ [[package]]
+ name = "effects"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+  "event-journal",
+diff --git a/agent-os/crates/domain/Cargo.toml b/agent-os/crates/domain/Cargo.toml
+index f5e79ad..b65637a 100644
+--- a/agent-os/crates/domain/Cargo.toml
++++ b/agent-os/crates/domain/Cargo.toml
+@@ -6,10 +6,16 @@ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ prost.workspace = true
+ serde.workspace = true
+ uuid.workspace = true
+ 
+ [build-dependencies]
+ prost-build.workspace = true
+ protoc-bin-vendored.workspace = true
++
++[dev-dependencies]
++prost-build.workspace = true
++proptest.workspace = true
++protoc-bin-vendored.workspace = true
++tempfile.workspace = true

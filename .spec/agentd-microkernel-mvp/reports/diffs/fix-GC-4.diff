@@ -1,0 +1,156 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md b/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
+index 6b2c8ce..a0da367 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
+@@ -10,21 +10,21 @@ non-terminal effect. Each `(run state, effect state)` pair maps to exactly one
+ `REQUIRES_HUMAN_DECISION`. `RunPaused` and `RunResumed` no longer exist in the MVP catalog
+ (design D8), so no disposition references them.
+ 
+ Notation:
+ 
+ - Effect state `NONE` means no `effects` row references the run. The settled states
+   `COMMITTED`, `FAILED`, and `CANCELLED` are equivalent to `NONE` for recovery: a settled
+   effect adds no ambiguity, so the run-state row applies.
+ - `PREPARED`, `CLAIMED`, `DISPATCHED`, `ACKNOWLEDGED`, and `UNKNOWN` are the in-flight
+   effect states.
+-- `lease` is `effects.lease_expires_unix_ms`; `epoch` is the daemon fencing epoch acquired at
++- `lease` is `effects.lease_expires_ms`; `epoch` is the daemon fencing epoch acquired at
+   startup (lifecycle step 4), which is always newer than any epoch owned by a prior daemon.
+ 
+ ## Matrix A — runs with no in-flight effect
+ 
+ | Run state | Condition | Disposition | Recovery action |
+ |---|---|---|---|
+ | `CREATED` | — | `NORMAL` | No loop turn can have run yet; the binder may proceed once dependencies allow. |
+ | `READY` | — | `NORMAL` | The claim worker may proceed after recovery validation. |
+ | `RUNNING` | — | `RECOVERING` | Reacquire the run claim and loop epoch under the current daemon epoch, validate frozen loop/adapter availability, then `NORMAL`. |
+ | `WAITING_TOOL` | no in-flight effect (timer-backed wait) | `NORMAL` | Claim an overdue `Scheduled` timer normally; there is no effect to reconcile. |
+@@ -40,52 +40,55 @@ Notation:
+ 
+ | Run state | Effect state | Condition | Disposition | Recovery action |
+ |---|---|---|---|---|
+ | `RUNNING` / `WAITING_TOOL` | `PREPARED` | — | `NORMAL` | Safe to claim; the protocol persists `DISPATCHED` before any adapter call, so no external operation exists. |
+ | `CANCELLING` | `PREPARED` | — | `RECOVERING` | Cancel the prepared effect inside the cancellation transaction; never dispatch it. |
+ | `RUNNING` / `WAITING_TOOL` | `CLAIMED` | lease expired | `RECOVERING` | Reclaim with a higher fencing token; never dispatch under the stale token. |
+ | `RUNNING` / `WAITING_TOOL` | `CLAIMED` | lease live and daemon epoch changed | `RECOVERING` | The old executor is fenced by the epoch change; reclaim with a higher fencing token, then continue. |
+ | `RUNNING` / `WAITING_TOOL` | `CLAIMED` | lease live and epoch unchanged | `RECOVERING` | Do not double-claim; wait for expiry or reclaim only under configured policy. |
+ | `CANCELLING` | `CLAIMED` | — | `RECOVERING` | Fence the old executor and cancel the claim; never dispatch. |
+ | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `STATUS_LOOKUP`, `RESULT_LOOKUP`, or `DETERMINISTIC_INSPECTION` | `NEEDS_RECONCILIATION` | Query the provider with the same operation ID/provider ref; never a fresh operation ID. |
+-| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN` and idempotency is `NATURALLY_IDEMPOTENT` or `IDEMPOTENCY_KEY_SUPPORTED` | `NEEDS_RECONCILIATION` | Redispatch the same operation ID only under configured policy, then record the outcome. |
+-| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN` and idempotency is `NOT_IDEMPOTENT` or `UNKNOWN_IDEMPOTENCY` | `BLOCKED_UNKNOWN_EFFECT` | Mark the effect `UNKNOWN`, block the run, and require a recorded `ResolveUnknownEffect` decision (R7.4). |
++| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN_RECONCILIATION` and idempotency is `NATURALLY_IDEMPOTENT` or `IDEMPOTENCY_KEY_SUPPORTED` | `NEEDS_RECONCILIATION` | Redispatch the same operation ID only under configured policy, then record the outcome. |
++| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN_RECONCILIATION` and idempotency is `NOT_IDEMPOTENT` or `UNKNOWN_IDEMPOTENCY` | `BLOCKED_UNKNOWN_EFFECT` | Mark the effect `UNKNOWN`, block the run, and require a recorded `ResolveUnknownEffect` decision (R7.4). |
+ | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `ACKNOWLEDGED` | owning run transition uncommitted | `RECOVERING` | Deterministic replay: commit effect `COMMITTED` and the uncommitted owning-run transition atomically under the current epoch. |
+ | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `ACKNOWLEDGED` | owning run transition already committed | `RECOVERING` | Complete effect `COMMITTED` from the durable acknowledgment; no external call. |
+ | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `UNKNOWN` | — | `BLOCKED_UNKNOWN_EFFECT` | Never dispatch again; the only exit is a recorded `ResolveUnknownEffect` decision (R7.4). |
+ | `SUSPENDED` | `PREPARED`, `CLAIMED`, or `ACKNOWLEDGED` | — | `REQUIRES_HUMAN_DECISION` | No resume path exists (design D8); complete only local effect cleanup that an operator directs. |
+ | `SUSPENDED` | `DISPATCHED` | — | `REQUIRES_HUMAN_DECISION` | Reconcile and record the external outcome first; an operator still decides cancel or re-create, and recovery never resumes automatically. |
+ | `SUSPENDED` | `UNKNOWN` | — | `BLOCKED_UNKNOWN_EFFECT` | Resolve the unknown effect with a recorded decision before anything else. |
+ 
+ ## Matrix C — effect with a terminal owning run
+ 
+ Effects can outlive the run that owned them (for example, a crash during cancellation).
+-Terminal run states do not change here; the effect is cleaned up or reconciled.
++Terminal run states do not change here; the effect is cleaned up or reconciled. Matrix C
++takes precedence over Matrix D: a terminal owning run has no disposition to block, and an
++orphaned `PREPARED` or `CLAIMED` effect is cancelled or fenced locally without resolving the
++frozen adapter.
+ 
+ | Run state | Effect state | Condition | Disposition | Recovery action |
+ |---|---|---|---|---|
+ | `COMPLETED` / `FAILED` / `CANCELLED` | `PREPARED` | orphaned effect, terminal owning run | `NORMAL` | Cancel the orphaned effect; the protocol guarantees it was never dispatched. |
+ | `COMPLETED` / `FAILED` / `CANCELLED` | `CLAIMED` | — | `NORMAL` | Fence the claim and cancel it; `DISPATCHED` was never persisted, so no external operation exists. |
+ | `COMPLETED` / `FAILED` / `CANCELLED` | `DISPATCHED` | — | `NEEDS_RECONCILIATION` | The external operation may exist; reconcile and record the effect outcome. The run state does not change. |
+ | `COMPLETED` / `FAILED` / `CANCELLED` | `ACKNOWLEDGED` | — | `RECOVERING` | Complete effect `COMMITTED` from the durable acknowledgment. The run state does not change. |
+ | `COMPLETED` / `FAILED` / `CANCELLED` | `UNKNOWN` | — | `BLOCKED_UNKNOWN_EFFECT` | A recorded `ResolveUnknownEffect` decision is required before cleanup. The run state does not change. |
+ 
+ ## Matrix D — missing resources
+ 
+ A missing resource is a durable reference that cannot be resolved, not an ambiguous external
+ effect. It never selects a replacement binding (the frozen `ResolvedRunEnvironment` is
+ immutable).
+ 
+ | Run state | Condition | Disposition | Recovery action |
+ |---|---|---|---|
+ | any non-terminal run | the frozen `ResolvedRunEnvironment`, a binding's adapter id/version/digest, the workspace URI, or the referenced config generation cannot be loaded or validated | `BLOCKED_MISSING_RESOURCE` | Do not substitute a replacement; exit through `ResolveBlockedRun` (`resume` retries the same frozen references, `cancel` terminalizes the run). |
+-| any run | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
++| any non-terminal run | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
+ | any run | the same conditions as above and the effect state is `UNKNOWN` | `BLOCKED_UNKNOWN_EFFECT` | `BLOCKED_UNKNOWN_EFFECT` takes precedence because external side effects may already exist; resolve it first. |
+ 
+ ## Unmapped combinations fail closed
+ 
+ If startup encounters a `(run state, effect state)` pair that no matrix row assigns, the
+ daemon MUST fail closed (design D7): it selects no default disposition, marks itself
+ unhealthy, dispatches no effect, reports the offending `(run_id, run_state, effect_id,
+ effect_state)`, and exits. `REQUIRES_HUMAN_DECISION` is a disposition a row assigns, never a
+ fallback.
+ 
+@@ -113,36 +116,37 @@ or `cancel`.
+   the run stays blocked and the missing reference is returned.
+ - `cancel` transitions the run through the cancellation path and terminalizes it as
+   `CANCELLED`.
+ - The command is idempotent per the common key/digest contract: a repeated
+   `(principal_id, idempotency_key)` with the same digest returns the stored outcome.
+ 
+ ## Unknown effects never redispatch silently
+ 
+ R7.4: an effect in state `UNKNOWN`, or any row that selects `BLOCKED_UNKNOWN_EFFECT`, is never
+ dispatched again by recovery. The recorded exit is `ResolveUnknownEffect` with
+-`expected_effect_state = Unknown` and an explicit `action` (`mark_succeeded`, `mark_failed`,
++`expected_effect_state = UNKNOWN` and an explicit `action` (`mark_succeeded`, `mark_failed`,
+ or `retry_accepting_duplicate_risk`); the duplicate-risk retry additionally requires an
+ approval request when policy demands one. `ResolveBlockedRun` does not apply here.
+ 
+ ## Recovery actions outside the run-by-effect matrix
+ 
+ These records are recovered before a run's disposition returns to `NORMAL` (recovery
+ ordering). The disposition shown is the classification the recovery pass reports; only run
+ dispositions are persisted in `runs.recovery_disposition`.
+ 
+ | Persisted condition after restart | Disposition | Safe action |
+ |---|---|---|
+ | Command absent from the idempotency table | `NORMAL` | The caller may retry the command with the same request/idempotency key. |
+ | Command idempotency outcome present | `NORMAL` | Return the stored outcome; never execute the command again. |
+ | Outbox event not journal-published | `NORMAL` | Append the same event ID/sequence to the Event Journal. |
+ | Outbox event journaled but the publication mark is absent | `NORMAL` | Reappend; an exact duplicate is success; then mark published. |
++| Effect result from a stale executor after a higher fencing token claimed | `NORMAL` | Reject the authoritative commit at the fencing check; retain the diagnostic trace only. |
+ | Timer `Scheduled` and overdue | `NORMAL` | Claim it normally. |
+ | Timer `Claimed` by a stale daemon/worker | `RECOVERING` | Reclaim under fencing/lease rules; never mark `Fired` without the command outcome. |
+ | Resource reserved with a terminal owning run | `NORMAL` | Release if the resource is purely logical; reconcile first if an external allocation may exist. |
+ | External allocation uncertain | `NEEDS_RECONCILIATION` | Mark the resource unknown; never assume release. |
+ | Workspace lease whose owner run is terminal | `NORMAL` | The coordinator may release the logical lease after verifying that no active effect or process requires it. |
+ | External process from a prior daemon instance | `RECOVERING` | Treat it as stale/untrusted; terminate or reconcile it; never accept messages under the old daemon epoch. |
+ 
+ ## Recovery ordering
+ 
+ Recover authoritative records before issuing new loop turns. Effect, timer, and resource
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/types-and-ids.md b/agent-os-microkernel-mvp-buildpack/specs/types-and-ids.md
+index a2dcf0a..39e8b5f 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/types-and-ids.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/types-and-ids.md
+@@ -143,22 +143,23 @@ sequence   = "0" / %x31-39 *DIGIT
+   returns the stable parse error (`InvalidId`) (R4 boundary).
+ - For every valid cursor, `EventCursor::from_str(&cursor.to_string()) == cursor`; round-trips
+   are byte-identical (R4).
+ - Resumption: a durable subscriber resumes from the last cursor it received; the journal
+   delivers every event on that stream key with a strictly greater sequence and no event at or
+   before the cursor (R4.5). After a retention gap the subscriber receives a `LagNotice`
+   carrying `stream_key` and `resume_sequence`, whose cursor is
+   `v1:{stream_key}:{resume_sequence}`; sequence advancement is never fabricated and no event
+   is silently skipped.
+ - Persisted cursor columns (`runs.input_event_cursor`, `loop_turns.input_event_cursor`,
+-  `decisions.input_event_cursor`, `agent_loop.proto` fencing fields) carry this exact string
+-  encoding.
++  `decisions.input_event_cursor`) carry this exact string encoding.
++- Loop-decision fencing fields in `contracts/protocols/agent_loop.proto` carry the same
++  encoding on the wire.
+ 
+ ## Time
+ 
+ Persist wall-clock timestamps as UTC Unix milliseconds. Lease/timeout calculations use a
+ monotonic process clock while running; persisted expiry uses wall-clock plus defensive
+ recovery rules.
+ 
+ ## Revisions
+ 
+ All revisions/epochs/sequences are unsigned 64-bit integers and monotonically increase within

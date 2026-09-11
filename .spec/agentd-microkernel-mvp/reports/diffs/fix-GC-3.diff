@@ -1,0 +1,117 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/adapter-registry.md b/agent-os-microkernel-mvp-buildpack/specs/adapter-registry.md
+index 30d2d7a..3b36462 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/adapter-registry.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/adapter-registry.md
+@@ -19,21 +19,21 @@ For process bundles, use a deterministic `bundle.lock` containing sorted relativ
+ - bundle digest;
+ - runtime type;
+ - implemented port IDs/versions;
+ - declared capabilities;
+ - trust state;
+ - conformance state;
+ - enabled state/config references.
+ 
+ ## Conformance report binding
+ 
+-A conformance report is a `conformance_reports` row in `kernel-store-schema.sql`, keyed by the exact identity `(adapter_id, adapter_version, bundle_digest)` and FK-bound to `adapter_registrations`. It records `report_digest`, `harness_version`, `result` (`pass`/`fail`), `run_at_ms`, and `details`. Reports are immutable (`BEFORE UPDATE`/`BEFORE DELETE` triggers raise `immutable record`); `adapter_registrations.conformance_state` reflects the report outcome.
++A conformance report is a `conformance_reports` row in `kernel-store-schema.sql`, keyed by the exact identity `(adapter_id, adapter_version, bundle_digest)` and FK-bound to `adapter_registrations`. It records `report_digest`, `harness_version`, `result` with persisted literals `pass`, `fail`, `run_at_ms`, and `details`. Reports are immutable (`BEFORE UPDATE`/`BEFORE DELETE` triggers raise `immutable record`); `adapter_registrations.conformance_state` reflects the report outcome.
+ 
+ ## Resolution
+ 
+ Given a port requirement:
+ 
+ 1. require exact compatible port major version;
+ 2. require all mandatory capabilities;
+ 3. filter by trust/sandbox policy;
+ 4. filter by config/profile pin if present;
+ 5. deterministic tie-break by configured priority then immutable identity;
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+index e9b2c93..b0ed0da 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
++++ b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+@@ -411,24 +411,23 @@ CREATE TABLE IF NOT EXISTS loop_turns (
+   state TEXT NOT NULL CHECK (state IN ('issued','accepted','stale')),
+   issued_at_ms INTEGER NOT NULL,
+   UNIQUE (run_id, turn_id),
+   FOREIGN KEY (run_id) REFERENCES runs(run_id)
+ );
+ 
+ CREATE TABLE IF NOT EXISTS decisions (
+   decision_id TEXT PRIMARY KEY,
+   run_id TEXT NOT NULL,
+   turn_id TEXT NOT NULL,
+-  -- LoopDecision variants (contracts/protocols/agent_loop.proto; specs/command-catalog.md:94-101):
+-  -- complete=Complete, fail=Fail, wait=Wait, spawn_agent=SpawnAgent,
+-  -- invoke_effect=InvokeEffect, request_approval=RequestApproval.
+-  decision_type TEXT NOT NULL CHECK (decision_type IN ('complete','fail','wait','spawn_agent','invoke_effect','request_approval')),
++  -- Persisted literals are the canonical LoopDecision message names
++  -- (contracts/protocols/agent_loop.proto; specs/command-catalog.md:94-101).
++  decision_type TEXT NOT NULL CHECK (decision_type IN ('Complete','Fail','Wait','SpawnAgent','InvokeEffect','RequestApproval')),
+   decision_digest TEXT NOT NULL,
+   decision_bytes BLOB NOT NULL,
+   run_revision INTEGER NOT NULL,
+   loop_epoch INTEGER NOT NULL,
+   step_sequence INTEGER NOT NULL,
+   input_event_cursor TEXT NOT NULL,
+   accepted_at_ms INTEGER NOT NULL,
+   UNIQUE (run_id, decision_id),
+   FOREIGN KEY (run_id) REFERENCES runs(run_id),
+   FOREIGN KEY (turn_id) REFERENCES loop_turns(turn_id)
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/kernel-store.md b/agent-os-microkernel-mvp-buildpack/specs/kernel-store.md
+index 2ff51d1..5293f74 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/kernel-store.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/kernel-store.md
+@@ -36,20 +36,29 @@ Table inventory:
+ | Effects/resources/timers | `effects`, `resource_reservations`, `timers` |
+ | Loop/decisions | `loop_turns`, `decisions` |
+ | Security/approvals | `capability_grants`, `delegation_hops`, `approval_requests`, `approval_responses` |
+ | Adapters | `adapter_registrations`, `adapter_instances`, `conformance_reports` |
+ | Artifacts | `artifacts` |
+ | Config | `config_generations`, `active_config_generation` |
+ | Idempotency/events | `idempotency_records`, `event_stream_heads`, `outbox_events` |
+ 
+ The durable Event Journal is a separate database (`events.db`) with its own schema, `specs/event-journal-schema.sql`, extracted from `event-pipeline.md`; it shares no tables with `kernel.db`.
+ 
++Persisted TEXT state literals for the GC-3 tables (identical to the CHECK constraints in the schema):
++
++| Column | Persisted literals |
++|---|---|
++| `loop_turns.state` (specs/runtime-manager.md) | `issued`, `accepted`, `stale` |
++| `decisions.decision_type` (contracts/protocols/agent_loop.proto) | `Complete`, `Fail`, `Wait`, `SpawnAgent`, `InvokeEffect`, `RequestApproval` |
++| `adapter_instances.state` (specs/process-supervisor.md) | `starting`, `ready`, `exited`, `failed` |
++| `conformance_reports.result` (specs/adapter-registry.md) | `pass`, `fail` |
++
+ ## Mandatory invariants
+ 
+ - Every write transaction asserts current daemon fencing epoch.
+ - Idempotency record is inserted/validated inside the same command transaction.
+ - Event sequences are allocated by atomically updating `event_stream_heads`.
+ - Outbox event insertion uses unique `event_id` and `(stream_key, sequence)`.
+ - `ResolvedRunEnvironment` and resolved bindings are immutable after run start.
+ - Effect state transitions check expected state and fencing token.
+ - Workspace lease transfer checks expected lease epoch.
+ - Timer state changes check expected version/state.
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/process-supervisor.md b/agent-os-microkernel-mvp-buildpack/specs/process-supervisor.md
+index 16e01c1..5443281 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/process-supervisor.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/process-supervisor.md
+@@ -1,18 +1,18 @@
+ > **Navigation:** [Home](../README.md) · [Plan](../PLAN.md) · [DAG](../DAG.md) · [Architecture](../architecture/README.md) · [Specs](../specs/README.md) · [Testing](../testing/README.md)
+ 
+ 
+ # Process Supervisor
+ 
+ ## Durable adapter-instance record
+ 
+-Every spawned process has an `adapter_instances` row in `kernel-store-schema.sql`: `adapter_instance_id`, exact `(adapter_id, adapter_version, bundle_digest)` (FK to `adapter_registrations`), `daemon_instance_id`, `pid`, `process_start_identity`, `state` (`starting`/`ready`/`exited`/`failed`), `exit_reason`, `last_heartbeat_ms`, `started_at_ms`, and `ended_at_ms`. A restart creates a new row and never mutates the prior instance; old in-flight protocol sessions are invalid.
++Every spawned process has an `adapter_instances` row in `kernel-store-schema.sql`: `adapter_instance_id`, exact `(adapter_id, adapter_version, bundle_digest)` (FK to `adapter_registrations`), `daemon_instance_id`, `pid`, `process_start_identity`, `state` with persisted literals `starting`, `ready`, `exited`, `failed`, `exit_reason`, `last_heartbeat_ms`, `started_at_ms`, and `ended_at_ms`. A restart creates a new row and never mutates the prior instance; old in-flight protocol sessions are invalid.
+ 
+ ## Spawn contract
+ 
+ Input includes:
+ 
+ - expected immutable bundle digest;
+ - executable path from installed bundle;
+ - argv;
+ - minimal environment allowlist;
+ - working directory/resource handles;

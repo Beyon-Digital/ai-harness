@@ -30,8 +30,8 @@
 
 ### Task GC-1: Unify the contract snapshot
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc1
 - depends_on: none
 - files: `agent-os-microkernel-mvp-buildpack/contracts/control-api/control.proto`, `agent-os-microkernel-mvp-buildpack/contracts/control-api/commands.proto`, `agent-os-microkernel-mvp-buildpack/contracts/control-api/mvp_control.proto`, `agent-os-microkernel-mvp-buildpack/contracts/protocols/agent_loop.proto`, `agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto`, `agent-os-microkernel-mvp-buildpack/contracts/README.md`, `agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md`
 - requirements: R1.1, R1.2, R1.3, R2.1, R2.3, N3
@@ -97,6 +97,7 @@
 - The command catalog currently documents 16 commands; `command-coordinator.md:44-59` lists a different 16 (`TransitionRun` and `SpawnChildRun` appear only there; `BindRun` and `MarkConfigTested` appear only in the catalog). Design D9 adds `RollbackConfigGeneration` and `ResolveBlockedRun`. Resolution: the catalog becomes the single list of 18; `TransitionRun` is not a command (state transitions happen inside other commands); `SpawnChildRun` is superseded by `CreateTaskRun` with `parent_run_id`, and loop `SpawnAgent` decisions route through `CreateTaskRun`. State this explicitly in both files.
 - Every catalogued command gets a line naming its payload message as the fully-qualified name (the `agentos.spec.v1.` package prefix joined with the command name), its idempotency semantics, and its emitted events (R2.4, R8.4).
 - Event catalog: `contracts/events/catalog.yaml` is the canonical machine-readable catalog; `specs/event-catalog.md` is the human companion. Add to `catalog.yaml` the ten events that exist only in the markdown: `SessionCreated`, `AgentSpecRevisionStored`, `TimerScheduled`, `TimerClaimed`, `TimerFired`, `TimerCancelled`, `ResourceReserved`, `ResourceAllocated`, `ResourceReleased`, `ResourceUnknown`. Add the "bindings audit" event `RunBound` and the four waiting/running events `RunWaitingTool`, `RunWaitingChild`, `RunWaitingHuman`, `RunStateChanged`; remove `RunPaused` and `RunResumed` (design D8). Every event needs `version`, `default_sensitivity`, `default_retention`, `stream_key`, and `produced_by` naming the transition or command that emits it (R9.1–R9.3). Sensitivity values: `public`, `internal`, `confidential`, `secret`; retention values: `ephemeral`, `standard`, `audit`.
+- Normalize wire literals while you are in these files: the command catalog must use `expected_effect_state = UNKNOWN` (canonical `EffectState` literal) and the canonical decision variant names `Complete`, `Fail`, `Wait`, `SpawnAgent`, `InvokeEffect`, `RequestApproval`.
 - `specs/README.md` gains entries for `limits.yaml` and `event-journal-schema.sql` (created by GC-5 and GC-3).
 - Do not touch `contract-lock.sha256`; GC-7 regenerates it.
 
@@ -129,8 +130,8 @@
 
 ### Task GC-3: Complete the inception schema and durable records
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc3
 - depends_on: none
 - files: `agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql`, `agent-os-microkernel-mvp-buildpack/specs/event-journal-schema.sql`, `agent-os-microkernel-mvp-buildpack/specs/kernel-store.md`, `agent-os-microkernel-mvp-buildpack/specs/run-graph.md`, `agent-os-microkernel-mvp-buildpack/specs/artifacts.md`, `agent-os-microkernel-mvp-buildpack/specs/workspace.md`, `agent-os-microkernel-mvp-buildpack/specs/process-supervisor.md`, `agent-os-microkernel-mvp-buildpack/specs/adapter-registry.md`
 - requirements: R5.1, R5.2, R5.3, R5.4, R6.1, R6.2, R6.3, R6.4
@@ -173,15 +174,15 @@
 **Verification:**
 
 - [ ] `sqlite3 ":memory:" ".read agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql"` exits 0
-- [ ] `grep -c '^CREATE TABLE' agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql` reports 31 (25 existing plus 6 new)
+- [ ] `grep -c '^CREATE TABLE' agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql` reports 30 (24 existing plus 6 new; the audit's count of 25 wrongly included one `CREATE TABLE` from `event-pipeline.md`)
 - [ ] Constraint and trigger probes above fail as expected
 
 ---
 
 ### Task GC-4: Pin encodings and complete the recovery matrix
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc4
 - depends_on: none
 - files: `agent-os-microkernel-mvp-buildpack/specs/types-and-ids.md`, `agent-os-microkernel-mvp-buildpack/specs/recovery-table.md`
 - requirements: R3.1, R3.2, R3.3, R3.4, R4.1, R4.2, R4.3, R4.4, R4.5, R7.1, R7.2, R7.3, R7.4
@@ -224,8 +225,8 @@
 
 ### Task GC-5: Publish the normative limits
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc5
 - depends_on: none
 - files: `agent-os-microkernel-mvp-buildpack/specs/limits.yaml`, `agent-os-microkernel-mvp-buildpack/contracts/config/agent-os.schema.json`, `agent-os-microkernel-mvp-buildpack/examples/default-config.yaml`, `agent-os-microkernel-mvp-buildpack/specs/config-engine.md`, `agent-os-microkernel-mvp-buildpack/architecture/persistence.md`
 - requirements: R10.1, R10.2, R10.3
@@ -360,8 +361,8 @@
 
 ### Task FND-001: Bootstrap the Rust workspace, crates, and quality gates
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-fnd001
 - depends_on: none
 - files: `agent-os/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/rust-toolchain.toml`, `agent-os/.cargo/config.toml`, `agent-os/.github/workflows/ci.yml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/crates/agentd/src/main.rs`, `agent-os/crates/agentd/src/lock.rs`, `agent-os/crates/agentd/src/recovery.rs`, `agent-os/crates/agentd/src/api.rs`, `agent-os/crates/agentd/src/workers/mod.rs`, `agent-os/crates/agentd/src/workers/outbox.rs`, `agent-os/crates/agentd/src/workers/scheduler.rs`, `agent-os/crates/agentd/src/workers/loops.rs`, `agent-os/crates/domain/Cargo.toml`, `agent-os/crates/domain/src/lib.rs`, `agent-os/crates/domain/src/ids.rs`, `agent-os/crates/domain/src/provider.rs`, `agent-os/crates/domain/src/time.rs`, `agent-os/crates/domain/src/faults.rs`, `agent-os/crates/domain/src/run.rs`, `agent-os/crates/domain/src/effect.rs`, `agent-os/crates/domain/src/security.rs`, `agent-os/crates/domain/src/resource.rs`, `agent-os/crates/domain/src/generated.rs`, `agent-os/crates/errors/Cargo.toml`, `agent-os/crates/errors/src/lib.rs`, `agent-os/crates/errors/src/codes.rs`, `agent-os/crates/testkit/Cargo.toml`, `agent-os/crates/testkit/src/lib.rs`, `agent-os/crates/testkit/src/clock.rs`, `agent-os/crates/testkit/src/ids.rs`, `agent-os/crates/testkit/src/faults.rs`, `agent-os/crates/testkit/src/process.rs`, `agent-os/crates/observability/Cargo.toml`, `agent-os/crates/observability/src/lib.rs`, `agent-os/crates/observability/src/classification.rs`, `agent-os/crates/kernel-store/Cargo.toml`, `agent-os/crates/kernel-store/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/Cargo.toml`, `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/command-coordinator/Cargo.toml`, `agent-os/crates/command-coordinator/src/lib.rs`, `agent-os/crates/events/Cargo.toml`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/event-journal/Cargo.toml`, `agent-os/crates/event-journal/src/lib.rs`, `agent-os/crates/event-journal-sqlite/Cargo.toml`, `agent-os/crates/event-journal-sqlite/src/lib.rs`, `agent-os/crates/message-queue/Cargo.toml`, `agent-os/crates/message-queue/src/lib.rs`, `agent-os/crates/runtime/Cargo.toml`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/Cargo.toml`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/effects/Cargo.toml`, `agent-os/crates/effects/src/lib.rs`, `agent-os/crates/resources/Cargo.toml`, `agent-os/crates/resources/src/lib.rs`, `agent-os/crates/scheduler/Cargo.toml`, `agent-os/crates/scheduler/src/lib.rs`, `agent-os/crates/identity/Cargo.toml`, `agent-os/crates/identity/src/lib.rs`, `agent-os/crates/permissions/Cargo.toml`, `agent-os/crates/permissions/src/lib.rs`, `agent-os/crates/approvals/Cargo.toml`, `agent-os/crates/approvals/src/lib.rs`, `agent-os/crates/secrets/Cargo.toml`, `agent-os/crates/secrets/src/lib.rs`, `agent-os/crates/process-supervisor/Cargo.toml`, `agent-os/crates/process-supervisor/src/lib.rs`, `agent-os/crates/adapter-registry/Cargo.toml`, `agent-os/crates/adapter-registry/src/lib.rs`, `agent-os/crates/adapter-protocol/Cargo.toml`, `agent-os/crates/adapter-protocol/src/lib.rs`, `agent-os/crates/resource-uri/Cargo.toml`, `agent-os/crates/resource-uri/src/lib.rs`, `agent-os/crates/workspace/Cargo.toml`, `agent-os/crates/workspace/src/lib.rs`, `agent-os/crates/sandbox/Cargo.toml`, `agent-os/crates/sandbox/src/lib.rs`, `agent-os/crates/artifacts/Cargo.toml`, `agent-os/crates/artifacts/src/lib.rs`, `agent-os/crates/config-engine/Cargo.toml`, `agent-os/crates/config-engine/src/lib.rs`, `agent-os/crates/control-api/Cargo.toml`, `agent-os/crates/control-api/src/lib.rs`, `agent-os/crates/agentctl/Cargo.toml`, `agent-os/crates/agentctl/src/lib.rs`
 - requirements: R13.1, R13.2, R13.3, N2, P2

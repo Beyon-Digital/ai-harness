@@ -1,0 +1,403 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/architecture/persistence.md b/agent-os-microkernel-mvp-buildpack/architecture/persistence.md
+index 8d443b1..a180cca 100644
+--- a/agent-os-microkernel-mvp-buildpack/architecture/persistence.md
++++ b/agent-os-microkernel-mvp-buildpack/architecture/persistence.md
+@@ -2,29 +2,31 @@
+ 
+ 
+ # Persistence Model
+ 
+ ## Single authority
+ 
+ `kernel.db` is authoritative for current execution correctness. `events.db` is a downstream durable projection.
+ 
+ ## SQLite operating mode
+ 
+-Recommended inception settings:
++These inception settings are normative:
+ 
+ ```text
+ PRAGMA foreign_keys = ON;
+ PRAGMA journal_mode = WAL;
+ PRAGMA synchronous = FULL;
+ PRAGMA busy_timeout = 5000;
+ ```
+ 
++File modes for the database, runtime directory, and control socket are normative values from [`specs/limits.yaml`](../specs/limits.yaml).
++
+ All correctness-critical write sequences use explicit write transactions. For operations that require writer reservation before reading/modifying shared graph/head state, use `BEGIN IMMEDIATE` semantics.
+ 
+ ## Transaction requirements
+ 
+ The `KernelStore` abstraction must support:
+ 
+ - explicit transaction lifetime;
+ - read + conditional write in the same transaction;
+ - unique constraints as correctness tools;
+ - monotonic stream-head allocation;
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/config/agent-os.schema.json b/agent-os-microkernel-mvp-buildpack/contracts/config/agent-os.schema.json
+index a07a657..55a2adf 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/config/agent-os.schema.json
++++ b/agent-os-microkernel-mvp-buildpack/contracts/config/agent-os.schema.json
+@@ -74,20 +74,240 @@
+           "tool_runtime": {
+             "type": "string"
+           },
+           "agent_loop": {
+             "type": "string"
+           }
+         }
+       }
+     },
+     "policies": {
+-      "type": "object"
++      "type": "object",
++      "description": "Deprecated: legacy untyped policy bag. Use typed sections such as limits instead."
++    },
++    "limits": {
++      "type": "object",
++      "description": "Normative MVP thresholds. Source of truth: specs/limits.yaml; every key must be present.",
++      "additionalProperties": false,
++      "required": [
++        "queue",
++        "adapters",
++        "effects",
++        "runs",
++        "daemon",
++        "approvals",
++        "shutdown",
++        "events",
++        "streams",
++        "fs"
++      ],
++      "properties": {
++        "queue": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "capacity_messages"
++          ],
++          "properties": {
++            "capacity_messages": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "adapters": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "max_frame_bytes",
++            "handshake_timeout_ms",
++            "request_deadline_ms",
++            "health_ping_ms",
++            "health_missed_allowed",
++            "supervisor_max_restarts",
++            "supervisor_backoff_initial_ms",
++            "supervisor_backoff_max_ms"
++          ],
++          "properties": {
++            "max_frame_bytes": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "handshake_timeout_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "request_deadline_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "health_ping_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "health_missed_allowed": {
++              "type": "integer",
++              "minimum": 0
++            },
++            "supervisor_max_restarts": {
++              "type": "integer",
++              "minimum": 0
++            },
++            "supervisor_backoff_initial_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "supervisor_backoff_max_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "effects": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "lease_ms",
++            "lease_renew_ms"
++          ],
++          "properties": {
++            "lease_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "lease_renew_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "runs": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "claim_ttl_ms"
++          ],
++          "properties": {
++            "claim_ttl_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "daemon": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "fence_lease_ms",
++            "fence_renew_ms"
++          ],
++          "properties": {
++            "fence_lease_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "fence_renew_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "approvals": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "ttl_ms"
++          ],
++          "properties": {
++            "ttl_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "shutdown": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "drain_deadline_ms"
++          ],
++          "properties": {
++            "drain_deadline_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "events": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "live_buffer_events",
++            "dispatcher_poll_ms",
++            "scheduler_poll_ms"
++          ],
++          "properties": {
++            "live_buffer_events": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "dispatcher_poll_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "scheduler_poll_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "streams": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "read_default_limit",
++            "read_max_limit"
++          ],
++          "properties": {
++            "read_default_limit": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "read_max_limit": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "fs": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "db_file_mode",
++            "runtime_dir_mode",
++            "control_socket_mode"
++          ],
++          "properties": {
++            "db_file_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            },
++            "runtime_dir_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            },
++            "control_socket_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            }
++          }
++        }
++      }
+     },
+     "remote_access": {
+       "type": "object"
+     },
+     "observability": {
+       "type": "object"
+     }
+   }
+ }
+diff --git a/agent-os-microkernel-mvp-buildpack/examples/default-config.yaml b/agent-os-microkernel-mvp-buildpack/examples/default-config.yaml
+index 8388340..f90cbb2 100644
+--- a/agent-os-microkernel-mvp-buildpack/examples/default-config.yaml
++++ b/agent-os-microkernel-mvp-buildpack/examples/default-config.yaml
+@@ -16,12 +16,48 @@ profiles:
+     workspace: local-workspace
+     artifact_store: local-artifacts
+     agent_loop: fixture-loop
+ 
+ policies:
+   sandbox:
+     minimum_untrusted_tier: T2_UNTRUSTED
+   effects:
+     unknown_default: require_human_decision
+ 
++limits:
++  queue:
++    capacity_messages: 1024
++  adapters:
++    max_frame_bytes: 4194304
++    handshake_timeout_ms: 5000
++    request_deadline_ms: 60000
++    health_ping_ms: 10000
++    health_missed_allowed: 3
++    supervisor_max_restarts: 5
++    supervisor_backoff_initial_ms: 100
++    supervisor_backoff_max_ms: 10000
++  effects:
++    lease_ms: 30000
++    lease_renew_ms: 10000
++  runs:
++    claim_ttl_ms: 30000
++  daemon:
++    fence_lease_ms: 15000
++    fence_renew_ms: 5000
++  approvals:
++    ttl_ms: 900000
++  shutdown:
++    drain_deadline_ms: 30000
++  events:
++    live_buffer_events: 256
++    dispatcher_poll_ms: 500
++    scheduler_poll_ms: 1000
++  streams:
++    read_default_limit: 100
++    read_max_limit: 1000
++  fs:
++    db_file_mode: "0600"
++    runtime_dir_mode: "0700"
++    control_socket_mode: "0600"
++
+ observability:
+   log_level: info
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/config-engine.md b/agent-os-microkernel-mvp-buildpack/specs/config-engine.md
+index 44dd2b8..a07a8d2 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/config-engine.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/config-engine.md
+@@ -35,13 +35,21 @@ proposed immutable document
+  -> schema validation
+  -> adapter existence/version validation
+  -> capability negotiation
+  -> isolated smoke validation where applicable
+  -> mark tested
+  -> atomic active-generation CAS
+ ```
+ 
+ A failed activation can reactivate the prior known-good generation. This is limited to safe activation of immutable runtime configuration generations. Live activation is restricted to changes that do not alter daemon-instance-frozen generation-global service bindings.
+ 
++`RollbackConfigGeneration` is the explicit Control API command for that path. It is capability-gated by the config rollback grant, CASes the active-generation pointer against `expected_active_revision` back to a prior known-good generation, and emits `ConfigRolledBack`. Like activation, it does not touch running runs; each run keeps the `ResolvedRunEnvironment` it captured.
++
++## Normative limits
++
++Every threshold in this pack has exactly one machine-readable value in [`limits.yaml`](limits.yaml). That file is the source of truth for tests, defaults, and validators; no threshold may be hard-coded inline elsewhere.
++
++The matching `limits` object is typed in `contracts/config/agent-os.schema.json` with the same key paths and integer minima, and `examples/default-config.yaml` mirrors every value. The GC-7 validator fails when a normative key is missing.
++
+ ## Inception version
+ 
+ `schema_version` is exactly `1`.
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/limits.yaml b/agent-os-microkernel-mvp-buildpack/specs/limits.yaml
+new file mode 100644
+index 0000000..fb39ed8
+--- /dev/null
++++ b/agent-os-microkernel-mvp-buildpack/specs/limits.yaml
+@@ -0,0 +1,35 @@
++schema_version: 1
++queue:
++  capacity_messages: 1024
++adapters:
++  max_frame_bytes: 4194304
++  handshake_timeout_ms: 5000
++  request_deadline_ms: 60000
++  health_ping_ms: 10000
++  health_missed_allowed: 3
++  supervisor_max_restarts: 5
++  supervisor_backoff_initial_ms: 100
++  supervisor_backoff_max_ms: 10000
++effects:
++  lease_ms: 30000
++  lease_renew_ms: 10000
++runs:
++  claim_ttl_ms: 30000
++daemon:
++  fence_lease_ms: 15000
++  fence_renew_ms: 5000
++approvals:
++  ttl_ms: 900000
++shutdown:
++  drain_deadline_ms: 30000
++events:
++  live_buffer_events: 256
++  dispatcher_poll_ms: 500
++  scheduler_poll_ms: 1000
++streams:
++  read_default_limit: 100
++  read_max_limit: 1000
++fs:
++  db_file_mode: "0600"
++  runtime_dir_mode: "0700"
++  control_socket_mode: "0600"

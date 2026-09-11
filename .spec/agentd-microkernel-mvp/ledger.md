@@ -8,3 +8,43 @@
 - 2026-09-10T21:24:31Z Phase 2b design drafted: 16 design decisions, exact Rust interfaces, schema additions, limits.yaml values, complete file structure for gap closure + foundation. Gate passes except approval.
 - 2026-09-10T21:39:42Z Phase 3 complete: 13 tasks, 4 waves validated. Rulings: gap closure kept out of pack DAG; testkit fixture-daemon added; lock/manifest deferred to GC-7.
 - 2026-09-10T21:40:25Z gate passed: implement
+- 2026-09-10T21:41:34Z Pre-dispatch scan: git init + branch feat/agentd-microkernel-mvp; .gitignore added at controller level; wave-1 file lists verified non-overlapping by validate; contract-lock and MANIFEST intentionally stale until GC-7; testkit fixture-daemon ruling recorded.
+- 2026-09-10T21:42:18Z FND-001 -> claimed (@agent-fnd001)
+- 2026-09-10T21:42:20Z GC-4 -> claimed (@agent-gc4)
+- 2026-09-10T21:42:26Z FND-001 -> in_progress (@agent-fnd001)
+- 2026-09-10T21:42:29Z GC-1 -> claimed (@agent-gc1)
+- 2026-09-10T21:42:30Z GC-3 -> claimed (@agent-gc3)
+- 2026-09-10T21:42:30Z GC-4 -> in_progress (@agent-gc4)
+- 2026-09-10T21:42:31Z GC-1 -> in_progress (@agent-gc1)
+- 2026-09-10T21:42:31Z GC-3 -> in_progress (@agent-gc3)
+- 2026-09-10T21:42:34Z GC-5 -> claimed (@agent-gc5)
+- 2026-09-10T21:42:35Z GC-5 -> in_progress (@agent-gc5)
+- 2026-09-11T02:32:20Z GC-1 -> pending (@controller)
+- 2026-09-11T02:32:21Z GC-3 -> pending (@controller)
+- 2026-09-11T02:32:23Z GC-4 -> pending (@controller)
+- 2026-09-11T02:32:24Z GC-5 -> pending (@controller)
+- 2026-09-11T02:32:26Z FND-001 -> pending (@controller)
+- 2026-09-11T02:33:21Z GC-4 -> claimed (@agent-gc4)
+- 2026-09-11T02:33:21Z GC-5 -> claimed (@agent-gc5)
+- 2026-09-11T02:33:21Z GC-1 -> claimed (@agent-gc1)
+- 2026-09-11T02:33:22Z GC-4 -> in_progress (@agent-gc4)
+- 2026-09-11T02:33:31Z GC-5 -> in_progress (@agent-gc5)
+- 2026-09-11T02:33:32Z GC-1 -> in_progress (@agent-gc1)
+- 2026-09-11T02:33:46Z GC-3 -> claimed (@agent-gc3)
+- 2026-09-11T02:33:48Z GC-3 -> in_progress (@agent-gc3)
+- 2026-09-11T02:34:05Z FND-001 -> claimed (@agent-fnd001)
+- 2026-09-11T02:34:06Z FND-001 -> in_progress (@agent-fnd001)
+- 2026-09-11T02:37:40Z GC-5 -> review (@agent-gc5)
+- 2026-09-11T02:53:07Z GC-4 -> review (@agent-gc4)
+- 2026-09-11T02:55:58Z GC-1 -> review (@agent-gc1)
+- 2026-09-11T02:59:59Z GC-3 -> review (@agent-gc3)
+- 2026-09-11T03:13:03Z FND-001 -> review (@agent-fnd001)
+- 2026-09-11T03:15:05Z Ruling: GC-3 acceptance count corrected 31->30. The audit's 25-table count included a CREATE TABLE in event-pipeline.md; pack schema had 24, plus 6 new = 30. Cost if wrong: none, count is mechanical.
+- 2026-09-11T03:25:36Z Ruling: approval_requests rows fully immutable; resolution state lives in approval_responses (D-021). GC-3 'unreachable state CHECK' is accepted as designed. Cost if wrong: approvals module must not expect request-row state transitions.
+- 2026-09-11T03:25:36Z GC-1 -> done (@agent-gc1)
+- 2026-09-11T03:25:38Z GC-5 -> done (@agent-gc5)
+- 2026-09-11T03:25:38Z Deferred minors (final-review triage): GC-1 SOURCE_CORRECTIONS 'six'->'eight'; GC-5 add limits to root required in config schema; GC-4 lease column naming + cosmetic split; FND-001 CI workflow lives at agent-os/.github (root dispatcher needed when publishing to GitHub).
+- 2026-09-11T03:34:43Z GC-3 -> done (@agent-gc3)
+- 2026-09-11T03:34:44Z FND-001 -> done (@agent-fnd001)
+- 2026-09-11T03:43:48Z GC-4 -> done (@agent-gc4)
+- 2026-09-11T03:44:47Z Wave 1 checkpoint: repo validator OK; cargo check --workspace OK; all 5 wave-1 tasks reviewed and done (GC-1, GC-3, GC-4, GC-5, FND-001); 2 fix rounds on GC-4, 1 each on GC-3/FND-001; all re-reviews clean.
