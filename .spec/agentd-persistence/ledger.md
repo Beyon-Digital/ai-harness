@@ -30,3 +30,8 @@
 - 2026-09-11T21:46:16Z Round-1 review: PST-001 approved; PST-002 approved with 3 Important fidelity items (mock epoch assertion, optimistic-revision semantics, head-advance semantics) — fix round dispatched.
 - 2026-09-11T21:57:25Z PST-002 -> done (@agent-pst002)
 - 2026-09-11T21:57:26Z PST-002 approved after two fix rounds; wave 2 complete; PST-003A dispatched.
+- 2026-09-11T21:57:51Z PST-003A -> claimed (@agent-pst003a)
+- 2026-09-11T21:57:52Z PST-003A -> in_progress (@agent-pst003a)
+- 2026-09-11T23:02:24Z PST-003A -> review (@agent-pst003a)
+- 2026-09-11T23:10:30Z PST-003A -> done (@agent-pst003a)
+- 2026-09-11T23:10:31Z PST-003A approved after one test-quality fix round; leases amended (txn.rs shared across PST-003B/004/005 with the PST-004->PST-003B edge serializing waves 4-6).

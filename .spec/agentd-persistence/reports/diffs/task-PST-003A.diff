@@ -1,0 +1,3084 @@
+diff --git a/agent-os/crates/kernel-store-sqlite/src/lib.rs b/agent-os/crates/kernel-store-sqlite/src/lib.rs
+index 5e14850..00497ba 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/lib.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/lib.rs
+@@ -1,14 +1,17 @@
+ //! SQLite schema, repositories, and transactions implementing the kernel store port.
+ #![forbid(unsafe_code)]
+ 
++pub mod mapping;
++pub mod repos;
+ pub mod schema;
++pub mod txn;
+ 
+ use std::fs;
+ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+ use std::path::{Path, PathBuf};
+ use std::time::Duration;
+ 
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use sqlx::SqlitePool;
+ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+@@ -78,20 +81,25 @@ impl SqliteKernelStore {
+             })?;
+         let store = Self { pool, path };
+         schema::verify(&store.pool, busy_timeout_ms).await?;
+         Ok(store)
+     }
+ 
+     /// Returns the path of the `kernel.db` file this store opened.
+     pub fn path(&self) -> &Path {
+         &self.path
+     }
++
++    /// Borrows the pooled connections backing this store.
++    pub(crate) fn pool(&self) -> &SqlitePool {
++        &self.pool
++    }
+ }
+ 
+ fn prepare_runtime_dir(dir: &Path) -> errors::Result<()> {
+     fs::create_dir_all(dir).map_err(|source| {
+         KernelError::new(
+             ErrorCode::Unavailable,
+             RetryClass::Safe,
+             "kernel runtime directory could not be created",
+         )
+         .with_source(source)
+diff --git a/agent-os/crates/kernel-store-sqlite/src/mapping.rs b/agent-os/crates/kernel-store-sqlite/src/mapping.rs
+new file mode 100644
+index 0000000..2c1b350
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/mapping.rs
+@@ -0,0 +1,330 @@
++//! SQLite error classification and persisted-value decoding helpers.
++//!
++//! `sqlx` errors never cross the store port: every database failure is
++//! classified into the stable foundation taxonomy (design `Error handling`,
++//! decision D5) and every persisted value is decoded through the domain mirror
++//! types, failing closed with `Internal`/`Never` on unknown values (R3.1).
++
++use std::fmt::Display;
++use std::str::FromStr;
++
++use domain::run::{UnknownEnumValue, UnknownStateValue};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use sqlx::sqlite::SqliteRow;
++use sqlx::{Error as SqlxError, Row};
++
++/// SQLite primary result code for constraint failures.
++const SQLITE_CONSTRAINT: i32 = 19;
++/// Extended code for a `UNIQUE` constraint failure.
++const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
++/// Extended code for a primary-key constraint failure.
++const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
++
++/// Converts a `sqlx` failure into the stable kernel error taxonomy.
++pub(crate) fn from_sqlx(source: SqlxError) -> KernelError {
++    let (code, retry) = classify(&source);
++    KernelError::new(code, retry, message(code)).with_source(source)
++}
++
++/// Classifies a `sqlx` failure without consuming it.
++pub(crate) fn classify(source: &SqlxError) -> (ErrorCode, RetryClass) {
++    if let Some(database) = source.as_database_error() {
++        return match database.code().and_then(|code| code.parse::<i32>().ok()) {
++            Some(code) => classify_sqlite(code),
++            None => (ErrorCode::Internal, RetryClass::Never),
++        };
++    }
++    match source {
++        SqlxError::PoolClosed | SqlxError::PoolTimedOut | SqlxError::Io(_) => {
++            (ErrorCode::Unavailable, RetryClass::Safe)
++        }
++        SqlxError::RowNotFound => (ErrorCode::NotFound, RetryClass::Never),
++        _ => (ErrorCode::Internal, RetryClass::Never),
++    }
++}
++
++/// Classifies a raw SQLite extended result code.
++pub(crate) fn classify_sqlite(code: i32) -> (ErrorCode, RetryClass) {
++    match code & 0xFF {
++        SQLITE_CONSTRAINT
++            if matches!(
++                code,
++                SQLITE_CONSTRAINT_UNIQUE | SQLITE_CONSTRAINT_PRIMARYKEY
++            ) =>
++        {
++            (ErrorCode::Conflict, RetryClass::Never)
++        }
++        SQLITE_CONSTRAINT => (ErrorCode::FailedPrecondition, RetryClass::Never),
++        // SQLITE_BUSY (5) and SQLITE_LOCKED (6), including their extended codes (D5).
++        5 | 6 => (ErrorCode::Unavailable, RetryClass::Safe),
++        // SQLITE_IOERR (10) and SQLITE_CANTOPEN (14) are retry-safe availability failures.
++        10 | 14 => (ErrorCode::Unavailable, RetryClass::Safe),
++        _ => (ErrorCode::Internal, RetryClass::Never),
++    }
++}
++
++fn message(code: ErrorCode) -> &'static str {
++    match code {
++        ErrorCode::Conflict => "storage constraint conflict",
++        ErrorCode::FailedPrecondition => "storage constraint rejected the write",
++        ErrorCode::Unavailable => "storage is unavailable",
++        ErrorCode::NotFound => "required row is missing",
++        _ => "storage operation failed",
++    }
++}
++
++/// Error for a repository group that has no SQL implementation in this store.
++pub(crate) fn unavailable(group: &'static str) -> KernelError {
++    KernelError::new(
++        ErrorCode::FailedPrecondition,
++        RetryClass::Never,
++        format!("repository group {group} is not available"),
++    )
++}
++
++/// Fails closed for a persisted enum value with no domain mirror variant.
++pub(crate) fn decode_wire<T>(
++    column: &'static str,
++    value: i64,
++    decode: fn(i32) -> Result<T, UnknownEnumValue>,
++) -> errors::Result<T> {
++    let value =
++        i32::try_from(value).map_err(|_| invariant(column, "is outside the enum wire range"))?;
++    decode(value).map_err(|error| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("{column}: {error}"),
++        )
++    })
++}
++
++/// Fails closed for a persisted state string with no domain mirror variant.
++pub(crate) fn decode_state<T>(
++    column: &'static str,
++    value: &str,
++    decode: fn(&str) -> Result<T, UnknownStateValue>,
++) -> errors::Result<T> {
++    decode(value).map_err(|error| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("{column}: {error}"),
++        )
++    })
++}
++
++/// Decodes a persisted identifier through its domain newtype.
++pub(crate) fn decode_id<T>(column: &'static str, value: &str) -> errors::Result<T>
++where
++    T: FromStr,
++    T::Err: Display,
++{
++    value.parse().map_err(|error| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("{column} is not a valid identifier: {error}"),
++        )
++    })
++}
++
++/// Decodes an optional persisted identifier.
++pub(crate) fn decode_opt_id<T>(
++    column: &'static str,
++    value: Option<String>,
++) -> errors::Result<Option<T>>
++where
++    T: FromStr,
++    T::Err: Display,
++{
++    value.map(|value| decode_id(column, &value)).transpose()
++}
++
++/// Decodes a non-negative persisted integer.
++pub(crate) fn decode_u64(column: &'static str, value: i64) -> errors::Result<u64> {
++    u64::try_from(value).map_err(|_| invariant(column, "is negative"))
++}
++
++/// Encodes a caller-supplied counter for storage.
++pub(crate) fn encode_u64(column: &'static str, value: u64) -> errors::Result<i64> {
++    i64::try_from(value).map_err(|_| {
++        KernelError::new(
++            ErrorCode::InvalidArgument,
++            RetryClass::Never,
++            format!("{column} exceeds the SQLite integer range"),
++        )
++    })
++}
++
++/// Reads a non-null `TEXT` column.
++pub(crate) fn text(row: &SqliteRow, column: &'static str) -> errors::Result<String> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as TEXT"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Reads a nullable `TEXT` column.
++pub(crate) fn opt_text(row: &SqliteRow, column: &'static str) -> errors::Result<Option<String>> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as TEXT"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Reads a non-null `INTEGER` column.
++pub(crate) fn int(row: &SqliteRow, column: &'static str) -> errors::Result<i64> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as INTEGER"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Reads a nullable `INTEGER` column.
++pub(crate) fn opt_int(row: &SqliteRow, column: &'static str) -> errors::Result<Option<i64>> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as INTEGER"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Reads a non-null `BLOB` column.
++pub(crate) fn blob(row: &SqliteRow, column: &'static str) -> errors::Result<Vec<u8>> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as BLOB"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Reads a nullable `BLOB` column.
++pub(crate) fn opt_blob(row: &SqliteRow, column: &'static str) -> errors::Result<Option<Vec<u8>>> {
++    row.try_get(column).map_err(|source| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            format!("column {column} is not readable as BLOB"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Current UTC Unix milliseconds.
++pub(crate) fn unix_ms_now() -> errors::Result<i64> {
++    let elapsed = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "system clock is before the unix epoch",
++            )
++        })?;
++    i64::try_from(elapsed.as_millis()).map_err(|_| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            "system clock exceeds the unix millisecond range",
++        )
++    })
++}
++
++fn invariant(column: &'static str, detail: &'static str) -> KernelError {
++    KernelError::new(
++        ErrorCode::Internal,
++        RetryClass::Never,
++        format!("{column} {detail}"),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use domain::run::RunState;
++    use errors::codes::{ErrorCode, RetryClass};
++
++    use super::{classify_sqlite, decode_id, decode_u64, decode_wire};
++
++    #[test]
++    fn unique_and_primary_key_codes_are_conflicts() {
++        for code in [2067, 1555] {
++            assert_eq!(
++                classify_sqlite(code),
++                (ErrorCode::Conflict, RetryClass::Never),
++                "code {code}"
++            );
++        }
++    }
++
++    #[test]
++    fn constraint_codes_are_failed_preconditions() {
++        // Base constraint, CHECK, FOREIGN KEY, NOT NULL, TRIGGER, ROWID.
++        for code in [19, 275, 787, 1299, 1811, 2579] {
++            assert_eq!(
++                classify_sqlite(code),
++                (ErrorCode::FailedPrecondition, RetryClass::Never),
++                "code {code}"
++            );
++        }
++    }
++
++    #[test]
++    fn busy_and_locked_codes_are_retry_safe_unavailable() {
++        // BUSY, BUSY_RECOVERY, BUSY_SNAPSHOT, BUSY_TIMEOUT, LOCKED, LOCKED_SHAREDCACHE.
++        for code in [5, 261, 517, 773, 6, 262] {
++            assert_eq!(
++                classify_sqlite(code),
++                (ErrorCode::Unavailable, RetryClass::Safe),
++                "code {code}"
++            );
++        }
++    }
++
++    #[test]
++    fn unknown_codes_are_internal() {
++        assert_eq!(
++            classify_sqlite(999),
++            (ErrorCode::Internal, RetryClass::Never)
++        );
++    }
++
++    #[test]
++    fn unknown_persisted_enums_fail_closed() {
++        let error = decode_wire("runs.state", 99, RunState::from_wire).unwrap_err();
++        assert_eq!(error.code(), ErrorCode::Internal);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++
++        let overflow = decode_wire("runs.state", i64::MAX, RunState::from_wire).unwrap_err();
++        assert_eq!(overflow.code(), ErrorCode::Internal);
++    }
++
++    #[test]
++    fn malformed_identifiers_and_negative_counters_fail_closed() {
++        let id = decode_id::<domain::ids::RunId>("runs.run_id", "not-a-uuid").unwrap_err();
++        assert_eq!(id.code(), ErrorCode::Internal);
++        assert_eq!(id.retry_class(), RetryClass::Never);
++
++        let negative = decode_u64("runs.run_revision", -1).unwrap_err();
++        assert_eq!(negative.code(), ErrorCode::Internal);
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/environments.rs b/agent-os/crates/kernel-store-sqlite/src/repos/environments.rs
+new file mode 100644
+index 0000000..9c69995
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/environments.rs
+@@ -0,0 +1,188 @@
++//! Immutable environment repository: resolved environments and bindings.
++//!
++//! Both tables reject updates and deletes through schema triggers, so the
++//! repository exposes insertion and reads only (R3.6).
++
++use async_trait::async_trait;
++use domain::ids::EnvironmentId;
++use domain::resource::WorkspaceAccessMode;
++use kernel_store::models::{
++    NewResolvedBinding, NewResolvedEnvironment, ResolvedBindingRow, ResolvedEnvironmentRow,
++};
++use kernel_store::repositories::{EnvironmentRead, EnvironmentRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `resolved_run_environments` and `resolved_bindings`.
++pub(crate) struct SqliteEnvironmentRepo {
++    conn: SharedConn,
++}
++
++impl SqliteEnvironmentRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_environment(row: &SqliteRow) -> errors::Result<ResolvedEnvironmentRow> {
++    Ok(ResolvedEnvironmentRow {
++        environment_id: mapping::decode_id(
++            "resolved_run_environments.environment_id",
++            &mapping::text(row, "environment_id")?,
++        )?,
++        run_id: mapping::decode_id(
++            "resolved_run_environments.run_id",
++            &mapping::text(row, "run_id")?,
++        )?,
++        agent_spec_id: mapping::decode_id(
++            "resolved_run_environments.agent_spec_id",
++            &mapping::text(row, "agent_spec_id")?,
++        )?,
++        agent_spec_version: mapping::text(row, "agent_spec_version")?,
++        agent_spec_digest: mapping::text(row, "agent_spec_digest")?,
++        agent_loop_id: mapping::text(row, "agent_loop_id")?,
++        agent_loop_version: mapping::text(row, "agent_loop_version")?,
++        agent_loop_digest: mapping::text(row, "agent_loop_digest")?,
++        config_generation_id: mapping::decode_id(
++            "resolved_run_environments.config_generation_id",
++            &mapping::text(row, "config_generation_id")?,
++        )?,
++        workspace_uri: mapping::opt_text(row, "workspace_uri")?,
++        workspace_base_revision: mapping::opt_text(row, "workspace_base_revision")?,
++        workspace_mode: mapping::decode_wire(
++            "resolved_run_environments.workspace_mode",
++            mapping::int(row, "workspace_mode")?,
++            WorkspaceAccessMode::from_wire,
++        )?,
++        model_provider: mapping::opt_text(row, "model_provider")?,
++        model_id: mapping::opt_text(row, "model_id")?,
++        model_parameters: mapping::opt_blob(row, "model_parameters")?,
++        kernel_version: mapping::text(row, "kernel_version")?,
++        protocol_versions: mapping::blob(row, "protocol_versions")?,
++        capability_grant_ids: mapping::blob(row, "capability_grant_ids")?,
++        approval_request_ids: mapping::blob(row, "approval_request_ids")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++fn decode_binding(row: &SqliteRow) -> errors::Result<ResolvedBindingRow> {
++    Ok(ResolvedBindingRow {
++        environment_id: mapping::decode_id(
++            "resolved_bindings.environment_id",
++            &mapping::text(row, "environment_id")?,
++        )?,
++        port_id: mapping::text(row, "port_id")?,
++        adapter_id: mapping::decode_id(
++            "resolved_bindings.adapter_id",
++            &mapping::text(row, "adapter_id")?,
++        )?,
++        adapter_version: mapping::text(row, "adapter_version")?,
++        adapter_digest: mapping::text(row, "adapter_digest")?,
++        capabilities: mapping::blob(row, "capabilities")?,
++    })
++}
++
++#[async_trait]
++impl EnvironmentRead for SqliteEnvironmentRepo {
++    async fn get_environment(
++        &mut self,
++        id: EnvironmentId,
++    ) -> errors::Result<Option<ResolvedEnvironmentRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT environment_id, run_id, agent_spec_id, agent_spec_version, agent_spec_digest, \
++             agent_loop_id, agent_loop_version, agent_loop_digest, config_generation_id, \
++             workspace_uri, workspace_base_revision, workspace_mode, model_provider, model_id, \
++             model_parameters, kernel_version, protocol_versions, capability_grant_ids, \
++             approval_request_ids, created_at_ms \
++             FROM resolved_run_environments WHERE environment_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_environment).transpose()
++    }
++
++    async fn get_bindings(&mut self, id: EnvironmentId) -> errors::Result<Vec<ResolvedBindingRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT environment_id, port_id, adapter_id, adapter_version, adapter_digest, \
++             capabilities FROM resolved_bindings WHERE environment_id = ?1 ORDER BY port_id",
++        )
++        .bind(id.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_binding).collect()
++    }
++}
++
++#[async_trait]
++impl EnvironmentRepo for SqliteEnvironmentRepo {
++    async fn insert_environment(&mut self, new: NewResolvedEnvironment) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO resolved_run_environments (environment_id, run_id, agent_spec_id, \
++             agent_spec_version, agent_spec_digest, agent_loop_id, agent_loop_version, \
++             agent_loop_digest, config_generation_id, workspace_uri, workspace_base_revision, \
++             workspace_mode, model_provider, model_id, model_parameters, kernel_version, \
++             protocol_versions, capability_grant_ids, approval_request_ids, created_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
++             ?17, ?18, ?19, ?20)",
++        )
++        .bind(new.environment_id.to_string())
++        .bind(new.run_id.to_string())
++        .bind(new.agent_spec_id.to_string())
++        .bind(new.agent_spec_version)
++        .bind(new.agent_spec_digest)
++        .bind(new.agent_loop_id)
++        .bind(new.agent_loop_version)
++        .bind(new.agent_loop_digest)
++        .bind(new.config_generation_id.to_string())
++        .bind(new.workspace_uri)
++        .bind(new.workspace_base_revision)
++        .bind(i64::from(new.workspace_mode.to_wire()))
++        .bind(new.model_provider)
++        .bind(new.model_id)
++        .bind(new.model_parameters)
++        .bind(new.kernel_version)
++        .bind(new.protocol_versions)
++        .bind(new.capability_grant_ids)
++        .bind(new.approval_request_ids)
++        .bind(new.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_bindings(
++        &mut self,
++        environment: EnvironmentId,
++        bindings: Vec<NewResolvedBinding>,
++    ) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        for binding in bindings {
++            sqlx::query(
++                "INSERT INTO resolved_bindings (environment_id, port_id, adapter_id, \
++                 adapter_version, adapter_digest, capabilities) \
++                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
++            )
++            .bind(environment.to_string())
++            .bind(binding.port_id)
++            .bind(binding.adapter_id.to_string())
++            .bind(binding.adapter_version)
++            .bind(binding.adapter_digest)
++            .bind(binding.capabilities)
++            .execute(&mut *conn)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        }
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs b/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs
+new file mode 100644
+index 0000000..bae4962
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs
+@@ -0,0 +1,247 @@
++//! Run-graph repository: heads, dependency edges, and reachability.
++//!
++//! Heads and dependency insertion reserve writer ordering through the
++//! enclosing `BEGIN IMMEDIATE` transaction (D2, R3.3): the expected revision
++//! is validated and the head advanced in the same immediate transaction.
++
++use async_trait::async_trait;
++use domain::ids::{RunId, TaskId};
++use domain::resource::DependencyCondition;
++use domain::run::UnknownStateValue;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{NewRunDependency, RunDependencyRow, RunGraphHeadRow};
++use kernel_store::repositories::{GraphRead, GraphRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `run_graph_heads` and `run_dependencies`.
++pub(crate) struct SqliteGraphRepo {
++    conn: SharedConn,
++}
++
++impl SqliteGraphRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_head(row: &SqliteRow) -> errors::Result<RunGraphHeadRow> {
++    Ok(RunGraphHeadRow {
++        task_id: mapping::decode_id("run_graph_heads.task_id", &mapping::text(row, "task_id")?)?,
++        graph_revision: mapping::decode_u64(
++            "run_graph_heads.graph_revision",
++            mapping::int(row, "graph_revision")?,
++        )?,
++    })
++}
++
++/// Parses the exact `run_dependencies.dependency_condition` CHECK literal.
++fn dependency_condition_from_state(value: &str) -> Result<DependencyCondition, UnknownStateValue> {
++    match value {
++        "completed_successfully" => Ok(DependencyCondition::CompletedSuccessfully),
++        "any_terminal" => Ok(DependencyCondition::AnyTerminal),
++        "completed_or_cancelled" => Ok(DependencyCondition::CompletedOrCancelled),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "DependencyCondition",
++        }),
++    }
++}
++
++/// Renders the exact `run_dependencies.dependency_condition` CHECK literal.
++fn dependency_condition_to_state(condition: DependencyCondition) -> &'static str {
++    match condition {
++        DependencyCondition::CompletedSuccessfully => "completed_successfully",
++        DependencyCondition::AnyTerminal => "any_terminal",
++        DependencyCondition::CompletedOrCancelled => "completed_or_cancelled",
++        DependencyCondition::Unspecified => "unspecified",
++    }
++}
++
++fn decode_dependency(row: &SqliteRow) -> errors::Result<RunDependencyRow> {
++    Ok(RunDependencyRow {
++        dependency_id: mapping::decode_id(
++            "run_dependencies.dependency_id",
++            &mapping::text(row, "dependency_id")?,
++        )?,
++        task_id: mapping::decode_id("run_dependencies.task_id", &mapping::text(row, "task_id")?)?,
++        source_run_id: mapping::decode_id(
++            "run_dependencies.source_run_id",
++            &mapping::text(row, "source_run_id")?,
++        )?,
++        target_run_id: mapping::decode_id(
++            "run_dependencies.target_run_id",
++            &mapping::text(row, "target_run_id")?,
++        )?,
++        dependency_condition: mapping::decode_state(
++            "run_dependencies.dependency_condition",
++            &mapping::text(row, "dependency_condition")?,
++            dependency_condition_from_state,
++        )?,
++        created_graph_revision: mapping::decode_u64(
++            "run_dependencies.created_graph_revision",
++            mapping::int(row, "created_graph_revision")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++async fn fetch_head(
++    conn: &mut sqlx::SqliteConnection,
++    task: TaskId,
++) -> errors::Result<Option<RunGraphHeadRow>> {
++    let row = sqlx::query("SELECT task_id, graph_revision FROM run_graph_heads WHERE task_id = ?1")
++        .bind(task.to_string())
++        .fetch_optional(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++    row.as_ref().map(decode_head).transpose()
++}
++
++#[async_trait]
++impl GraphRead for SqliteGraphRepo {
++    async fn get_head(&mut self, task: TaskId) -> errors::Result<Option<RunGraphHeadRow>> {
++        let mut guard = self.conn.lock().await;
++        fetch_head(guard.connection()?, task).await
++    }
++
++    async fn list_dependencies(&mut self, task: TaskId) -> errors::Result<Vec<RunDependencyRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT dependency_id, task_id, source_run_id, target_run_id, \
++             dependency_condition, created_graph_revision, created_at_ms \
++             FROM run_dependencies WHERE task_id = ?1 \
++             ORDER BY created_graph_revision, dependency_id",
++        )
++        .bind(task.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_dependency).collect()
++    }
++
++    async fn is_reachable(&mut self, from: RunId, to: RunId) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let reachable: i64 = sqlx::query_scalar(
++            "WITH RECURSIVE reach(run_id) AS ( \
++               SELECT ?1 \
++               UNION \
++               SELECT dependency.target_run_id FROM run_dependencies dependency \
++               JOIN reach ON dependency.source_run_id = reach.run_id \
++             ) SELECT EXISTS(SELECT 1 FROM reach WHERE run_id = ?2)",
++        )
++        .bind(from.to_string())
++        .bind(to.to_string())
++        .fetch_one(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(reachable != 0)
++    }
++}
++
++#[async_trait]
++impl GraphRepo for SqliteGraphRepo {
++    async fn ensure_head(&mut self, task: TaskId) -> errors::Result<RunGraphHeadRow> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        sqlx::query(
++            "INSERT INTO run_graph_heads (task_id, graph_revision) VALUES (?1, 0) \
++             ON CONFLICT(task_id) DO NOTHING",
++        )
++        .bind(task.to_string())
++        .execute(&mut *conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        fetch_head(conn, task)
++            .await?
++            .ok_or_else(|| missing_row("graph head is missing after ensure_head"))
++    }
++
++    async fn cas_head_revision(&mut self, task: TaskId, expected: u64) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let expected = mapping::encode_u64("run_graph_heads.graph_revision", expected)?;
++        let result = sqlx::query(
++            "UPDATE run_graph_heads SET graph_revision = graph_revision + 1 \
++             WHERE task_id = ?1 AND graph_revision = ?2",
++        )
++        .bind(task.to_string())
++        .bind(expected)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++
++    async fn insert_dependency(
++        &mut self,
++        new: NewRunDependency,
++        expected_revision: u64,
++    ) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++
++        let head = fetch_head(conn, new.task_id).await?;
++        let Some(head) = head else {
++            return Err(KernelError::new(
++                ErrorCode::NotFound,
++                RetryClass::Never,
++                "graph head missing for task",
++            ));
++        };
++        if head.graph_revision != expected_revision {
++            return Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "graph revision conflict",
++            ));
++        }
++
++        sqlx::query(
++            "INSERT INTO run_dependencies (dependency_id, task_id, source_run_id, target_run_id, \
++             dependency_condition, created_graph_revision, created_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
++        )
++        .bind(new.dependency_id.to_string())
++        .bind(new.task_id.to_string())
++        .bind(new.source_run_id.to_string())
++        .bind(new.target_run_id.to_string())
++        .bind(dependency_condition_to_state(new.dependency_condition))
++        .bind(mapping::encode_u64(
++            "run_dependencies.created_graph_revision",
++            expected_revision,
++        )?)
++        .bind(new.created_at_ms)
++        .execute(&mut *conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++
++        let advanced = sqlx::query(
++            "UPDATE run_graph_heads SET graph_revision = graph_revision + 1 \
++             WHERE task_id = ?1 AND graph_revision = ?2",
++        )
++        .bind(new.task_id.to_string())
++        .bind(mapping::encode_u64(
++            "run_graph_heads.graph_revision",
++            expected_revision,
++        )?)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        if advanced.rows_affected() != 1 {
++            return Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "graph head changed during dependency insertion",
++            ));
++        }
++        Ok(())
++    }
++}
++
++fn missing_row(message: &'static str) -> KernelError {
++    KernelError::new(ErrorCode::NotFound, RetryClass::Never, message)
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+new file mode 100644
+index 0000000..178c5be
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+@@ -0,0 +1,286 @@
++//! Repository implementations over a shared SQLite connection.
++//!
++//! The groups implemented by the SQLite store are [`runs`], [`tasks`],
++//! [`sessions`], [`graph`], and [`environments`]; each repository view shares
++//! the connection owned by its transaction through [`SharedConn`].
++//!
++//! [`UnavailableRepo`] stands in for repository groups whose SQL
++//! implementations arrive with later persistence tasks. Every operation on it
++//! fails closed with `FailedPrecondition`/`Never`, so a caller can never
++//! observe fabricated rows.
++
++pub(crate) mod environments;
++pub(crate) mod graph;
++pub(crate) mod runs;
++pub(crate) mod sessions;
++pub(crate) mod tasks;
++
++use std::sync::Arc;
++
++use domain::effect::EffectState;
++use domain::ids::*;
++use domain::resource::{ReservationState, TimerState};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use sqlx::Sqlite;
++use sqlx::pool::PoolConnection;
++use sqlx::sqlite::SqliteConnection;
++
++/// Shared handle to the write connection owned by a write transaction.
++pub(crate) type WriteConn = Arc<tokio::sync::Mutex<Option<sqlx::Transaction<'static, Sqlite>>>>;
++
++/// Shared handle to the read connection owned by a read transaction.
++pub(crate) type ReadConn = Arc<tokio::sync::Mutex<Option<PoolConnection<Sqlite>>>>;
++
++/// Connection shared by every repository view of one transaction.
++#[derive(Clone)]
++pub(crate) enum SharedConn {
++    /// Connection inside an immediate write transaction.
++    Write(WriteConn),
++    /// Plain read connection.
++    Read(ReadConn),
++}
++
++impl SharedConn {
++    /// Locks the shared connection for the duration of one repository call.
++    pub(crate) async fn lock(&self) -> ConnGuard<'_> {
++        match self {
++            Self::Write(conn) => ConnGuard::Write(conn.lock().await),
++            Self::Read(conn) => ConnGuard::Read(conn.lock().await),
++        }
++    }
++}
++
++/// Held connection guard that yields the underlying connection.
++pub(crate) enum ConnGuard<'a> {
++    /// Guard over an immediate write transaction.
++    Write(tokio::sync::MutexGuard<'a, Option<sqlx::Transaction<'static, Sqlite>>>),
++    /// Guard over a plain read connection.
++    Read(tokio::sync::MutexGuard<'a, Option<PoolConnection<Sqlite>>>),
++}
++
++impl ConnGuard<'_> {
++    /// Borrows the live connection, or fails closed when the transaction has
++    /// already been committed or rolled back.
++    pub(crate) fn connection(&mut self) -> errors::Result<&mut SqliteConnection> {
++        match self {
++            Self::Write(guard) => guard.as_mut().map(|txn| &mut **txn),
++            Self::Read(guard) => guard.as_mut().map(|conn| &mut **conn),
++        }
++        .ok_or_else(|| {
++            KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                "transaction connection is already finished",
++            )
++        })
++    }
++}
++
++/// Repository view for groups without a SQL implementation in this store.
++#[derive(Clone, Copy, Debug, Default)]
++pub(crate) struct UnavailableRepo;
++
++use kernel_store::models::*;
++use kernel_store::repositories::*;
++
++use crate::mapping;
++
++macro_rules! unavailable_repo {
++    ($($trait_name:ident { $(async fn $method:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?) -> errors::Result<$out:ty>;)* })*) => {
++        $(
++            #[async_trait::async_trait]
++            impl $trait_name for UnavailableRepo {
++                $(
++                    async fn $method(&mut self $(, $arg: $ty)*) -> errors::Result<$out> {
++                        $(let _ = $arg;)*
++                        Err(mapping::unavailable(stringify!($trait_name)))
++                    }
++                )*
++            }
++        )*
++    };
++}
++
++unavailable_repo! {
++    EffectRead {
++        async fn get(&mut self, id: EffectId) -> errors::Result<Option<EffectRow>>;
++        async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<EffectRow>>;
++    }
++    EffectRepo {
++        async fn insert(&mut self, effect: NewEffect) -> errors::Result<()>;
++        async fn cas_transition(
++            &mut self,
++            id: EffectId,
++            expect_state: EffectState,
++            expect_token: Option<u64>,
++            patch: EffectPatch,
++        ) -> errors::Result<bool>;
++    }
++    ResourceRead {
++        async fn get(&mut self, id: ReservationId) -> errors::Result<Option<ReservationRow>>;
++        async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<ReservationRow>>;
++    }
++    ResourceRepo {
++        async fn insert(&mut self, reservation: NewReservation) -> errors::Result<()>;
++        async fn cas_transition(
++            &mut self,
++            id: ReservationId,
++            expect_state: ReservationState,
++            patch: ReservationPatch,
++        ) -> errors::Result<bool>;
++    }
++    TimerRead {
++        async fn get(&mut self, id: TimerId) -> errors::Result<Option<TimerRow>>;
++        async fn list_due(&mut self, due_before_ms: i64) -> errors::Result<Vec<TimerRow>>;
++    }
++    TimerRepo {
++        async fn insert(&mut self, timer: NewTimer) -> errors::Result<()>;
++        async fn cas_transition(
++            &mut self,
++            id: TimerId,
++            expect_state: TimerState,
++            expect_version: u64,
++            patch: TimerPatch,
++        ) -> errors::Result<bool>;
++    }
++    SecurityRead {
++        async fn get_grant(
++            &mut self,
++            id: CapabilityGrantId,
++        ) -> errors::Result<Option<CapabilityGrantRow>>;
++        async fn list_delegation_hops(
++            &mut self,
++            chain: DelegationChainId,
++        ) -> errors::Result<Vec<DelegationHopRow>>;
++        async fn get_approval_request(
++            &mut self,
++            id: ApprovalRequestId,
++        ) -> errors::Result<Option<ApprovalRequestRow>>;
++        async fn list_approval_responses(
++            &mut self,
++            request: ApprovalRequestId,
++        ) -> errors::Result<Vec<ApprovalResponseRow>>;
++    }
++    SecurityRepo {
++        async fn insert_grant(&mut self, grant: NewCapabilityGrant) -> errors::Result<()>;
++        async fn insert_delegation_hop(&mut self, hop: NewDelegationHop) -> errors::Result<()>;
++        async fn insert_approval_request(
++            &mut self,
++            request: NewApprovalRequest,
++        ) -> errors::Result<()>;
++        async fn insert_approval_response(
++            &mut self,
++            response: NewApprovalResponse,
++        ) -> errors::Result<()>;
++    }
++    ConfigRead {
++        async fn get_generation(
++            &mut self,
++            id: ConfigGenerationId,
++        ) -> errors::Result<Option<ConfigGenerationRow>>;
++        async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>>;
++    }
++    ConfigRepo {
++        async fn insert_generation(
++            &mut self,
++            generation: NewConfigGeneration,
++        ) -> errors::Result<()>;
++        async fn cas_active(
++            &mut self,
++            expected_revision: u64,
++            generation: ConfigGenerationId,
++            activated_at_ms: i64,
++        ) -> errors::Result<bool>;
++    }
++    WorkspaceRead {
++        async fn get_workspace(&mut self, id: WorkspaceId)
++            -> errors::Result<Option<WorkspaceRow>>;
++        async fn get_lease(&mut self, id: LeaseId) -> errors::Result<Option<WorkspaceLeaseRow>>;
++    }
++    WorkspaceRepo {
++        async fn insert_workspace(&mut self, workspace: NewWorkspace) -> errors::Result<()>;
++        async fn insert_lease(&mut self, lease: NewWorkspaceLease) -> errors::Result<()>;
++        async fn cas_lease(
++            &mut self,
++            id: LeaseId,
++            expect_epoch: u64,
++            patch: LeasePatch,
++        ) -> errors::Result<bool>;
++    }
++    AdapterRead {
++        async fn get_registration(
++            &mut self,
++            adapter_id: AdapterId,
++            version: &str,
++            bundle_digest: &str,
++        ) -> errors::Result<Option<AdapterRegistrationRow>>;
++        async fn get_conformance_report(
++            &mut self,
++            adapter_id: AdapterId,
++            version: &str,
++            bundle_digest: &str,
++        ) -> errors::Result<Option<ConformanceReportRow>>;
++    }
++    AdapterRepo {
++        async fn insert_registration(
++            &mut self,
++            registration: NewAdapterRegistration,
++        ) -> errors::Result<()>;
++        async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()>;
++        async fn cas_instance_state(
++            &mut self,
++            id: AdapterInstanceId,
++            expect_state: &str,
++            patch: AdapterInstanceStatePatch,
++        ) -> errors::Result<bool>;
++        async fn insert_conformance_report(
++            &mut self,
++            report: NewConformanceReport,
++        ) -> errors::Result<()>;
++    }
++    ArtifactRead {
++        async fn get_by_id(&mut self, id: ArtifactId) -> errors::Result<Option<ArtifactRow>>;
++        async fn get_by_uri(&mut self, uri: &str) -> errors::Result<Option<ArtifactRow>>;
++    }
++    ArtifactRepo {
++        async fn insert(&mut self, artifact: NewArtifact) -> errors::Result<()>;
++    }
++    LoopRead {
++        async fn get_turn(&mut self, id: TurnId) -> errors::Result<Option<LoopTurnRow>>;
++        async fn get_decision(
++            &mut self,
++            run: RunId,
++            decision: DecisionId,
++        ) -> errors::Result<Option<DecisionRow>>;
++    }
++    LoopRepo {
++        async fn insert_turn(&mut self, turn: NewLoopTurn) -> errors::Result<()>;
++        async fn cas_turn(
++            &mut self,
++            id: TurnId,
++            expect_state: &str,
++            patch: LoopTurnPatch,
++        ) -> errors::Result<bool>;
++        async fn insert_decision(&mut self, decision: NewDecision) -> errors::Result<()>;
++    }
++    IdempotencyRepo {
++        async fn lookup(
++            &mut self,
++            principal: PrincipalId,
++            key: &IdempotencyKey,
++        ) -> errors::Result<Option<IdempotencyRecordRow>>;
++        async fn insert(&mut self, record: NewIdempotencyRecord) -> errors::Result<()>;
++    }
++    StreamRepo {
++        async fn allocate(&mut self, stream_key: EventStreamKey) -> errors::Result<u64>;
++        async fn insert_outbox(&mut self, event: NewOutboxEvent) -> errors::Result<()>;
++        async fn scan_unpublished(&mut self, limit: u32)
++            -> errors::Result<Vec<OutboxEventRow>>;
++        async fn mark_published(
++            &mut self,
++            event_id: EventId,
++            kind: PublishKind,
++        ) -> errors::Result<()>;
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/runs.rs b/agent-os/crates/kernel-store-sqlite/src/repos/runs.rs
+new file mode 100644
+index 0000000..34892bc
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/runs.rs
+@@ -0,0 +1,250 @@
++//! Run repository: insert, fetch, list, and compare-and-set updates.
++
++use async_trait::async_trait;
++use domain::ids::{RunId, TaskId};
++use domain::run::{RecoveryDisposition, RunState};
++use kernel_store::models::{NewRun, RunCas, RunPatch, RunRow};
++use kernel_store::repositories::{RunRead, RunRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `runs` table.
++pub(crate) struct SqliteRunRepo {
++    conn: SharedConn,
++}
++
++impl SqliteRunRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++async fn fetch_run(conn: &mut sqlx::SqliteConnection, id: RunId) -> errors::Result<Option<RunRow>> {
++    let row = sqlx::query(
++        "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
++         run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
++         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
++         claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
++         updated_at_ms FROM runs WHERE run_id = ?1",
++    )
++    .bind(id.to_string())
++    .fetch_optional(conn)
++    .await
++    .map_err(mapping::from_sqlx)?;
++    row.as_ref().map(decode_run).transpose()
++}
++
++async fn fetch_runs_by_task(
++    conn: &mut sqlx::SqliteConnection,
++    task: TaskId,
++) -> errors::Result<Vec<RunRow>> {
++    let rows = sqlx::query(
++        "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
++         run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
++         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
++         claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
++         updated_at_ms FROM runs WHERE task_id = ?1 ORDER BY run_id",
++    )
++    .bind(task.to_string())
++    .fetch_all(conn)
++    .await
++    .map_err(mapping::from_sqlx)?;
++    rows.iter().map(decode_run).collect()
++}
++
++fn decode_run(row: &SqliteRow) -> errors::Result<RunRow> {
++    Ok(RunRow {
++        run_id: mapping::decode_id("runs.run_id", &mapping::text(row, "run_id")?)?,
++        task_id: mapping::decode_id("runs.task_id", &mapping::text(row, "task_id")?)?,
++        session_id: mapping::decode_opt_id(
++            "runs.session_id",
++            mapping::opt_text(row, "session_id")?,
++        )?,
++        parent_run_id: mapping::decode_opt_id(
++            "runs.parent_run_id",
++            mapping::opt_text(row, "parent_run_id")?,
++        )?,
++        state: mapping::decode_wire(
++            "runs.state",
++            mapping::int(row, "state")?,
++            RunState::from_wire,
++        )?,
++        recovery: mapping::decode_wire(
++            "runs.recovery_disposition",
++            mapping::int(row, "recovery_disposition")?,
++            RecoveryDisposition::from_wire,
++        )?,
++        run_revision: mapping::decode_u64("runs.run_revision", mapping::int(row, "run_revision")?)?,
++        loop_epoch: mapping::decode_u64("runs.loop_epoch", mapping::int(row, "loop_epoch")?)?,
++        step_sequence: mapping::decode_u64(
++            "runs.step_sequence",
++            mapping::int(row, "step_sequence")?,
++        )?,
++        input_event_cursor: mapping::decode_id(
++            "runs.input_event_cursor",
++            &mapping::text(row, "input_event_cursor")?,
++        )?,
++        cancellation_epoch: mapping::decode_u64(
++            "runs.cancellation_epoch",
++            mapping::int(row, "cancellation_epoch")?,
++        )?,
++        resolved_environment_id: mapping::decode_opt_id(
++            "runs.resolved_environment_id",
++            mapping::opt_text(row, "resolved_environment_id")?,
++        )?,
++        claim_owner: mapping::opt_text(row, "claim_owner")?,
++        claim_token: mapping::opt_int(row, "claim_token")?
++            .map(|value| mapping::decode_u64("runs.claim_token", value))
++            .transpose()?,
++        claim_expires_ms: mapping::opt_int(row, "claim_expires_ms")?,
++        claim_daemon_epoch: mapping::opt_int(row, "claim_daemon_epoch")?
++            .map(|value| mapping::decode_u64("runs.claim_daemon_epoch", value))
++            .transpose()?,
++        terminal_reason: mapping::opt_text(row, "terminal_reason")?,
++        output_ref: mapping::opt_text(row, "output_ref")?,
++        current_turn_id: mapping::decode_opt_id(
++            "runs.current_turn_id",
++            mapping::opt_text(row, "current_turn_id")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        updated_at_ms: mapping::int(row, "updated_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl RunRead for SqliteRunRepo {
++    async fn get(&mut self, id: RunId) -> errors::Result<Option<RunRow>> {
++        let mut guard = self.conn.lock().await;
++        fetch_run(guard.connection()?, id).await
++    }
++
++    async fn list_by_task(&mut self, task: TaskId) -> errors::Result<Vec<RunRow>> {
++        let mut guard = self.conn.lock().await;
++        fetch_runs_by_task(guard.connection()?, task).await
++    }
++}
++
++#[async_trait]
++impl RunRepo for SqliteRunRepo {
++    async fn insert(&mut self, run: NewRun) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        sqlx::query(
++            "INSERT INTO runs (run_id, task_id, session_id, parent_run_id, state, \
++             recovery_disposition, loop_epoch, step_sequence, input_event_cursor, \
++             cancellation_epoch, resolved_environment_id, created_at_ms, updated_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
++        )
++        .bind(run.run_id.to_string())
++        .bind(run.task_id.to_string())
++        .bind(run.session_id.map(|id| id.to_string()))
++        .bind(run.parent_run_id.map(|id| id.to_string()))
++        .bind(i64::from(run.state.to_wire()))
++        .bind(i64::from(run.recovery.to_wire()))
++        .bind(mapping::encode_u64("runs.loop_epoch", run.loop_epoch)?)
++        .bind(mapping::encode_u64(
++            "runs.step_sequence",
++            run.step_sequence,
++        )?)
++        .bind(run.input_event_cursor.to_string())
++        .bind(mapping::encode_u64(
++            "runs.cancellation_epoch",
++            run.cancellation_epoch,
++        )?)
++        .bind(run.resolved_environment_id.map(|id| id.to_string()))
++        .bind(run.created_at_ms)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_update(
++        &mut self,
++        id: RunId,
++        expect: RunCas,
++        patch: RunPatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++
++        let (claim_owner, claim_token, claim_expires_ms, claim_daemon_epoch) = match patch.claim {
++            Some(claim) => (
++                Some(claim.owner),
++                Some(mapping::encode_u64("runs.claim_token", claim.token)?),
++                Some(claim.expires_unix_ms),
++                Some(mapping::encode_u64(
++                    "runs.claim_daemon_epoch",
++                    claim.daemon_epoch,
++                )?),
++            ),
++            None => (None, None, None, None),
++        };
++        let runtime = patch
++            .step_sequence
++            .map(|value| mapping::encode_u64("runs.step_sequence", value))
++            .transpose()?;
++        let loop_epoch = patch
++            .loop_epoch
++            .map(|value| mapping::encode_u64("runs.loop_epoch", value))
++            .transpose()?;
++        let cancellation_epoch = patch
++            .cancellation_epoch
++            .map(|value| mapping::encode_u64("runs.cancellation_epoch", value))
++            .transpose()?;
++        let expected_revision = mapping::encode_u64("runs.run_revision", expect.run_revision)?;
++        let expected_state = expect.state.map(|state| i64::from(state.to_wire()));
++        let expected_cancellation = expect
++            .cancellation_epoch
++            .map(|value| mapping::encode_u64("runs.cancellation_epoch", value))
++            .transpose()?;
++
++        let result = sqlx::query(
++            "UPDATE runs SET \
++             state = COALESCE(?1, state), \
++             recovery_disposition = COALESCE(?2, recovery_disposition), \
++             loop_epoch = COALESCE(?3, loop_epoch), \
++             step_sequence = COALESCE(?4, step_sequence), \
++             input_event_cursor = COALESCE(?5, input_event_cursor), \
++             cancellation_epoch = COALESCE(?6, cancellation_epoch), \
++             resolved_environment_id = COALESCE(?7, resolved_environment_id), \
++             claim_owner = COALESCE(?8, claim_owner), \
++             claim_token = COALESCE(?9, claim_token), \
++             claim_expires_ms = COALESCE(?10, claim_expires_ms), \
++             claim_daemon_epoch = COALESCE(?11, claim_daemon_epoch), \
++             terminal_reason = COALESCE(?12, terminal_reason), \
++             output_ref = COALESCE(?13, output_ref), \
++             current_turn_id = COALESCE(?14, current_turn_id), \
++             run_revision = run_revision + ?15 \
++             WHERE run_id = ?16 AND run_revision = ?17 \
++             AND (?18 IS NULL OR state = ?18) \
++             AND (?19 IS NULL OR cancellation_epoch = ?19)",
++        )
++        .bind(patch.state.map(|state| i64::from(state.to_wire())))
++        .bind(patch.recovery.map(|recovery| i64::from(recovery.to_wire())))
++        .bind(loop_epoch)
++        .bind(runtime)
++        .bind(patch.input_event_cursor.map(|cursor| cursor.to_string()))
++        .bind(cancellation_epoch)
++        .bind(patch.resolved_environment_id.map(|id| id.to_string()))
++        .bind(claim_owner)
++        .bind(claim_token)
++        .bind(claim_expires_ms)
++        .bind(claim_daemon_epoch)
++        .bind(patch.terminal_reason)
++        .bind(patch.output_ref)
++        .bind(patch.current_turn_id.map(|id| id.to_string()))
++        .bind(i64::from(patch.bump_revision))
++        .bind(id.to_string())
++        .bind(expected_revision)
++        .bind(expected_state)
++        .bind(expected_cancellation)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/sessions.rs b/agent-os/crates/kernel-store-sqlite/src/repos/sessions.rs
+new file mode 100644
+index 0000000..6690aec
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/sessions.rs
+@@ -0,0 +1,69 @@
++//! Session repository: insert and fetch.
++
++use async_trait::async_trait;
++use domain::ids::SessionId;
++use kernel_store::models::{NewSession, SessionRow};
++use kernel_store::repositories::{SessionRead, SessionRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `sessions` table.
++pub(crate) struct SqliteSessionRepo {
++    conn: SharedConn,
++}
++
++impl SqliteSessionRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_session(row: &SqliteRow) -> errors::Result<SessionRow> {
++    Ok(SessionRow {
++        session_id: mapping::decode_id("sessions.session_id", &mapping::text(row, "session_id")?)?,
++        principal_id: mapping::decode_id(
++            "sessions.principal_id",
++            &mapping::text(row, "principal_id")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        metadata: mapping::opt_blob(row, "metadata")?,
++    })
++}
++
++#[async_trait]
++impl SessionRead for SqliteSessionRepo {
++    async fn get(&mut self, id: SessionId) -> errors::Result<Option<SessionRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT session_id, principal_id, created_at_ms, metadata \
++             FROM sessions WHERE session_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_session).transpose()
++    }
++}
++
++#[async_trait]
++impl SessionRepo for SqliteSessionRepo {
++    async fn insert(&mut self, session: NewSession) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO sessions (session_id, principal_id, created_at_ms, metadata) \
++             VALUES (?1, ?2, ?3, ?4)",
++        )
++        .bind(session.session_id.to_string())
++        .bind(session.principal_id.to_string())
++        .bind(session.created_at_ms)
++        .bind(session.metadata)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/tasks.rs b/agent-os/crates/kernel-store-sqlite/src/repos/tasks.rs
+new file mode 100644
+index 0000000..c81780b
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/tasks.rs
+@@ -0,0 +1,89 @@
++//! Task repository: insert, fetch, and list by session.
++
++use async_trait::async_trait;
++use domain::ids::{SessionId, TaskId};
++use kernel_store::models::{NewTask, TaskRow};
++use kernel_store::repositories::{TaskRead, TaskRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `tasks` table.
++pub(crate) struct SqliteTaskRepo {
++    conn: SharedConn,
++}
++
++impl SqliteTaskRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_task(row: &SqliteRow) -> errors::Result<TaskRow> {
++    Ok(TaskRow {
++        task_id: mapping::decode_id("tasks.task_id", &mapping::text(row, "task_id")?)?,
++        session_id: mapping::decode_opt_id(
++            "tasks.session_id",
++            mapping::opt_text(row, "session_id")?,
++        )?,
++        created_by_actor_id: mapping::decode_id(
++            "tasks.created_by_actor_id",
++            &mapping::text(row, "created_by_actor_id")?,
++        )?,
++        task_kind: mapping::text(row, "task_kind")?,
++        payload: mapping::blob(row, "payload")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl TaskRead for SqliteTaskRepo {
++    async fn get(&mut self, id: TaskId) -> errors::Result<Option<TaskRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT task_id, session_id, created_by_actor_id, task_kind, payload, created_at_ms \
++             FROM tasks WHERE task_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_task).transpose()
++    }
++
++    async fn list_by_session(&mut self, session: SessionId) -> errors::Result<Vec<TaskRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT task_id, session_id, created_by_actor_id, task_kind, payload, created_at_ms \
++             FROM tasks WHERE session_id = ?1 ORDER BY task_id",
++        )
++        .bind(session.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_task).collect()
++    }
++}
++
++#[async_trait]
++impl TaskRepo for SqliteTaskRepo {
++    async fn insert(&mut self, task: NewTask) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO tasks (task_id, session_id, created_by_actor_id, task_kind, payload, \
++             created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
++        )
++        .bind(task.task_id.to_string())
++        .bind(task.session_id.map(|id| id.to_string()))
++        .bind(task.created_by_actor_id.to_string())
++        .bind(task.task_kind)
++        .bind(task.payload)
++        .bind(task.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/txn.rs b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+new file mode 100644
+index 0000000..cea2e61
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+@@ -0,0 +1,316 @@
++//! Write and read transaction guards over pooled SQLite connections.
++//!
++//! `begin_write` reserves writer ordering with an explicit `BEGIN IMMEDIATE`
++//! on its own pooled connection (D2, R3.3) and asserts the persisted daemon
++//! epoch exactly once, before any statement runs in the transaction (D6,
++//! R4.3). `commit` executes `COMMIT`; `rollback` executes `ROLLBACK`; dropping
++//! an unfinished guard rolls back through the sqlx transaction guard, which
++//! queues a rollback on the owned connection.
++//!
++//! `begin_read` acquires a plain pooled connection and issues no write
++//! statements.
++
++use std::sync::Arc;
++
++use async_trait::async_trait;
++use domain::ids::DaemonInstanceId;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::repositories::*;
++use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
++use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
++use sqlx::Sqlite;
++
++use crate::SqliteKernelStore;
++use crate::mapping;
++use crate::repos::{
++    ReadConn, SharedConn, UnavailableRepo, WriteConn, environments::SqliteEnvironmentRepo,
++    graph::SqliteGraphRepo, runs::SqliteRunRepo, sessions::SqliteSessionRepo,
++    tasks::SqliteTaskRepo,
++};
++
++/// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
++pub(crate) struct SqliteWriteTxn {
++    ctx: TxContext,
++    conn: WriteConn,
++    runs: SqliteRunRepo,
++    tasks: SqliteTaskRepo,
++    sessions: SqliteSessionRepo,
++    graph: SqliteGraphRepo,
++    environments: SqliteEnvironmentRepo,
++    unavailable: UnavailableRepo,
++}
++
++impl SqliteWriteTxn {
++    fn new(ctx: TxContext, txn: sqlx::Transaction<'static, Sqlite>) -> Self {
++        let conn: WriteConn = Arc::new(tokio::sync::Mutex::new(Some(txn)));
++        let shared = SharedConn::Write(conn.clone());
++        Self {
++            ctx,
++            conn,
++            runs: SqliteRunRepo::new(shared.clone()),
++            tasks: SqliteTaskRepo::new(shared.clone()),
++            sessions: SqliteSessionRepo::new(shared.clone()),
++            graph: SqliteGraphRepo::new(shared.clone()),
++            environments: SqliteEnvironmentRepo::new(shared),
++            unavailable: UnavailableRepo,
++        }
++    }
++
++    async fn take(&self) -> errors::Result<sqlx::Transaction<'static, Sqlite>> {
++        let mut guard = self.conn.lock().await;
++        guard.take().ok_or_else(|| {
++            KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                "write transaction is already finished",
++            )
++        })
++    }
++}
++
++#[async_trait]
++impl KernelTxn for SqliteWriteTxn {
++    fn context(&self) -> &TxContext {
++        &self.ctx
++    }
++
++    fn runs(&mut self) -> &mut dyn RunRepo {
++        &mut self.runs
++    }
++
++    fn tasks(&mut self) -> &mut dyn TaskRepo {
++        &mut self.tasks
++    }
++
++    fn sessions(&mut self) -> &mut dyn SessionRepo {
++        &mut self.sessions
++    }
++
++    fn graph(&mut self) -> &mut dyn GraphRepo {
++        &mut self.graph
++    }
++
++    fn environments(&mut self) -> &mut dyn EnvironmentRepo {
++        &mut self.environments
++    }
++
++    fn effects(&mut self) -> &mut dyn EffectRepo {
++        &mut self.unavailable
++    }
++
++    fn resources(&mut self) -> &mut dyn ResourceRepo {
++        &mut self.unavailable
++    }
++
++    fn timers(&mut self) -> &mut dyn TimerRepo {
++        &mut self.unavailable
++    }
++
++    fn security(&mut self) -> &mut dyn SecurityRepo {
++        &mut self.unavailable
++    }
++
++    fn config(&mut self) -> &mut dyn ConfigRepo {
++        &mut self.unavailable
++    }
++
++    fn workspaces(&mut self) -> &mut dyn WorkspaceRepo {
++        &mut self.unavailable
++    }
++
++    fn adapters(&mut self) -> &mut dyn AdapterRepo {
++        &mut self.unavailable
++    }
++
++    fn artifacts(&mut self) -> &mut dyn ArtifactRepo {
++        &mut self.unavailable
++    }
++
++    fn loop_turns(&mut self) -> &mut dyn LoopRepo {
++        &mut self.unavailable
++    }
++
++    fn idempotency(&mut self) -> &mut dyn IdempotencyRepo {
++        &mut self.unavailable
++    }
++
++    fn streams(&mut self) -> &mut dyn StreamRepo {
++        &mut self.unavailable
++    }
++
++    async fn commit(self: Box<Self>) -> errors::Result<()> {
++        let txn = self.take().await?;
++        txn.commit().await.map_err(mapping::from_sqlx)
++    }
++
++    async fn rollback(self: Box<Self>) -> errors::Result<()> {
++        let txn = self.take().await?;
++        txn.rollback().await.map_err(mapping::from_sqlx)
++    }
++}
++
++/// Read transaction guard owning a plain pooled connection.
++pub(crate) struct SqliteReadTxn {
++    runs: SqliteRunRepo,
++    tasks: SqliteTaskRepo,
++    sessions: SqliteSessionRepo,
++    graph: SqliteGraphRepo,
++    environments: SqliteEnvironmentRepo,
++    unavailable: UnavailableRepo,
++}
++
++impl SqliteReadTxn {
++    fn new(conn: ReadConn) -> Self {
++        let shared = SharedConn::Read(conn);
++        Self {
++            runs: SqliteRunRepo::new(shared.clone()),
++            tasks: SqliteTaskRepo::new(shared.clone()),
++            sessions: SqliteSessionRepo::new(shared.clone()),
++            graph: SqliteGraphRepo::new(shared.clone()),
++            environments: SqliteEnvironmentRepo::new(shared),
++            unavailable: UnavailableRepo,
++        }
++    }
++}
++
++#[async_trait]
++impl KernelReadTxn for SqliteReadTxn {
++    fn runs(&mut self) -> &mut dyn RunRead {
++        &mut self.runs
++    }
++
++    fn tasks(&mut self) -> &mut dyn TaskRead {
++        &mut self.tasks
++    }
++
++    fn sessions(&mut self) -> &mut dyn SessionRead {
++        &mut self.sessions
++    }
++
++    fn graph(&mut self) -> &mut dyn GraphRead {
++        &mut self.graph
++    }
++
++    fn environments(&mut self) -> &mut dyn EnvironmentRead {
++        &mut self.environments
++    }
++
++    fn effects(&mut self) -> &mut dyn EffectRead {
++        &mut self.unavailable
++    }
++
++    fn resources(&mut self) -> &mut dyn ResourceRead {
++        &mut self.unavailable
++    }
++
++    fn timers(&mut self) -> &mut dyn TimerRead {
++        &mut self.unavailable
++    }
++
++    fn security(&mut self) -> &mut dyn SecurityRead {
++        &mut self.unavailable
++    }
++
++    fn config(&mut self) -> &mut dyn ConfigRead {
++        &mut self.unavailable
++    }
++
++    fn workspaces(&mut self) -> &mut dyn WorkspaceRead {
++        &mut self.unavailable
++    }
++
++    fn adapters(&mut self) -> &mut dyn AdapterRead {
++        &mut self.unavailable
++    }
++
++    fn artifacts(&mut self) -> &mut dyn ArtifactRead {
++        &mut self.unavailable
++    }
++
++    fn loop_turns(&mut self) -> &mut dyn LoopRead {
++        &mut self.unavailable
++    }
++}
++
++#[async_trait]
++impl KernelStore for SqliteKernelStore {
++    async fn begin_write(&self, ctx: TxContext) -> errors::Result<Box<dyn KernelTxn + '_>> {
++        let mut txn = self
++            .pool()
++            .begin_with("BEGIN IMMEDIATE")
++            .await
++            .map_err(mapping::from_sqlx)?;
++        let persisted: Option<i64> =
++            sqlx::query_scalar("SELECT fencing_epoch FROM daemon_fence WHERE singleton = 1")
++                .fetch_optional(&mut *txn)
++                .await
++                .map_err(mapping::from_sqlx)?;
++        let expected = i64::try_from(ctx.daemon_epoch).ok();
++        if persisted.is_none() || persisted != expected {
++            return Err(KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                "write transaction rejected: daemon epoch is absent or stale",
++            ));
++        }
++        Ok(Box::new(SqliteWriteTxn::new(ctx, txn)))
++    }
++
++    async fn begin_read(&self) -> errors::Result<Box<dyn KernelReadTxn + '_>> {
++        let conn = self.pool().acquire().await.map_err(mapping::from_sqlx)?;
++        let handle: ReadConn = Arc::new(tokio::sync::Mutex::new(Some(conn)));
++        Ok(Box::new(SqliteReadTxn::new(handle)))
++    }
++
++    async fn acquire_daemon_fence(
++        &self,
++        instance: DaemonInstanceId,
++    ) -> errors::Result<DaemonFence> {
++        let mut txn = self
++            .pool()
++            .begin_with("BEGIN IMMEDIATE")
++            .await
++            .map_err(mapping::from_sqlx)?;
++        let epoch: i64 = sqlx::query_scalar(
++            "INSERT INTO daemon_fence (singleton, instance_id, fencing_epoch, lease_expires_ms, \
++             updated_at_ms) VALUES (1, ?1, 1, ?2, ?3) \
++             ON CONFLICT(singleton) DO UPDATE SET \
++               instance_id = excluded.instance_id, \
++               fencing_epoch = fencing_epoch + 1, \
++               lease_expires_ms = excluded.lease_expires_ms, \
++               updated_at_ms = excluded.updated_at_ms \
++             RETURNING fencing_epoch",
++        )
++        .bind(instance.to_string())
++        .bind(i64::MAX)
++        .bind(mapping::unix_ms_now()?)
++        .fetch_one(&mut *txn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        txn.commit().await.map_err(mapping::from_sqlx)?;
++        Ok(DaemonFence {
++            instance_id: instance,
++            epoch: DaemonEpoch(mapping::decode_u64("daemon_fence.fencing_epoch", epoch)?),
++            lease_expires_unix_ms: i64::MAX,
++        })
++    }
++
++    async fn current_fence(&self) -> errors::Result<Option<DaemonFence>> {
++        let row: Option<(String, i64, i64)> = sqlx::query_as(
++            "SELECT instance_id, fencing_epoch, lease_expires_ms FROM daemon_fence \
++             WHERE singleton = 1",
++        )
++        .fetch_optional(self.pool())
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.map(|(instance, epoch, lease_expires_unix_ms)| {
++            Ok(DaemonFence {
++                instance_id: mapping::decode_id("daemon_fence.instance_id", &instance)?,
++                epoch: DaemonEpoch(mapping::decode_u64("daemon_fence.fencing_epoch", epoch)?),
++                lease_expires_unix_ms,
++            })
++        })
++        .transpose()
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/cas.rs b/agent-os/crates/kernel-store-sqlite/tests/cas.rs
+new file mode 100644
+index 0000000..e7ed26b
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/cas.rs
+@@ -0,0 +1,494 @@
++//! CAS semantics for the SQLite store.
++//!
++//! A matching expectation applies exactly the supplied patch and bumps the
++//! revision; a stale revision, state, or cancellation epoch returns `false`
++//! and mutates nothing. Constraint violations surface as stable error codes.
++
++use std::path::Path;
++
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, DependencyId, EventCursor, EventStreamKey, PrincipalId,
++    RunId, SessionId, TaskId,
++};
++use domain::resource::DependencyCondition;
++use domain::run::{RecoveryDisposition, RunState};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{
++    ClaimPatch, NewRun, NewRunDependency, NewSession, NewTask, RunCas, RunPatch,
++};
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::ids::DeterministicIds;
++
++const DB_FILE: &str = "kernel.db";
++
++fn config(db_path: &Path) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections: 8,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE)))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn cursor(run: RunId) -> EventCursor {
++    EventCursor::new(EventStreamKey::new(format!("run/{run}")).unwrap(), 0)
++}
++
++struct Seeded {
++    session: SessionId,
++    task: TaskId,
++    run: RunId,
++}
++
++async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch: u64) -> Seeded {
++    let session = SessionId::new(provider);
++    let task = TaskId::new(provider);
++    let run = RunId::new(provider);
++    let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++    txn.tasks()
++        .insert(NewTask {
++            task_id: task,
++            session_id: Some(session),
++            created_by_actor_id: ActorId::new(provider),
++            task_kind: "test".to_owned(),
++            payload: vec![1, 2, 3],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.runs()
++        .insert(new_run(run, task, session))
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    Seeded { session, task, run }
++}
++
++fn new_run(run: RunId, task: TaskId, session: SessionId) -> NewRun {
++    NewRun {
++        run_id: run,
++        task_id: task,
++        session_id: Some(session),
++        parent_run_id: None,
++        state: RunState::Created,
++        recovery: RecoveryDisposition::Normal,
++        loop_epoch: 0,
++        step_sequence: 0,
++        input_event_cursor: cursor(run),
++        cancellation_epoch: 0,
++        resolved_environment_id: None,
++        created_at_ms: 10,
++    }
++}
++
++async fn read_run(store: &SqliteKernelStore, run: RunId) -> kernel_store::RunRow {
++    let mut read = store.begin_read().await.unwrap();
++    read.runs().get(run).await.unwrap().expect("run is present")
++}
++
++#[tokio::test]
++async fn matching_cas_applies_patch_and_bumps_revision() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let applied = txn
++        .runs()
++        .cas_update(
++            seeded.run,
++            RunCas {
++                run_revision: 0,
++                state: Some(RunState::Created),
++                cancellation_epoch: Some(0),
++            },
++            RunPatch {
++                state: Some(RunState::Running),
++                step_sequence: Some(1),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "matching expectation must apply");
++    txn.commit().await.unwrap();
++
++    let row = read_run(&store, seeded.run).await;
++    assert_eq!(row.state, RunState::Running);
++    assert_eq!(row.step_sequence, 1);
++    assert_eq!(row.run_revision, 1);
++}
++
++#[tokio::test]
++async fn stale_expectation_returns_false_and_mutates_nothing() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert!(
++        txn.runs()
++            .cas_update(
++                seeded.run,
++                RunCas {
++                    run_revision: 0,
++                    state: None,
++                    cancellation_epoch: None,
++                },
++                RunPatch {
++                    step_sequence: Some(7),
++                    bump_revision: true,
++                    ..RunPatch::default()
++                },
++            )
++            .await
++            .unwrap()
++    );
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let stale_revision = txn
++        .runs()
++        .cas_update(
++            seeded.run,
++            RunCas {
++                run_revision: 0,
++                state: None,
++                cancellation_epoch: None,
++            },
++            RunPatch {
++                step_sequence: Some(9),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale_revision, "stale revision must not apply");
++
++    let stale_state = txn
++        .runs()
++        .cas_update(
++            seeded.run,
++            RunCas {
++                run_revision: 1,
++                state: Some(RunState::Completed),
++                cancellation_epoch: None,
++            },
++            RunPatch {
++                step_sequence: Some(9),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale_state, "mismatched state must not apply");
++
++    let stale_epoch = txn
++        .runs()
++        .cas_update(
++            seeded.run,
++            RunCas {
++                run_revision: 1,
++                state: None,
++                cancellation_epoch: Some(5),
++            },
++            RunPatch {
++                step_sequence: Some(9),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale_epoch, "mismatched cancellation epoch must not apply");
++
++    let missing = txn
++        .runs()
++        .cas_update(
++            RunId::new(&provider),
++            RunCas {
++                run_revision: 0,
++                state: None,
++                cancellation_epoch: None,
++            },
++            RunPatch {
++                step_sequence: Some(9),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!missing, "absent row must not apply");
++    txn.commit().await.unwrap();
++
++    let row = read_run(&store, seeded.run).await;
++    assert_eq!(row.state, RunState::Created);
++    assert_eq!(row.step_sequence, 7, "only the first CAS may mutate");
++    assert_eq!(row.run_revision, 1);
++}
++
++#[tokio::test]
++async fn claim_patch_is_applied_with_the_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let applied = txn
++        .runs()
++        .cas_update(
++            seeded.run,
++            RunCas {
++                run_revision: 0,
++                state: None,
++                cancellation_epoch: None,
++            },
++            RunPatch {
++                claim: Some(ClaimPatch {
++                    owner: "daemon-1".to_owned(),
++                    token: 77,
++                    expires_unix_ms: 1_800_000_000_000,
++                    daemon_epoch: epoch,
++                }),
++                bump_revision: true,
++                ..RunPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied);
++    txn.commit().await.unwrap();
++
++    let row = read_run(&store, seeded.run).await;
++    assert_eq!(row.claim_owner.as_deref(), Some("daemon-1"));
++    assert_eq!(row.claim_token, Some(77));
++    assert_eq!(row.claim_expires_ms, Some(1_800_000_000_000));
++    assert_eq!(row.claim_daemon_epoch, Some(epoch));
++}
++
++#[tokio::test]
++async fn unique_violation_is_conflict_and_constraint_is_failed_precondition() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let session = SessionId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(&provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++    let duplicate = txn
++        .sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(&provider),
++            created_at_ms: 11,
++            metadata: None,
++        })
++        .await
++        .unwrap_err();
++    assert_eq!(duplicate.code(), ErrorCode::Conflict);
++    assert_eq!(duplicate.retry_class(), RetryClass::Never);
++
++    let orphan = txn
++        .tasks()
++        .insert(NewTask {
++            task_id: TaskId::new(&provider),
++            session_id: Some(SessionId::new(&provider)),
++            created_by_actor_id: ActorId::new(&provider),
++            task_kind: "test".to_owned(),
++            payload: vec![],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap_err();
++    assert_eq!(orphan.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(orphan.retry_class(), RetryClass::Never);
++    drop(txn);
++
++    let mut read = store.begin_read().await.unwrap();
++    assert!(
++        read.sessions().get(session).await.unwrap().is_none(),
++        "a failed transaction must leave zero rows"
++    );
++}
++
++#[tokio::test]
++async fn graph_head_cas_and_dependency_insertion() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++
++    let source = seeded.run;
++    let target = RunId::new(&provider);
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.runs()
++        .insert(new_run(target, seeded.task, seeded.session))
++        .await
++        .unwrap();
++    let head = txn.graph().ensure_head(seeded.task).await.unwrap();
++    assert_eq!(head.graph_revision, 0);
++    let head_again = txn.graph().ensure_head(seeded.task).await.unwrap();
++    assert_eq!(head_again.graph_revision, 0, "ensure_head is idempotent");
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert!(txn.graph().cas_head_revision(seeded.task, 0).await.unwrap());
++    assert_eq!(
++        txn.graph()
++            .get_head(seeded.task)
++            .await
++            .unwrap()
++            .unwrap()
++            .graph_revision,
++        1
++    );
++    assert!(
++        !txn.graph().cas_head_revision(seeded.task, 0).await.unwrap(),
++        "stale head revision must not advance"
++    );
++
++    let dependency = NewRunDependency {
++        dependency_id: DependencyId::new(&provider),
++        task_id: seeded.task,
++        source_run_id: source,
++        target_run_id: target,
++        dependency_condition: DependencyCondition::CompletedSuccessfully,
++        created_at_ms: 20,
++    };
++    txn.graph()
++        .insert_dependency(dependency.clone(), 1)
++        .await
++        .unwrap();
++    let head = txn.graph().get_head(seeded.task).await.unwrap().unwrap();
++    assert_eq!(head.graph_revision, 2, "insert advances the head");
++    let listed = txn.graph().list_dependencies(seeded.task).await.unwrap();
++    assert_eq!(listed.len(), 1);
++    assert_eq!(listed[0].created_graph_revision, 1);
++    assert!(txn.graph().is_reachable(source, target).await.unwrap());
++    assert!(!txn.graph().is_reachable(target, source).await.unwrap());
++    assert!(txn.graph().is_reachable(source, source).await.unwrap());
++
++    let stale = txn
++        .graph()
++        .insert_dependency(
++            NewRunDependency {
++                dependency_id: DependencyId::new(&provider),
++                ..dependency.clone()
++            },
++            1,
++        )
++        .await
++        .unwrap_err();
++    assert_eq!(stale.code(), ErrorCode::Conflict);
++    assert_eq!(stale.retry_class(), RetryClass::Never);
++
++    let duplicate = txn
++        .graph()
++        .insert_dependency(
++            NewRunDependency {
++                dependency_id: DependencyId::new(&provider),
++                ..dependency.clone()
++            },
++            2,
++        )
++        .await
++        .unwrap_err();
++    assert_eq!(duplicate.code(), ErrorCode::Conflict);
++    assert_eq!(duplicate.retry_class(), RetryClass::Never);
++
++    let orphan_task = TaskId::new(&provider);
++    let missing_head = txn
++        .graph()
++        .insert_dependency(
++            NewRunDependency {
++                dependency_id: DependencyId::new(&provider),
++                task_id: orphan_task,
++                ..dependency
++            },
++            0,
++        )
++        .await
++        .unwrap_err();
++    assert_eq!(missing_head.code(), ErrorCode::NotFound);
++    assert_eq!(missing_head.retry_class(), RetryClass::Never);
++    drop(txn);
++}
++
++#[tokio::test]
++async fn unknown_persisted_enum_fails_closed() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join(DB_FILE);
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    drop(store);
++
++    let options = sqlx::sqlite::SqliteConnectOptions::new()
++        .filename(&db_path)
++        .create_if_missing(false);
++    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
++    let mut conn = pool.acquire().await.unwrap();
++    sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    sqlx::query("UPDATE runs SET state = 99 WHERE run_id = ?")
++        .bind(seeded.run.to_string())
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    drop(conn);
++    drop(pool);
++
++    let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let error = txn.runs().get(seeded.run).await.unwrap_err();
++    assert_eq!(error.code(), ErrorCode::Internal);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    drop(txn);
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/contention.rs b/agent-os/crates/kernel-store-sqlite/tests/contention.rs
+new file mode 100644
+index 0000000..ebe3894
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/contention.rs
+@@ -0,0 +1,185 @@
++//! Writer contention: `BEGIN IMMEDIATE` serializes racing CAS updates, and a
++//! deliberately tiny busy timeout surfaces as retry-safe `Unavailable`
++//! (R3.2, R3.3, R3.4, N2).
++
++use std::path::Path;
++use std::sync::Arc;
++
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, EventCursor, EventStreamKey, PrincipalId, RunId,
++    SessionId, TaskId,
++};
++use domain::run::{RecoveryDisposition, RunState};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{NewRun, NewSession, NewTask, RunCas, RunPatch};
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::ids::DeterministicIds;
++use tokio::sync::Barrier;
++
++const DB_FILE: &str = "kernel.db";
++const WRITERS: usize = 6;
++
++fn config(db_path: &Path, pool_max_connections: u32, busy_timeout_ms: u64) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections,
++        busy_timeout_ms,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++fn cursor(run: RunId) -> EventCursor {
++    EventCursor::new(EventStreamKey::new(format!("run/{run}")).unwrap(), 0)
++}
++
++async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch: u64) -> RunId {
++    let session = SessionId::new(provider);
++    let task = TaskId::new(provider);
++    let run = RunId::new(provider);
++    let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++    txn.tasks()
++        .insert(NewTask {
++            task_id: task,
++            session_id: Some(session),
++            created_by_actor_id: ActorId::new(provider),
++            task_kind: "test".to_owned(),
++            payload: vec![],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.runs()
++        .insert(NewRun {
++            run_id: run,
++            task_id: task,
++            session_id: Some(session),
++            parent_run_id: None,
++            state: RunState::Created,
++            recovery: RecoveryDisposition::Normal,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(run),
++            cancellation_epoch: 0,
++            resolved_environment_id: None,
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    run
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn exactly_one_writer_wins_a_raced_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let store = Arc::new(
++        SqliteKernelStore::open(config(&dir.path().join(DB_FILE), 8, 5_000))
++            .await
++            .unwrap(),
++    );
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    let epoch = fence.epoch.0;
++    let run = seed_run(&store, &provider, epoch).await;
++
++    let barrier = Arc::new(Barrier::new(WRITERS));
++    let mut handles = Vec::new();
++    for _ in 0..WRITERS {
++        let store = Arc::clone(&store);
++        let barrier = Arc::clone(&barrier);
++        let ctx = context(&provider, epoch);
++        handles.push(tokio::spawn(async move {
++            barrier.wait().await;
++            let mut txn = store.begin_write(ctx).await.unwrap();
++            let won = txn
++                .runs()
++                .cas_update(
++                    run,
++                    RunCas {
++                        run_revision: 0,
++                        state: None,
++                        cancellation_epoch: None,
++                    },
++                    RunPatch {
++                        step_sequence: Some(1),
++                        bump_revision: true,
++                        ..RunPatch::default()
++                    },
++                )
++                .await
++                .unwrap();
++            txn.commit().await.unwrap();
++            won
++        }));
++    }
++    let mut wins = 0;
++    for handle in handles {
++        if handle.await.unwrap() {
++            wins += 1;
++        }
++    }
++    assert_eq!(wins, 1, "exactly one racing writer may win the CAS");
++
++    let mut read = store.begin_read().await.unwrap();
++    let row = read.runs().get(run).await.unwrap().unwrap();
++    assert_eq!(row.run_revision, 1);
++    assert_eq!(row.step_sequence, 1);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn contended_begin_write_maps_busy_to_unavailable() {
++    let dir = tempfile::tempdir().unwrap();
++    let store = SqliteKernelStore::open(config(&dir.path().join(DB_FILE), 5, 1))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    let epoch = fence.epoch.0;
++
++    let mut holder = store.begin_write(context(&provider, epoch)).await.unwrap();
++    holder
++        .sessions()
++        .insert(NewSession {
++            session_id: SessionId::new(&provider),
++            principal_id: PrincipalId::new(&provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++
++    let error = match store.begin_write(context(&provider, epoch)).await {
++        Ok(_) => panic!("a second writer must not begin while the lock is held"),
++        Err(error) => error,
++    };
++    assert_eq!(error.code(), ErrorCode::Unavailable);
++    assert_eq!(error.retry_class(), RetryClass::Safe);
++
++    holder.commit().await.unwrap();
++    let next = store.begin_write(context(&provider, epoch)).await.unwrap();
++    next.commit().await.unwrap();
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/immutability.rs b/agent-os/crates/kernel-store-sqlite/tests/immutability.rs
+new file mode 100644
+index 0000000..eadc9a3
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/immutability.rs
+@@ -0,0 +1,265 @@
++//! Storage-layer immutability for resolved run environments and bindings.
++//!
++//! The schema triggers reject updates and deletes with `ABORT`; the repository
++//! surface exposes no update operations for these tables (R3.6).
++
++use std::path::Path;
++
++use domain::ids::{
++    AgentSpecId, CommandId, ConfigGenerationId, DaemonInstanceId, EnvironmentId, PrincipalId, RunId,
++};
++use domain::resource::WorkspaceAccessMode;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{NewResolvedBinding, NewResolvedEnvironment};
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use sqlx::Sqlite;
++use sqlx::pool::PoolConnection;
++use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
++use testkit::ids::DeterministicIds;
++
++const DB_FILE: &str = "kernel.db";
++
++fn config(db_path: &Path) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections: 4,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE)))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++async fn direct_connection(db_path: &Path) -> PoolConnection<Sqlite> {
++    let options = SqliteConnectOptions::new()
++        .filename(db_path)
++        .create_if_missing(false);
++    SqlitePoolOptions::new()
++        .max_connections(1)
++        .connect_with(options)
++        .await
++        .unwrap()
++        .acquire()
++        .await
++        .unwrap()
++}
++
++fn new_environment(
++    provider: &DeterministicIds,
++    environment: EnvironmentId,
++    run: RunId,
++) -> NewResolvedEnvironment {
++    NewResolvedEnvironment {
++        environment_id: environment,
++        run_id: run,
++        agent_spec_id: AgentSpecId::new(provider),
++        agent_spec_version: "1".to_owned(),
++        agent_spec_digest: "spec-digest".to_owned(),
++        agent_loop_id: "loop".to_owned(),
++        agent_loop_version: "1".to_owned(),
++        agent_loop_digest: "loop-digest".to_owned(),
++        config_generation_id: ConfigGenerationId::new(provider),
++        workspace_uri: Some("file:///workspace".to_owned()),
++        workspace_base_revision: Some("abc123".to_owned()),
++        workspace_mode: WorkspaceAccessMode::ReadOnly,
++        model_provider: Some("provider".to_owned()),
++        model_id: Some("model".to_owned()),
++        model_parameters: Some(vec![1]),
++        kernel_version: "0.1.0".to_owned(),
++        protocol_versions: vec![2],
++        capability_grant_ids: vec![3],
++        approval_request_ids: vec![4],
++        created_at_ms: 10,
++    }
++}
++
++fn new_binding(provider: &DeterministicIds, port: &str) -> NewResolvedBinding {
++    NewResolvedBinding {
++        port_id: port.to_owned(),
++        adapter_id: domain::ids::AdapterId::new(provider),
++        adapter_version: "1".to_owned(),
++        adapter_digest: "adapter-digest".to_owned(),
++        capabilities: vec![9],
++    }
++}
++
++#[tokio::test]
++async fn environment_update_and_delete_are_rejected_by_triggers() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join(DB_FILE);
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let environment = EnvironmentId::new(&provider);
++    let run = RunId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.environments()
++        .insert_environment(new_environment(&provider, environment, run))
++        .await
++        .unwrap();
++    txn.environments()
++        .insert_bindings(environment, vec![new_binding(&provider, "model")])
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut conn = direct_connection(&db_path).await;
++    let update = sqlx::query(
++        "UPDATE resolved_run_environments SET kernel_version = 'tampered' \
++         WHERE environment_id = ?",
++    )
++    .bind(environment.to_string())
++    .execute(&mut *conn)
++    .await
++    .expect_err("environment updates must be rejected");
++    let update_error = update.as_database_error().expect("database error");
++    assert_eq!(update_error.code().as_deref(), Some("1811"));
++    assert!(update_error.message().contains("immutable record"));
++
++    let delete = sqlx::query("DELETE FROM resolved_run_environments WHERE environment_id = ?")
++        .bind(environment.to_string())
++        .execute(&mut *conn)
++        .await
++        .expect_err("environment deletes must be rejected");
++    let delete_error = delete.as_database_error().expect("database error");
++    assert_eq!(delete_error.code().as_deref(), Some("1811"));
++
++    let binding_update =
++        sqlx::query("UPDATE resolved_bindings SET adapter_version = '9' WHERE port_id = 'model'")
++            .execute(&mut *conn)
++            .await
++            .expect_err("binding updates must be rejected");
++    assert_eq!(
++        binding_update
++            .as_database_error()
++            .expect("database error")
++            .code()
++            .as_deref(),
++        Some("1811")
++    );
++    drop(conn);
++
++    let mut read = store.begin_read().await.unwrap();
++    let stored = read
++        .environments()
++        .get_environment(environment)
++        .await
++        .unwrap()
++        .expect("environment is still present");
++    assert_eq!(stored.kernel_version, "0.1.0");
++    assert_eq!(stored.workspace_mode, WorkspaceAccessMode::ReadOnly);
++    let bindings = read.environments().get_bindings(environment).await.unwrap();
++    assert_eq!(bindings.len(), 1);
++    assert_eq!(bindings[0].adapter_version, "1");
++}
++
++#[tokio::test]
++async fn duplicate_environment_for_run_is_conflict() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let run = RunId::new(&provider);
++    let first = EnvironmentId::new(&provider);
++    let second = EnvironmentId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.environments()
++        .insert_environment(new_environment(&provider, first, run))
++        .await
++        .unwrap();
++    let duplicate = txn
++        .environments()
++        .insert_environment(new_environment(&provider, second, run))
++        .await
++        .unwrap_err();
++    assert_eq!(duplicate.code(), ErrorCode::Conflict);
++    assert_eq!(duplicate.retry_class(), RetryClass::Never);
++    drop(txn);
++
++    let mut read = store.begin_read().await.unwrap();
++    assert!(
++        read.environments()
++            .get_environment(first)
++            .await
++            .unwrap()
++            .is_none(),
++        "a failed transaction must leave zero rows"
++    );
++}
++
++#[tokio::test]
++async fn duplicate_bindings_are_conflict() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let run = RunId::new(&provider);
++    let environment = EnvironmentId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.environments()
++        .insert_environment(new_environment(&provider, environment, run))
++        .await
++        .unwrap();
++    txn.environments()
++        .insert_bindings(environment, vec![new_binding(&provider, "tool")])
++        .await
++        .unwrap();
++    let duplicate = txn
++        .environments()
++        .insert_bindings(environment, vec![new_binding(&provider, "tool")])
++        .await
++        .unwrap_err();
++    assert_eq!(duplicate.code(), ErrorCode::Conflict);
++    assert_eq!(duplicate.retry_class(), RetryClass::Never);
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let bindings = read.environments().get_bindings(environment).await.unwrap();
++    assert_eq!(bindings.len(), 1, "the committed binding is untouched");
++}
++
++#[tokio::test]
++async fn binding_without_environment_is_failed_precondition() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let missing = EnvironmentId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let orphan = txn
++        .environments()
++        .insert_bindings(missing, vec![new_binding(&provider, "tool")])
++        .await
++        .unwrap_err();
++    assert_eq!(orphan.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(orphan.retry_class(), RetryClass::Never);
++    drop(txn);
++
++    let mut read = store.begin_read().await.unwrap();
++    assert!(
++        read.environments()
++            .get_bindings(missing)
++            .await
++            .unwrap()
++            .is_empty()
++    );
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/rollback.rs b/agent-os/crates/kernel-store-sqlite/tests/rollback.rs
+new file mode 100644
+index 0000000..5e9d22d
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/rollback.rs
+@@ -0,0 +1,245 @@
++//! Atomicity of SQLite write transactions: rejection at admission, faulted
++//! transactions, explicit rollback, and drop without commit leave zero rows.
++
++use std::path::Path;
++
++use domain::faults::FaultInjector;
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, EventCursor, EventStreamKey, PrincipalId, RunId,
++    SessionId, TaskId,
++};
++use domain::run::{RecoveryDisposition, RunState};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{NewRun, NewSession, NewTask};
++use kernel_store::{KernelStore, KernelTxn, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::faults::ArmedFaults;
++use testkit::ids::DeterministicIds;
++
++const DB_FILE: &str = "kernel.db";
++
++fn config(db_path: &Path) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections: 8,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE)))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn cursor(run: RunId) -> EventCursor {
++    EventCursor::new(EventStreamKey::new(format!("run/{run}")).unwrap(), 0)
++}
++
++async fn insert_session(
++    txn: &mut Box<dyn KernelTxn + '_>,
++    provider: &DeterministicIds,
++    session: SessionId,
++) {
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(provider),
++            created_at_ms: 10,
++            metadata: Some(vec![7]),
++        })
++        .await
++        .unwrap();
++}
++
++async fn insert_task(
++    txn: &mut Box<dyn KernelTxn + '_>,
++    provider: &DeterministicIds,
++    task: TaskId,
++    session: SessionId,
++) {
++    txn.tasks()
++        .insert(NewTask {
++            task_id: task,
++            session_id: Some(session),
++            created_by_actor_id: ActorId::new(provider),
++            task_kind: "test".to_owned(),
++            payload: vec![1],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++}
++
++async fn insert_run(
++    txn: &mut Box<dyn KernelTxn + '_>,
++    run: RunId,
++    task: TaskId,
++    session: SessionId,
++) {
++    txn.runs()
++        .insert(NewRun {
++            run_id: run,
++            task_id: task,
++            session_id: Some(session),
++            parent_run_id: None,
++            state: RunState::Created,
++            recovery: RecoveryDisposition::Normal,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(run),
++            cancellation_epoch: 0,
++            resolved_environment_id: None,
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++}
++
++async fn session_is_absent(store: &SqliteKernelStore, session: SessionId) -> bool {
++    let mut read = store.begin_read().await.unwrap();
++    read.sessions().get(session).await.unwrap().is_none()
++}
++
++async fn rejected_write(store: &SqliteKernelStore, ctx: TxContext) -> errors::KernelError {
++    match store.begin_write(ctx).await {
++        Ok(_) => panic!("write transaction must be rejected"),
++        Err(error) => error,
++    }
++}
++
++#[tokio::test]
++async fn missing_or_stale_epoch_rejects_transaction() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++
++    let missing = rejected_write(&store, context(&provider, 0)).await;
++    assert_eq!(missing.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(missing.retry_class(), RetryClass::Never);
++
++    let stale = rejected_write(&store, context(&provider, epoch + 1)).await;
++    assert_eq!(stale.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(stale.retry_class(), RetryClass::Never);
++
++    let session = SessionId::new(&provider);
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut txn, &provider, session).await;
++    txn.commit().await.unwrap();
++    assert!(!session_is_absent(&store, session).await);
++}
++
++#[tokio::test]
++async fn fault_after_successful_write_leaves_zero_rows() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let faults = ArmedFaults::new();
++    let session = SessionId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut txn, &provider, session).await;
++    faults.arm("store.write.aborted");
++    faults.trigger("store.write.aborted");
++    faults.assert_triggered("store.write.aborted");
++    drop(txn);
++
++    assert!(session_is_absent(&store, session).await);
++}
++
++#[tokio::test]
++async fn drop_without_commit_rolls_back() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let session = SessionId::new(&provider);
++    let task = TaskId::new(&provider);
++    let run = RunId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut txn, &provider, session).await;
++    insert_task(&mut txn, &provider, task, session).await;
++    insert_run(&mut txn, run, task, session).await;
++    drop(txn);
++
++    assert!(session_is_absent(&store, session).await);
++    let mut read = store.begin_read().await.unwrap();
++    assert!(read.tasks().get(task).await.unwrap().is_none());
++    assert!(read.runs().get(run).await.unwrap().is_none());
++    drop(read);
++
++    let mut next = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut next, &provider, session).await;
++    next.commit().await.unwrap();
++    assert!(!session_is_absent(&store, session).await);
++}
++
++#[tokio::test]
++async fn explicit_rollback_discards_writes() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let session = SessionId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut txn, &provider, session).await;
++    txn.rollback().await.unwrap();
++
++    assert!(session_is_absent(&store, session).await);
++}
++
++#[tokio::test]
++async fn empty_commit_is_a_noop_success() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++
++    let txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.commit().await.unwrap();
++}
++
++#[tokio::test]
++async fn dropped_write_returns_a_clean_single_pooled_connection() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join(DB_FILE);
++    let store = SqliteKernelStore::open(StoreConfig {
++        path: db_path,
++        pool_max_connections: 1,
++        busy_timeout_ms: 5_000,
++    })
++    .await
++    .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    let epoch = fence.epoch.0;
++    let session = SessionId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    insert_session(&mut txn, &provider, session).await;
++    drop(txn);
++
++    let mut next = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert!(
++        next.sessions().get(session).await.unwrap().is_none(),
++        "the queued rollback must run before the connection is reused"
++    );
++    next.commit().await.unwrap();
++}

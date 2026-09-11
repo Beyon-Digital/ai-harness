@@ -425,7 +425,7 @@ Paths relative to `agent-os/`.
 | `crates/kernel-store-sqlite/src/lib.rs` | modify | `SqliteKernelStore::open`, pool, module wiring | PST-001 |
 | `crates/kernel-store-sqlite/src/schema.rs` | create | bootstrap, version, pragmas, modes, structural assert | PST-001 |
 | `crates/kernel-store-sqlite/tests/bootstrap.rs` | create | fresh, reopen, wrong version, modes, constraints | PST-001 |
-| `crates/kernel-store-sqlite/src/txn.rs` | create | write guard, `BEGIN IMMEDIATE`, epoch assert, commit/rollback | PST-003A |
+| `crates/kernel-store-sqlite/src/txn.rs` | create | write guard, `BEGIN IMMEDIATE`, epoch assert, commit/rollback; repo accessors wired by PST-003B/PST-004/PST-005 in later waves | PST-003A, PST-003B, PST-004, PST-005 |
 | `crates/kernel-store-sqlite/src/mapping.rs` | create | sqlx error to `KernelError` mapping, decode helpers | PST-003A |
 | `crates/kernel-store-sqlite/src/repos/mod.rs` | create | repo module wiring | PST-003A |
 | `crates/kernel-store-sqlite/src/repos/runs.rs` | create | run repository | PST-003A |

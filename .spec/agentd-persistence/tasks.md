@@ -172,8 +172,8 @@
 
 ### Task PST-003A: SQLite transactions and core repositories
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst003a
 - depends_on: PST-001, PST-002
 - files: `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/src/mapping.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/runs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/tasks.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/sessions.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/graph.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/environments.rs`, `agent-os/crates/kernel-store-sqlite/tests/cas.rs`, `agent-os/crates/kernel-store-sqlite/tests/rollback.rs`, `agent-os/crates/kernel-store-sqlite/tests/immutability.rs`, `agent-os/crates/kernel-store-sqlite/tests/contention.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, P1, P2, N2
@@ -223,7 +223,7 @@
 - status: pending
 - owner: -
 - depends_on: PST-003A
-- files: `agent-os/crates/kernel-store-sqlite/src/repos/effects.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/resources.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/timers.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/security.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/config.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs`
+- files: `agent-os/crates/kernel-store-sqlite/src/repos/effects.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/resources.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/timers.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/security.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/config.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4
 - scope: large
 - model: capable
@@ -267,8 +267,8 @@
 
 - status: pending
 - owner: -
-- depends_on: PST-003A
-- files: `agent-os/crates/kernel-store-sqlite/src/fence.rs`, `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/tests/fence.rs`, `agent-os/crates/agentd/src/lock.rs`, `agent-os/crates/agentd/tests/lock_exclusion.rs`, `agent-os/crates/identity/src/lib.rs`, `agent-os/crates/identity/src/daemon.rs`
+- depends_on: PST-003B
+- files: `agent-os/crates/kernel-store-sqlite/src/fence.rs`, `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/fence.rs`, `agent-os/crates/agentd/src/lock.rs`, `agent-os/crates/agentd/tests/lock_exclusion.rs`, `agent-os/crates/identity/src/lib.rs`, `agent-os/crates/identity/src/daemon.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, R4.6, N2
 - scope: large
 - model: capable
@@ -314,7 +314,7 @@
 - status: pending
 - owner: -
 - depends_on: PST-003B, PST-004
-- files: `agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/streams.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/tests/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs`, `agent-os/crates/kernel-store-sqlite/tests/props.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/src/outbox.rs`
+- files: `agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/streams.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs`, `agent-os/crates/kernel-store-sqlite/tests/props.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/src/outbox.rs`
 - requirements: R5.1, R5.2, R5.3, R5.4, R5.5, R6.1, R6.2, R6.3, R6.4, R6.5, P2, P3, P4, N2
 - scope: large
 - model: capable
