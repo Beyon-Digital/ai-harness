@@ -1,0 +1,1183 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/dag.json b/agent-os-microkernel-mvp-buildpack/dag.json
+index e7304ce..87cb7a2 100644
+--- a/agent-os-microkernel-mvp-buildpack/dag.json
++++ b/agent-os-microkernel-mvp-buildpack/dag.json
+@@ -5,21 +5,104 @@
+     {
+       "id": "FND-001",
+       "title": "Bootstrap Rust workspace and quality gates",
+       "phase": "foundation",
+       "depends_on": [],
+       "goal": "Create the compilable Rust workspace, toolchain policy, shared dependency policy, CI commands, and empty crate boundaries without implementing runtime behavior.",
+       "files": [
+         "Cargo.toml",
+         "rust-toolchain.toml",
+         ".cargo/config.toml",
+-        "crates/*/Cargo.toml",
++        "crates/adapter-protocol/Cargo.toml",
++        "crates/adapter-protocol/src/lib.rs",
++        "crates/adapter-registry/Cargo.toml",
++        "crates/adapter-registry/src/lib.rs",
++        "crates/agentctl/Cargo.toml",
++        "crates/agentctl/src/lib.rs",
++        "crates/agentd/Cargo.toml",
++        "crates/agentd/src/main.rs",
++        "crates/agentd/src/lock.rs",
++        "crates/agentd/src/recovery.rs",
++        "crates/agentd/src/api.rs",
++        "crates/agentd/src/workers/mod.rs",
++        "crates/agentd/src/workers/outbox.rs",
++        "crates/agentd/src/workers/scheduler.rs",
++        "crates/agentd/src/workers/loops.rs",
++        "crates/approvals/Cargo.toml",
++        "crates/approvals/src/lib.rs",
++        "crates/artifacts/Cargo.toml",
++        "crates/artifacts/src/lib.rs",
++        "crates/command-coordinator/Cargo.toml",
++        "crates/command-coordinator/src/lib.rs",
++        "crates/config-engine/Cargo.toml",
++        "crates/config-engine/src/lib.rs",
++        "crates/control-api/Cargo.toml",
++        "crates/control-api/src/lib.rs",
++        "crates/domain/Cargo.toml",
++        "crates/domain/src/lib.rs",
++        "crates/domain/src/ids.rs",
++        "crates/domain/src/provider.rs",
++        "crates/domain/src/time.rs",
++        "crates/domain/src/faults.rs",
++        "crates/domain/src/run.rs",
++        "crates/domain/src/effect.rs",
++        "crates/domain/src/security.rs",
++        "crates/domain/src/resource.rs",
++        "crates/domain/src/generated.rs",
++        "crates/effects/Cargo.toml",
++        "crates/effects/src/lib.rs",
++        "crates/errors/Cargo.toml",
++        "crates/errors/src/lib.rs",
++        "crates/errors/src/codes.rs",
++        "crates/event-journal/Cargo.toml",
++        "crates/event-journal/src/lib.rs",
++        "crates/event-journal-sqlite/Cargo.toml",
++        "crates/event-journal-sqlite/src/lib.rs",
++        "crates/events/Cargo.toml",
++        "crates/events/src/lib.rs",
++        "crates/identity/Cargo.toml",
++        "crates/identity/src/lib.rs",
++        "crates/kernel-store/Cargo.toml",
++        "crates/kernel-store/src/lib.rs",
++        "crates/kernel-store-sqlite/Cargo.toml",
++        "crates/kernel-store-sqlite/src/lib.rs",
++        "crates/message-queue/Cargo.toml",
++        "crates/message-queue/src/lib.rs",
++        "crates/observability/Cargo.toml",
++        "crates/observability/src/lib.rs",
++        "crates/observability/src/classification.rs",
++        "crates/permissions/Cargo.toml",
++        "crates/permissions/src/lib.rs",
++        "crates/process-supervisor/Cargo.toml",
++        "crates/process-supervisor/src/lib.rs",
++        "crates/resource-uri/Cargo.toml",
++        "crates/resource-uri/src/lib.rs",
++        "crates/resources/Cargo.toml",
++        "crates/resources/src/lib.rs",
++        "crates/run-graph/Cargo.toml",
++        "crates/run-graph/src/lib.rs",
++        "crates/runtime/Cargo.toml",
++        "crates/runtime/src/lib.rs",
++        "crates/sandbox/Cargo.toml",
++        "crates/sandbox/src/lib.rs",
++        "crates/scheduler/Cargo.toml",
++        "crates/scheduler/src/lib.rs",
++        "crates/secrets/Cargo.toml",
++        "crates/secrets/src/lib.rs",
++        "crates/testkit/Cargo.toml",
++        "crates/testkit/src/lib.rs",
++        "crates/testkit/src/clock.rs",
++        "crates/testkit/src/ids.rs",
++        "crates/testkit/src/faults.rs",
++        "crates/testkit/src/process.rs",
++        "crates/workspace/Cargo.toml",
++        "crates/workspace/src/lib.rs",
+         ".github/workflows/ci.yml"
+       ],
+       "tests": [
+         "cargo check --workspace",
+         "cargo fmt --check",
+         "cargo clippy --workspace --all-targets -- -D warnings",
+         "cargo test --workspace"
+       ],
+       "accept": [
+         "All crates compile on macOS target.",
+@@ -29,23 +112,55 @@
+     },
+     {
+       "id": "FND-002",
+       "title": "Install canonical contract snapshot and protobuf generation",
+       "phase": "foundation",
+       "depends_on": [
+         "FND-001"
+       ],
+       "goal": "Place the build-pack contract files into the implementation repo and generate Rust protobuf types deterministically.",
+       "files": [
+-        "proto/**",
+-        "build.rs or dedicated proto crate",
+-        "crates/domain/src/generated/**"
++        "agent-os/crates/domain/build.rs",
++        "proto/README.md",
++        "proto/capabilities/adapter-capabilities.yaml",
++        "proto/capabilities/security-capabilities.yaml",
++        "proto/catalog.yaml",
++        "proto/config/agent-os.schema.json",
++        "proto/contract-lock.sha256",
++        "proto/control-api/commands.proto",
++        "proto/control-api/mvp_control.proto",
++        "proto/domain/core.proto",
++        "proto/domain/effects.proto",
++        "proto/domain/entities.proto",
++        "proto/domain/security.proto",
++        "proto/events/catalog.yaml",
++        "proto/events/event.proto",
++        "proto/manifests/extension.schema.json",
++        "proto/ports/agent_loop.proto",
++        "proto/ports/artifact_store.proto",
++        "proto/ports/common.proto",
++        "proto/ports/context.proto",
++        "proto/ports/event_journal.proto",
++        "proto/ports/kernel_store.proto",
++        "proto/ports/memory_store.proto",
++        "proto/ports/message_queue.proto",
++        "proto/ports/model.proto",
++        "proto/ports/sandbox.proto",
++        "proto/ports/secret_store.proto",
++        "proto/ports/tool_runtime.proto",
++        "proto/ports/transport.proto",
++        "proto/ports/workspace.proto",
++        "proto/protocols/adapter_frames.proto",
++        "proto/protocols/agent_loop.proto",
++        "proto/protocols/effect.proto",
++        "proto/protocols/external_adapter.proto",
++        "agent-os/crates/domain/src/generated.rs"
+       ],
+       "tests": [
+         "cargo test -p domain contract_codegen",
+         "script verifies contract lock hashes",
+         "schema JSON parses and const version == 1"
+       ],
+       "accept": [
+         "Generated protobuf types compile.",
+         "Changing a contract without updating the lock fails validation.",
+         "No second hand-written copy of protobuf message structs is created."
+@@ -196,21 +311,32 @@
+       "phase": "persistence",
+       "depends_on": [
+         "PST-001",
+         "PST-002",
+         "FND-005"
+       ],
+       "goal": "Implement all base repository operations and transaction semantics in SQLite.",
+       "files": [
+         "crates/kernel-store-sqlite/src/lib.rs",
+         "crates/kernel-store-sqlite/src/txn.rs",
+-        "crates/kernel-store-sqlite/src/repos/*.rs"
++        "crates/kernel-store-sqlite/src/repos/mod.rs",
++        "crates/kernel-store-sqlite/src/repos/agent_specs.rs",
++        "crates/kernel-store-sqlite/src/repos/tasks.rs",
++        "crates/kernel-store-sqlite/src/repos/effects.rs",
++        "crates/kernel-store-sqlite/src/repos/effect_claims.rs",
++        "crates/kernel-store-sqlite/src/repos/resources.rs",
++        "crates/kernel-store-sqlite/src/repos/timers.rs",
++        "crates/kernel-store-sqlite/src/repos/security.rs",
++        "crates/kernel-store-sqlite/src/repos/approvals.rs",
++        "crates/kernel-store-sqlite/src/repos/workspace_leases.rs",
++        "crates/kernel-store-sqlite/src/repos/idempotency.rs",
++        "crates/kernel-store-sqlite/src/repos/outbox.rs"
+       ],
+       "tests": [
+         "repository CRUD tests",
+         "transaction rollback test",
+         "CAS conflict tests",
+         "concurrent writer contention test",
+         "outbox/stream sequence uniqueness tests"
+       ],
+       "accept": [
+         "A failed transaction leaves zero partial canonical rows.",
+@@ -431,21 +557,21 @@
+       ]
+     },
+     {
+       "id": "RUN-002",
+       "title": "Implement transactional RunGraph edge mutation and cycle prevention",
+       "phase": "runtime",
+       "depends_on": [
+         "RUN-001",
+         "PST-003"
+       ],
+-      "goal": "Implement parent/child and dependency graph storage with serial cycle validation.",
++      "goal": "Implement dependency graph storage with serial cycle validation while deriving parent/child ancestry from the single canonical `runs.parent_run_id` field.",
+       "files": [
+         "crates/run-graph/src/graph.rs",
+         "crates/run-graph/src/repository.rs"
+       ],
+       "tests": [
+         "cycle rejection tests",
+         "concurrent opposite-edge race test",
+         "duplicate edge test",
+         "state restriction tests"
+       ],
+@@ -850,21 +976,22 @@
+     {
+       "id": "ADP-005",
+       "title": "Build fixture external effect adapter",
+       "phase": "adapters",
+       "depends_on": [
+         "ADP-004",
+         "EFF-004"
+       ],
+       "goal": "Provide a real external process used to prove protocol, effect idempotency, status lookup, crashes, and fencing.",
+       "files": [
+-        "fixtures/effect-adapter/**"
++        "fixtures/effect-adapter/Cargo.toml",
++        "fixtures/effect-adapter/src/main.rs"
+       ],
+       "tests": [
+         "normal execution",
+         "duplicate operation ID idempotency",
+         "crash-after-side-effect then status reconciliation",
+         "wrong handshake digest"
+       ],
+       "accept": [
+         "Fixture can demonstrate the exact ambiguity the Effect Coordinator is designed to solve."
+       ]
+@@ -1023,23 +1150,23 @@
+         "CMD-001"
+       ],
+       "goal": "Persist proposed generations and activate only validated/tested immutable documents.",
+       "files": [
+         "crates/config-engine/src/generations.rs",
+         "crates/config-engine/src/activate.rs"
+       ],
+       "tests": [
+         "untested generation cannot activate",
+         "CAS race one winner",
++        "generation-global service change returns DAEMON_RESTART_REQUIRED and does not move pointer",
+         "failed smoke leaves pointer unchanged",
+-        "reactivation test",
+-        "generation-global service change returns DAEMON_RESTART_REQUIRED and does not move pointer"
++        "reactivation test"
+       ],
+       "accept": [
+         "Existing run records are never rewritten on activation."
+       ]
+     },
+     {
+       "id": "CFG-003",
+       "title": "Implement runtime profile resolution and frozen ResolvedRunEnvironment",
+       "phase": "config",
+       "depends_on": [
+@@ -1065,21 +1192,22 @@
+     {
+       "id": "LOOP-001",
+       "title": "Build fixture external AgentLoop process",
+       "phase": "loop",
+       "depends_on": [
+         "ADP-004",
+         "RUN-001"
+       ],
+       "goal": "Provide a deterministic external loop fixture that can emit Complete, SpawnAgent, Wait, and InvokeEffect decisions.",
+       "files": [
+-        "fixtures/agent-loop/**"
++        "fixtures/agent-loop/Cargo.toml",
++        "fixtures/agent-loop/src/main.rs"
+       ],
+       "tests": [
+         "normal complete decision",
+         "spawn child decision",
+         "effect decision",
+         "delayed decision fixture",
+         "bundle digest validation"
+       ],
+       "accept": [
+         "Fixture never directly spawns processes or performs privileged side effects."
+@@ -1122,41 +1250,43 @@
+       "goal": "Expose the base control plane locally without bypassing internal command semantics.",
+       "files": [
+         "crates/control-api/src/server.rs",
+         "crates/control-api/src/uds.rs",
+         "crates/agentd/src/api.rs"
+       ],
+       "tests": [
+         "socket permission test",
+         "second daemon cannot steal socket",
+         "graceful shutdown test",
+-        "client connection smoke test"
++        "client connection smoke test",
++        "peer principal mismatch rejected"
+       ],
+       "accept": [
+         "Handlers cannot receive raw KernelStore handle."
+       ]
+     },
+     {
+       "id": "API-002",
+       "title": "Implement command/query Control API methods",
+       "phase": "api",
+       "depends_on": [
+         "API-001",
+         "CMD-001",
+         "CFG-003",
+         "EFF-004",
+         "SEC-003"
+       ],
+       "goal": "Expose typed base commands and read queries needed to drive the MVP.",
+       "files": [
+         "crates/control-api/src/control_service.rs",
+-        "proto/control/**"
++        "proto/control-api/commands.proto",
++        "proto/control-api/mvp_control.proto"
+       ],
+       "tests": [
+         "API idempotency replay test",
+         "query not found mapping",
+         "approval digest mismatch over API",
+         "health reports fencing/config/outbox status"
+       ],
+       "accept": [
+         "No public state-changing method performs direct repository mutation."
+       ]
+@@ -1166,21 +1296,22 @@
+       "title": "Implement Event API read and live subscription",
+       "phase": "api",
+       "depends_on": [
+         "API-001",
+         "EVT-004",
+         "EVT-002"
+       ],
+       "goal": "Expose durable history and journal-backed resumable live subscriptions.",
+       "files": [
+         "crates/control-api/src/event_service.rs",
+-        "proto/events/**"
++        "proto/events/catalog.yaml",
++        "proto/events/event.proto"
+       ],
+       "tests": [
+         "replay-then-live no-gap test",
+         "subscriber lag/resume test",
+         "journal unavailable behavior"
+       ],
+       "accept": [
+         "Client never gets a durable cursor that journal cannot serve."
+       ]
+     },
+@@ -1276,22 +1407,22 @@
+       "depends_on": [
+         "RUN-004",
+         "EFF-004",
+         "RES-001",
+         "SCH-001",
+         "WRK-003",
+         "CFG-002"
+       ],
+       "goal": "Stress every kernel linearization point under randomized/concurrent schedules.",
+       "files": [
+-        "tests/concurrency/*.rs",
+-        "tests/property/*.rs"
++        "tests/concurrency/main.rs",
++        "tests/property/main.rs"
+       ],
+       "tests": [
+         "cargo test --test concurrency",
+         "cargo test --test property"
+       ],
+       "accept": [
+         "No graph cycle, double effect commit, double timer winner, budget amplification, capability amplification, or double exclusive lease can be produced."
+       ]
+     },
+     {
+@@ -1299,21 +1430,21 @@
+       "title": "Run security and protocol invariant suite",
+       "phase": "integration",
+       "depends_on": [
+         "SEC-004",
+         "SBOX-001",
+         "ADP-005",
+         "API-003"
+       ],
+       "goal": "Prove the MVP fails closed at its stated security boundaries.",
+       "files": [
+-        "tests/security/*.rs"
++        "tests/security/main.rs"
+       ],
+       "tests": [
+         "full security integration suite"
+       ],
+       "accept": [
+         "Every security claim made by MVP docs has an executable test or is explicitly labeled non-boundary (T0)."
+       ]
+     },
+     {
+       "id": "REL-001",
+diff --git a/agent-os-microkernel-mvp-buildpack/dag.yaml b/agent-os-microkernel-mvp-buildpack/dag.yaml
+index e917342..b607ef0 100644
+--- a/agent-os-microkernel-mvp-buildpack/dag.yaml
++++ b/agent-os-microkernel-mvp-buildpack/dag.yaml
+@@ -4,41 +4,156 @@ tasks:
+ - id: FND-001
+   title: Bootstrap Rust workspace and quality gates
+   phase: foundation
+   depends_on: []
+   goal: Create the compilable Rust workspace, toolchain policy, shared dependency policy, CI commands, and empty crate boundaries
+     without implementing runtime behavior.
+   files:
+   - Cargo.toml
+   - rust-toolchain.toml
+   - .cargo/config.toml
+-  - crates/*/Cargo.toml
++  - crates/adapter-protocol/Cargo.toml
++  - crates/adapter-protocol/src/lib.rs
++  - crates/adapter-registry/Cargo.toml
++  - crates/adapter-registry/src/lib.rs
++  - crates/agentctl/Cargo.toml
++  - crates/agentctl/src/lib.rs
++  - crates/agentd/Cargo.toml
++  - crates/agentd/src/main.rs
++  - crates/agentd/src/lock.rs
++  - crates/agentd/src/recovery.rs
++  - crates/agentd/src/api.rs
++  - crates/agentd/src/workers/mod.rs
++  - crates/agentd/src/workers/outbox.rs
++  - crates/agentd/src/workers/scheduler.rs
++  - crates/agentd/src/workers/loops.rs
++  - crates/approvals/Cargo.toml
++  - crates/approvals/src/lib.rs
++  - crates/artifacts/Cargo.toml
++  - crates/artifacts/src/lib.rs
++  - crates/command-coordinator/Cargo.toml
++  - crates/command-coordinator/src/lib.rs
++  - crates/config-engine/Cargo.toml
++  - crates/config-engine/src/lib.rs
++  - crates/control-api/Cargo.toml
++  - crates/control-api/src/lib.rs
++  - crates/domain/Cargo.toml
++  - crates/domain/src/lib.rs
++  - crates/domain/src/ids.rs
++  - crates/domain/src/provider.rs
++  - crates/domain/src/time.rs
++  - crates/domain/src/faults.rs
++  - crates/domain/src/run.rs
++  - crates/domain/src/effect.rs
++  - crates/domain/src/security.rs
++  - crates/domain/src/resource.rs
++  - crates/domain/src/generated.rs
++  - crates/effects/Cargo.toml
++  - crates/effects/src/lib.rs
++  - crates/errors/Cargo.toml
++  - crates/errors/src/lib.rs
++  - crates/errors/src/codes.rs
++  - crates/event-journal/Cargo.toml
++  - crates/event-journal/src/lib.rs
++  - crates/event-journal-sqlite/Cargo.toml
++  - crates/event-journal-sqlite/src/lib.rs
++  - crates/events/Cargo.toml
++  - crates/events/src/lib.rs
++  - crates/identity/Cargo.toml
++  - crates/identity/src/lib.rs
++  - crates/kernel-store/Cargo.toml
++  - crates/kernel-store/src/lib.rs
++  - crates/kernel-store-sqlite/Cargo.toml
++  - crates/kernel-store-sqlite/src/lib.rs
++  - crates/message-queue/Cargo.toml
++  - crates/message-queue/src/lib.rs
++  - crates/observability/Cargo.toml
++  - crates/observability/src/lib.rs
++  - crates/observability/src/classification.rs
++  - crates/permissions/Cargo.toml
++  - crates/permissions/src/lib.rs
++  - crates/process-supervisor/Cargo.toml
++  - crates/process-supervisor/src/lib.rs
++  - crates/resource-uri/Cargo.toml
++  - crates/resource-uri/src/lib.rs
++  - crates/resources/Cargo.toml
++  - crates/resources/src/lib.rs
++  - crates/run-graph/Cargo.toml
++  - crates/run-graph/src/lib.rs
++  - crates/runtime/Cargo.toml
++  - crates/runtime/src/lib.rs
++  - crates/sandbox/Cargo.toml
++  - crates/sandbox/src/lib.rs
++  - crates/scheduler/Cargo.toml
++  - crates/scheduler/src/lib.rs
++  - crates/secrets/Cargo.toml
++  - crates/secrets/src/lib.rs
++  - crates/testkit/Cargo.toml
++  - crates/testkit/src/lib.rs
++  - crates/testkit/src/clock.rs
++  - crates/testkit/src/ids.rs
++  - crates/testkit/src/faults.rs
++  - crates/testkit/src/process.rs
++  - crates/workspace/Cargo.toml
++  - crates/workspace/src/lib.rs
+   - .github/workflows/ci.yml
+   tests:
+   - cargo check --workspace
+   - cargo fmt --check
+   - cargo clippy --workspace --all-targets -- -D warnings
+   - cargo test --workspace
+   accept:
+   - All crates compile on macOS target.
+   - No crate cycles.
+   - CI configuration expresses the same quality gates documented in AGENTS.md.
+ - id: FND-002
+   title: Install canonical contract snapshot and protobuf generation
+   phase: foundation
+   depends_on:
+   - FND-001
+   goal: Place the build-pack contract files into the implementation repo and generate Rust protobuf types deterministically.
+   files:
+-  - proto/**
+-  - build.rs or dedicated proto crate
+-  - crates/domain/src/generated/**
++  - agent-os/crates/domain/build.rs
++  - proto/README.md
++  - proto/capabilities/adapter-capabilities.yaml
++  - proto/capabilities/security-capabilities.yaml
++  - proto/catalog.yaml
++  - proto/config/agent-os.schema.json
++  - proto/contract-lock.sha256
++  - proto/control-api/commands.proto
++  - proto/control-api/mvp_control.proto
++  - proto/domain/core.proto
++  - proto/domain/effects.proto
++  - proto/domain/entities.proto
++  - proto/domain/security.proto
++  - proto/events/catalog.yaml
++  - proto/events/event.proto
++  - proto/manifests/extension.schema.json
++  - proto/ports/agent_loop.proto
++  - proto/ports/artifact_store.proto
++  - proto/ports/common.proto
++  - proto/ports/context.proto
++  - proto/ports/event_journal.proto
++  - proto/ports/kernel_store.proto
++  - proto/ports/memory_store.proto
++  - proto/ports/message_queue.proto
++  - proto/ports/model.proto
++  - proto/ports/sandbox.proto
++  - proto/ports/secret_store.proto
++  - proto/ports/tool_runtime.proto
++  - proto/ports/transport.proto
++  - proto/ports/workspace.proto
++  - proto/protocols/adapter_frames.proto
++  - proto/protocols/agent_loop.proto
++  - proto/protocols/effect.proto
++  - proto/protocols/external_adapter.proto
++  - agent-os/crates/domain/src/generated.rs
+   tests:
+   - cargo test -p domain contract_codegen
+   - script verifies contract lock hashes
+   - schema JSON parses and const version == 1
+   accept:
+   - Generated protobuf types compile.
+   - Changing a contract without updating the lock fails validation.
+   - No second hand-written copy of protobuf message structs is created.
+ - id: FND-003
+   title: Implement domain IDs, core enums, and immutable value types
+@@ -150,21 +265,32 @@ tasks:
+   title: Implement SQLite KernelStore transactions and repositories
+   phase: persistence
+   depends_on:
+   - PST-001
+   - PST-002
+   - FND-005
+   goal: Implement all base repository operations and transaction semantics in SQLite.
+   files:
+   - crates/kernel-store-sqlite/src/lib.rs
+   - crates/kernel-store-sqlite/src/txn.rs
+-  - crates/kernel-store-sqlite/src/repos/*.rs
++  - crates/kernel-store-sqlite/src/repos/mod.rs
++  - crates/kernel-store-sqlite/src/repos/agent_specs.rs
++  - crates/kernel-store-sqlite/src/repos/tasks.rs
++  - crates/kernel-store-sqlite/src/repos/effects.rs
++  - crates/kernel-store-sqlite/src/repos/effect_claims.rs
++  - crates/kernel-store-sqlite/src/repos/resources.rs
++  - crates/kernel-store-sqlite/src/repos/timers.rs
++  - crates/kernel-store-sqlite/src/repos/security.rs
++  - crates/kernel-store-sqlite/src/repos/approvals.rs
++  - crates/kernel-store-sqlite/src/repos/workspace_leases.rs
++  - crates/kernel-store-sqlite/src/repos/idempotency.rs
++  - crates/kernel-store-sqlite/src/repos/outbox.rs
+   tests:
+   - repository CRUD tests
+   - transaction rollback test
+   - CAS conflict tests
+   - concurrent writer contention test
+   - outbox/stream sequence uniqueness tests
+   accept:
+   - A failed transaction leaves zero partial canonical rows.
+   - Every correctness constraint is backed by DB condition/constraint, not only pre-check logic.
+ - id: PST-004
+@@ -326,21 +452,22 @@ tasks:
+   - proptest arbitrary transition sequence
+   - revision increment tests
+   accept:
+   - Illegal transitions cannot be persisted through runtime APIs.
+ - id: RUN-002
+   title: Implement transactional RunGraph edge mutation and cycle prevention
+   phase: runtime
+   depends_on:
+   - RUN-001
+   - PST-003
+-  goal: Implement parent/child and dependency graph storage with serial cycle validation.
++  goal: Implement dependency graph storage with serial cycle validation while deriving parent/child ancestry
++    from the single canonical `runs.parent_run_id` field.
+   files:
+   - crates/run-graph/src/graph.rs
+   - crates/run-graph/src/repository.rs
+   tests:
+   - cycle rejection tests
+   - concurrent opposite-edge race test
+   - duplicate edge test
+   - state restriction tests
+   accept:
+   - No committed dependency graph contains a directed cycle.
+@@ -637,21 +764,22 @@ tasks:
+   accept:
+   - Resolver returns immutable adapter identity + negotiated capability document.
+ - id: ADP-005
+   title: Build fixture external effect adapter
+   phase: adapters
+   depends_on:
+   - ADP-004
+   - EFF-004
+   goal: Provide a real external process used to prove protocol, effect idempotency, status lookup, crashes, and fencing.
+   files:
+-  - fixtures/effect-adapter/**
++  - fixtures/effect-adapter/Cargo.toml
++  - fixtures/effect-adapter/src/main.rs
+   tests:
+   - normal execution
+   - duplicate operation ID idempotency
+   - crash-after-side-effect then status reconciliation
+   - wrong handshake digest
+   accept:
+   - Fixture can demonstrate the exact ambiguity the Effect Coordinator is designed to solve.
+ - id: WRK-001
+   title: Implement logical Resource URI parser/resolver
+   phase: workspace
+@@ -767,23 +895,23 @@ tasks:
+   depends_on:
+   - CFG-001
+   - CMD-001
+   goal: Persist proposed generations and activate only validated/tested immutable documents.
+   files:
+   - crates/config-engine/src/generations.rs
+   - crates/config-engine/src/activate.rs
+   tests:
+   - untested generation cannot activate
+   - CAS race one winner
++  - generation-global service change returns DAEMON_RESTART_REQUIRED and does not move pointer
+   - failed smoke leaves pointer unchanged
+   - reactivation test
+-  - generation-global service change returns DAEMON_RESTART_REQUIRED and does not move pointer
+   accept:
+   - Existing run records are never rewritten on activation.
+ - id: CFG-003
+   title: Implement runtime profile resolution and frozen ResolvedRunEnvironment
+   phase: config
+   depends_on:
+   - CFG-002
+   - WRK-003
+   - SBOX-001
+   - ART-001
+@@ -798,21 +926,22 @@ tasks:
+   accept:
+   - Historical audit needs no mutable current registry/config to know original bindings.
+ - id: LOOP-001
+   title: Build fixture external AgentLoop process
+   phase: loop
+   depends_on:
+   - ADP-004
+   - RUN-001
+   goal: Provide a deterministic external loop fixture that can emit Complete, SpawnAgent, Wait, and InvokeEffect decisions.
+   files:
+-  - fixtures/agent-loop/**
++  - fixtures/agent-loop/Cargo.toml
++  - fixtures/agent-loop/src/main.rs
+   tests:
+   - normal complete decision
+   - spawn child decision
+   - effect decision
+   - delayed decision fixture
+   - bundle digest validation
+   accept:
+   - Fixture never directly spawns processes or performs privileged side effects.
+ - id: LOOP-002
+   title: Implement loop turn supervisor and fenced decision acceptance
+@@ -843,53 +972,56 @@ tasks:
+   goal: Expose the base control plane locally without bypassing internal command semantics.
+   files:
+   - crates/control-api/src/server.rs
+   - crates/control-api/src/uds.rs
+   - crates/agentd/src/api.rs
+   tests:
+   - socket permission test
+   - second daemon cannot steal socket
+   - graceful shutdown test
+   - client connection smoke test
++  - peer principal mismatch rejected
+   accept:
+   - Handlers cannot receive raw KernelStore handle.
+ - id: API-002
+   title: Implement command/query Control API methods
+   phase: api
+   depends_on:
+   - API-001
+   - CMD-001
+   - CFG-003
+   - EFF-004
+   - SEC-003
+   goal: Expose typed base commands and read queries needed to drive the MVP.
+   files:
+   - crates/control-api/src/control_service.rs
+-  - proto/control/**
++  - proto/control-api/commands.proto
++  - proto/control-api/mvp_control.proto
+   tests:
+   - API idempotency replay test
+   - query not found mapping
+   - approval digest mismatch over API
+   - health reports fencing/config/outbox status
+   accept:
+   - No public state-changing method performs direct repository mutation.
+ - id: API-003
+   title: Implement Event API read and live subscription
+   phase: api
+   depends_on:
+   - API-001
+   - EVT-004
+   - EVT-002
+   goal: Expose durable history and journal-backed resumable live subscriptions.
+   files:
+   - crates/control-api/src/event_service.rs
+-  - proto/events/**
++  - proto/events/catalog.yaml
++  - proto/events/event.proto
+   tests:
+   - replay-then-live no-gap test
+   - subscriber lag/resume test
+   - journal unavailable behavior
+   accept:
+   - Client never gets a durable cursor that journal cannot serve.
+ - id: API-004
+   title: Build local control CLI
+   phase: api
+   depends_on:
+@@ -955,39 +1087,39 @@ tasks:
+   phase: integration
+   depends_on:
+   - RUN-004
+   - EFF-004
+   - RES-001
+   - SCH-001
+   - WRK-003
+   - CFG-002
+   goal: Stress every kernel linearization point under randomized/concurrent schedules.
+   files:
+-  - tests/concurrency/*.rs
+-  - tests/property/*.rs
++  - tests/concurrency/main.rs
++  - tests/property/main.rs
+   tests:
+   - cargo test --test concurrency
+   - cargo test --test property
+   accept:
+   - No graph cycle, double effect commit, double timer winner, budget amplification, capability amplification, or double exclusive
+     lease can be produced.
+ - id: INT-005
+   title: Run security and protocol invariant suite
+   phase: integration
+   depends_on:
+   - SEC-004
+   - SBOX-001
+   - ADP-005
+   - API-003
+   goal: Prove the MVP fails closed at its stated security boundaries.
+   files:
+-  - tests/security/*.rs
++  - tests/security/main.rs
+   tests:
+   - full security integration suite
+   accept:
+   - Every security claim made by MVP docs has an executable test or is explicitly labeled non-boundary (T0).
+ - id: REL-001
+   title: Implement automated MVP release gate
+   phase: release
+   depends_on:
+   - INT-002
+   - INT-003
+diff --git a/agent-os-microkernel-mvp-buildpack/scripts/sync_dag_sources.py b/agent-os-microkernel-mvp-buildpack/scripts/sync_dag_sources.py
+new file mode 100644
+index 0000000..577e655
+--- /dev/null
++++ b/agent-os-microkernel-mvp-buildpack/scripts/sync_dag_sources.py
+@@ -0,0 +1,173 @@
++#!/usr/bin/env python3
++"""Regenerate dag.json, DAG.md, and tasks.csv from dag.yaml.
++
++dag.yaml is the single hand-editable machine-readable source. This script
++derives the other three sources so they cannot drift apart:
++
++- dag.json: the parsed task graph, two-space JSON, ensure_ascii=False,
++  trailing newline.
++- DAG.md: the mermaid graph plus the numbered topological execution order;
++  the order is Kahn's algorithm with a min-heap keyed by task ID.
++- tasks.csv: columns id,phase,title,depends_on with dependencies joined by a
++  single space.
++
++Usage:
++    python3 scripts/sync_dag_sources.py          # write derived sources
++    python3 scripts/sync_dag_sources.py --check  # exit 2 if any output differs
++"""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import heapq
++import io
++import json
++import sys
++from pathlib import Path
++
++import yaml
++
++ROOT = Path(__file__).resolve().parents[1]
++DAG_YAML = ROOT / "dag.yaml"
++DAG_JSON = ROOT / "dag.json"
++DAG_MD = ROOT / "DAG.md"
++TASKS_CSV = ROOT / "tasks.csv"
++
++PARALLELISM_RULE = (
++    "Tasks at the same dependency frontier may run concurrently only when "
++    "they do not edit the same code ownership boundary. Use independent Git "
++    "worktrees for parallel coding agents; merge after each branch passes its "
++    "task tests."
++)
++
++
++def load_graph() -> dict:
++    with DAG_YAML.open(encoding="utf-8") as handle:
++        return yaml.safe_load(handle)
++
++
++def render_json(graph: dict) -> str:
++    return json.dumps(graph, indent=2, ensure_ascii=False) + "\n"
++
++
++def mermaid_id(task_id: str) -> str:
++    return task_id.replace("-", "_")
++
++
++def render_dag_md(graph: dict) -> str:
++    tasks = graph["tasks"]
++    lines = [
++        "# Implementation DAG",
++        "",
++        f"**{len(tasks)} tasks**, acyclic. Machine-readable source: [`dag.yaml`](dag.yaml).",
++        "",
++        "## Mermaid graph",
++        "",
++        "```mermaid",
++        "flowchart TD",
++    ]
++    for task in tasks:
++        lines.append(f'  {mermaid_id(task["id"])}["{task["id"]}: {task["title"]}"]')
++    for task in tasks:
++        for dep in task["depends_on"]:
++            lines.append(f"  {mermaid_id(dep)} --> {mermaid_id(task['id'])}")
++    lines.append("```")
++    lines.extend(
++        [
++            "",
++            "## Valid topological execution order",
++            "",
++        ]
++    )
++    for index, task in enumerate(topological_order(graph), start=1):
++        lines.append(f"{index}. [{task['id']} — {task['title']}](tasks/{task['id']}.md)")
++    lines.extend(
++        [
++            "",
++            "## Parallelism rule",
++            "",
++            PARALLELISM_RULE,
++            "",
++        ]
++    )
++    return "\n".join(lines)
++
++
++def topological_order(graph: dict) -> list[dict]:
++    tasks = graph["tasks"]
++    by_id = {task["id"]: task for task in tasks}
++    indegree = {task["id"]: len(task["depends_on"]) for task in tasks}
++    children: dict[str, list[str]] = {task["id"]: [] for task in tasks}
++    for task in tasks:
++        for dep in task["depends_on"]:
++            children[dep].append(task["id"])
++    ready = [task_id for task_id in indegree if indegree[task_id] == 0]
++    heapq.heapify(ready)
++    order: list[dict] = []
++    while ready:
++        current = heapq.heappop(ready)
++        order.append(by_id[current])
++        for child in children[current]:
++            indegree[child] -= 1
++            if indegree[child] == 0:
++                heapq.heappush(ready, child)
++    if len(order) != len(tasks):
++        raise SystemExit("dag.yaml contains a cycle; refusing to generate sources")
++    return order
++
++
++def render_tasks_csv(graph: dict) -> str:
++    buffer = io.StringIO()
++    writer = csv.writer(buffer, lineterminator="\r\n")
++    writer.writerow(["id", "phase", "title", "depends_on"])
++    for task in graph["tasks"]:
++        writer.writerow(
++            [
++                task["id"],
++                task["phase"],
++                task["title"],
++                " ".join(task["depends_on"]),
++            ]
++        )
++    return buffer.getvalue()
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--check",
++        action="store_true",
++        help="exit 2 if any derived source differs from a fresh generation",
++    )
++    args = parser.parse_args()
++
++    graph = load_graph()
++    outputs = {
++        DAG_JSON: render_json(graph),
++        DAG_MD: render_dag_md(graph),
++        TASKS_CSV: render_tasks_csv(graph),
++    }
++
++    if args.check:
++        drifted = []
++        for path, rendered in outputs.items():
++            current = path.read_bytes() if path.exists() else None
++            if current != rendered.encode("utf-8"):
++                drifted.append(path)
++        if drifted:
++            for path in drifted:
++                print(f"out of date: {path.relative_to(ROOT)}")
++            print("run: python3 scripts/sync_dag_sources.py")
++            return 2
++        print("DAG sources up to date")
++        return 0
++
++    for path, rendered in outputs.items():
++        path.write_bytes(rendered.encode("utf-8"))
++        print(f"wrote {path.relative_to(ROOT)}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/agent-os-microkernel-mvp-buildpack/tasks/FND-001.md b/agent-os-microkernel-mvp-buildpack/tasks/FND-001.md
+index e080caa..358bb2f 100644
+--- a/agent-os-microkernel-mvp-buildpack/tasks/FND-001.md
++++ b/agent-os-microkernel-mvp-buildpack/tasks/FND-001.md
+@@ -5,31 +5,116 @@
+ 
+ ## Goal
+ 
+ Create the compilable Rust workspace, toolchain policy, shared dependency policy, CI commands, and empty crate boundaries without implementing runtime behavior.
+ 
+ ## Required outputs / expected code locations
+ 
+ - `Cargo.toml`
+ - `rust-toolchain.toml`
+ - `.cargo/config.toml`
+-- `crates/*/Cargo.toml`
++- `crates/adapter-protocol/Cargo.toml`
++- `crates/adapter-protocol/src/lib.rs`
++- `crates/adapter-registry/Cargo.toml`
++- `crates/adapter-registry/src/lib.rs`
++- `crates/agentctl/Cargo.toml`
++- `crates/agentctl/src/lib.rs`
++- `crates/agentd/Cargo.toml`
++- `crates/agentd/src/main.rs`
++- `crates/agentd/src/lock.rs`
++- `crates/agentd/src/recovery.rs`
++- `crates/agentd/src/api.rs`
++- `crates/agentd/src/workers/mod.rs`
++- `crates/agentd/src/workers/outbox.rs`
++- `crates/agentd/src/workers/scheduler.rs`
++- `crates/agentd/src/workers/loops.rs`
++- `crates/approvals/Cargo.toml`
++- `crates/approvals/src/lib.rs`
++- `crates/artifacts/Cargo.toml`
++- `crates/artifacts/src/lib.rs`
++- `crates/command-coordinator/Cargo.toml`
++- `crates/command-coordinator/src/lib.rs`
++- `crates/config-engine/Cargo.toml`
++- `crates/config-engine/src/lib.rs`
++- `crates/control-api/Cargo.toml`
++- `crates/control-api/src/lib.rs`
++- `crates/domain/Cargo.toml`
++- `crates/domain/src/lib.rs`
++- `crates/domain/src/ids.rs`
++- `crates/domain/src/provider.rs`
++- `crates/domain/src/time.rs`
++- `crates/domain/src/faults.rs`
++- `crates/domain/src/run.rs`
++- `crates/domain/src/effect.rs`
++- `crates/domain/src/security.rs`
++- `crates/domain/src/resource.rs`
++- `crates/domain/src/generated.rs`
++- `crates/effects/Cargo.toml`
++- `crates/effects/src/lib.rs`
++- `crates/errors/Cargo.toml`
++- `crates/errors/src/lib.rs`
++- `crates/errors/src/codes.rs`
++- `crates/event-journal/Cargo.toml`
++- `crates/event-journal/src/lib.rs`
++- `crates/event-journal-sqlite/Cargo.toml`
++- `crates/event-journal-sqlite/src/lib.rs`
++- `crates/events/Cargo.toml`
++- `crates/events/src/lib.rs`
++- `crates/identity/Cargo.toml`
++- `crates/identity/src/lib.rs`
++- `crates/kernel-store/Cargo.toml`
++- `crates/kernel-store/src/lib.rs`
++- `crates/kernel-store-sqlite/Cargo.toml`
++- `crates/kernel-store-sqlite/src/lib.rs`
++- `crates/message-queue/Cargo.toml`
++- `crates/message-queue/src/lib.rs`
++- `crates/observability/Cargo.toml`
++- `crates/observability/src/lib.rs`
++- `crates/observability/src/classification.rs`
++- `crates/permissions/Cargo.toml`
++- `crates/permissions/src/lib.rs`
++- `crates/process-supervisor/Cargo.toml`
++- `crates/process-supervisor/src/lib.rs`
++- `crates/resource-uri/Cargo.toml`
++- `crates/resource-uri/src/lib.rs`
++- `crates/resources/Cargo.toml`
++- `crates/resources/src/lib.rs`
++- `crates/run-graph/Cargo.toml`
++- `crates/run-graph/src/lib.rs`
++- `crates/runtime/Cargo.toml`
++- `crates/runtime/src/lib.rs`
++- `crates/sandbox/Cargo.toml`
++- `crates/sandbox/src/lib.rs`
++- `crates/scheduler/Cargo.toml`
++- `crates/scheduler/src/lib.rs`
++- `crates/secrets/Cargo.toml`
++- `crates/secrets/src/lib.rs`
++- `crates/testkit/Cargo.toml`
++- `crates/testkit/src/lib.rs`
++- `crates/testkit/src/clock.rs`
++- `crates/testkit/src/ids.rs`
++- `crates/testkit/src/faults.rs`
++- `crates/testkit/src/process.rs`
++- `crates/workspace/Cargo.toml`
++- `crates/workspace/src/lib.rs`
+ - `.github/workflows/ci.yml`
+ 
++This list is the concrete per-crate module-root ownership from design D13: FND-001 creates every crate root as an empty module (or `main.rs` for `agentd`), declares the pre-declared foundation module files as empty modules, and leaves file bodies to the owning task.
++
+ ## Normative inputs
+ 
+ - Use the component specs linked from the goal/steps and `DECISIONS.md`.
+ 
+ ## Implementation steps
+ 
+ 1. Create all crates listed in `architecture/crate-map.md` with minimal `lib.rs`/`main.rs`.
+-2. Use workspace dependency declarations for Tokio, tracing, serde, prost/tonic, uuid, sha2, sqlx/rusqlite choice, thiserror, async-trait, tempfile, proptest. Pin normal semver ranges; do not vendor code.
++2. Use workspace dependency declarations for Tokio, tracing, serde, prost/tonic, uuid, sha2, sqlx, thiserror, async-trait, tempfile, proptest. Pin normal semver ranges; do not vendor code.
+ 3. Set edition and MSRV/toolchain explicitly.
+ 4. CI must run format, clippy with warnings denied, workspace tests, and build all targets.
+ 5. `agentd` binary should start and exit cleanly with a placeholder composition root; no DB/API yet.
+ 
+ ## Required tests
+ 
+ - `cargo check --workspace`
+ - `cargo fmt --check`
+ - `cargo clippy --workspace --all-targets -- -D warnings`
+ - `cargo test --workspace`
+diff --git a/agent-os-microkernel-mvp-buildpack/tasks/FND-002.md b/agent-os-microkernel-mvp-buildpack/tasks/FND-002.md
+index 55aa679..a8e6060 100644
+--- a/agent-os-microkernel-mvp-buildpack/tasks/FND-002.md
++++ b/agent-os-microkernel-mvp-buildpack/tasks/FND-002.md
+@@ -2,23 +2,57 @@
+ 
+ **Phase:** `foundation`  
+ **Depends on:** [FND-001](FND-001.md)
+ 
+ ## Goal
+ 
+ Place the build-pack contract files into the implementation repo and generate Rust protobuf types deterministically.
+ 
+ ## Required outputs / expected code locations
+ 
+-- `proto/**`
+-- `build.rs or dedicated proto crate`
+-- `crates/domain/src/generated/**`
++- `agent-os/crates/domain/build.rs`
++- `proto/README.md`
++- `proto/capabilities/adapter-capabilities.yaml`
++- `proto/capabilities/security-capabilities.yaml`
++- `proto/catalog.yaml`
++- `proto/config/agent-os.schema.json`
++- `proto/contract-lock.sha256`
++- `proto/control-api/commands.proto`
++- `proto/control-api/mvp_control.proto`
++- `proto/domain/core.proto`
++- `proto/domain/effects.proto`
++- `proto/domain/entities.proto`
++- `proto/domain/security.proto`
++- `proto/events/catalog.yaml`
++- `proto/events/event.proto`
++- `proto/manifests/extension.schema.json`
++- `proto/ports/agent_loop.proto`
++- `proto/ports/artifact_store.proto`
++- `proto/ports/common.proto`
++- `proto/ports/context.proto`
++- `proto/ports/event_journal.proto`
++- `proto/ports/kernel_store.proto`
++- `proto/ports/memory_store.proto`
++- `proto/ports/message_queue.proto`
++- `proto/ports/model.proto`
++- `proto/ports/sandbox.proto`
++- `proto/ports/secret_store.proto`
++- `proto/ports/tool_runtime.proto`
++- `proto/ports/transport.proto`
++- `proto/ports/workspace.proto`
++- `proto/protocols/adapter_frames.proto`
++- `proto/protocols/agent_loop.proto`
++- `proto/protocols/effect.proto`
++- `proto/protocols/external_adapter.proto`
++- `agent-os/crates/domain/src/generated.rs`
++
++The `proto/` tree is the concrete mirror of the `/contracts` snapshot (paths preserved, including `proto/control-api/`); generation runs in `agent-os/crates/domain/build.rs` into `OUT_DIR`, re-exported through `agent-os/crates/domain/src/generated.rs`.
+ 
+ ## Normative inputs
+ 
+ - Use the component specs linked from the goal/steps and `DECISIONS.md`.
+ 
+ ## Implementation steps
+ 
+ 1. Copy `/contracts` preserving paths.
+ 2. Configure `prost-build`/`tonic-build` to generate code from the snapshot.
+ 3. Ensure generated code is reproducible and either checked in with freshness check or generated in build; choose one policy and document it.

@@ -1,0 +1,2538 @@
+diff --git a/agent-os/crates/domain/build.rs b/agent-os/crates/domain/build.rs
+new file mode 100644
+index 0000000..3402435
+--- /dev/null
++++ b/agent-os/crates/domain/build.rs
+@@ -0,0 +1,51 @@
++use std::env;
++use std::path::{Path, PathBuf};
++
++fn collect_protos(root: &Path) -> Vec<PathBuf> {
++    let mut protos = Vec::new();
++    let mut stack = vec![root.to_path_buf()];
++    while let Some(dir) = stack.pop() {
++        let mut entries = std::fs::read_dir(&dir)
++            .unwrap_or_else(|error| panic!("read_dir {}: {error}", dir.display()))
++            .map(|entry| entry.expect("directory entry").path())
++            .collect::<Vec<_>>();
++        entries.sort();
++        for path in entries {
++            if path.is_dir() {
++                stack.push(path);
++            } else if path
++                .extension()
++                .is_some_and(|extension| extension == "proto")
++            {
++                protos.push(path);
++            }
++        }
++    }
++    protos.sort();
++    protos
++}
++
++fn main() {
++    let manifest_dir =
++        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
++    let proto_root = manifest_dir.join("..").join("..").join("proto");
++    println!("cargo:rerun-if-changed={}", proto_root.display());
++    println!("cargo:rerun-if-changed=build.rs");
++
++    let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc is available");
++    unsafe {
++        env::set_var("PROTOC", protoc);
++    }
++
++    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
++    let protos = collect_protos(&proto_root);
++    assert!(
++        !protos.is_empty(),
++        "no proto files under {}",
++        proto_root.display()
++    );
++    prost_build::Config::new()
++        .out_dir(out_dir)
++        .compile_protos(&protos, &[&proto_root])
++        .expect("contract snapshot compiles");
++}
+diff --git a/agent-os/crates/domain/src/generated.rs b/agent-os/crates/domain/src/generated.rs
+index 06ba6e1..37d3763 100644
+--- a/agent-os/crates/domain/src/generated.rs
++++ b/agent-os/crates/domain/src/generated.rs
+@@ -1 +1,6 @@
+ //! Generated contract types included from `OUT_DIR` and re-exported.
++
++#[allow(clippy::large_enum_variant)]
++pub mod contract {
++    include!(concat!(env!("OUT_DIR"), "/agentos.spec.v1.rs"));
++}
+diff --git a/agent-os/crates/domain/tests/contract_codegen.rs b/agent-os/crates/domain/tests/contract_codegen.rs
+new file mode 100644
+index 0000000..23e41c5
+--- /dev/null
++++ b/agent-os/crates/domain/tests/contract_codegen.rs
+@@ -0,0 +1,117 @@
++//! Proves the contract snapshot compiles hermetically and regenerates byte-identically.
++
++use std::collections::BTreeMap;
++use std::path::{Path, PathBuf};
++
++use domain::generated::contract;
++
++fn proto_root() -> PathBuf {
++    Path::new(env!("CARGO_MANIFEST_DIR"))
++        .join("..")
++        .join("..")
++        .join("proto")
++        .canonicalize()
++        .expect("agent-os/proto exists")
++}
++
++fn collect_protos(root: &Path) -> Vec<PathBuf> {
++    let mut protos = Vec::new();
++    let mut stack = vec![root.to_path_buf()];
++    while let Some(dir) = stack.pop() {
++        let mut entries = std::fs::read_dir(&dir)
++            .unwrap_or_else(|error| panic!("read_dir {}: {error}", dir.display()))
++            .map(|entry| entry.expect("directory entry").path())
++            .collect::<Vec<_>>();
++        entries.sort();
++        for path in entries {
++            if path.is_dir() {
++                stack.push(path);
++            } else if path
++                .extension()
++                .is_some_and(|extension| extension == "proto")
++            {
++                protos.push(path);
++            }
++        }
++    }
++    protos.sort();
++    protos
++}
++
++fn compile_snapshot(out_dir: &Path) {
++    let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc");
++    unsafe {
++        std::env::set_var("PROTOC", protoc);
++    }
++    let root = proto_root();
++    let protos = collect_protos(&root);
++    assert!(!protos.is_empty(), "snapshot contains proto files");
++    prost_build::Config::new()
++        .out_dir(out_dir)
++        .compile_protos(&protos, &[&root])
++        .expect("snapshot compiles");
++}
++
++fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
++    let mut files = BTreeMap::new();
++    let mut stack = vec![root.to_path_buf()];
++    while let Some(dir) = stack.pop() {
++        for entry in std::fs::read_dir(&dir).expect("generated output is readable") {
++            let path = entry.expect("directory entry").path();
++            if path.is_dir() {
++                stack.push(path);
++            } else {
++                let name = path
++                    .strip_prefix(root)
++                    .expect("generated file is inside out dir")
++                    .to_string_lossy()
++                    .into_owned();
++                files.insert(
++                    name,
++                    std::fs::read(&path).expect("generated file is readable"),
++                );
++            }
++        }
++    }
++    files
++}
++
++#[test]
++fn contract_codegen_regenerates_the_snapshot_byte_identical() {
++    let first_dir = tempfile::tempdir().expect("first temp dir");
++    let second_dir = tempfile::tempdir().expect("second temp dir");
++    compile_snapshot(first_dir.path());
++    compile_snapshot(second_dir.path());
++    let first = read_tree(first_dir.path());
++    let second = read_tree(second_dir.path());
++    assert!(!first.is_empty(), "generator produced output");
++    assert_eq!(first, second, "generated output must be byte-identical");
++}
++
++#[test]
++fn contract_codegen_exports_command_request_and_the_six_decisions() {
++    assert_eq!(
++        std::any::type_name::<contract::CommandRequest>(),
++        "domain::generated::contract::CommandRequest"
++    );
++    assert_eq!(
++        std::any::type_name::<contract::LoopDecision>(),
++        "domain::generated::contract::LoopDecision"
++    );
++
++    let decisions = [
++        std::any::type_name::<contract::Complete>(),
++        std::any::type_name::<contract::Fail>(),
++        std::any::type_name::<contract::Wait>(),
++        std::any::type_name::<contract::SpawnAgent>(),
++        std::any::type_name::<contract::InvokeEffect>(),
++        std::any::type_name::<contract::RequestApproval>(),
++    ];
++    assert_eq!(decisions.len(), 6);
++    for decision in decisions {
++        assert!(
++            decision.starts_with("domain::generated::contract::"),
++            "decision {decision} is not a generated contract type"
++        );
++    }
++}
+diff --git a/agent-os/proto/README.md b/agent-os/proto/README.md
+new file mode 100644
+index 0000000..496ecc0
+--- /dev/null
++++ b/agent-os/proto/README.md
+@@ -0,0 +1,30 @@
++# Frozen MVP Contract Snapshot
++
++This directory is the implementation-pack snapshot of the canonical inception contracts used by the microkernel/control-plane MVP.
++
++## Authority
++
++- `control-api/mvp_control.proto` is the single normative Control API definition in this snapshot. It is the only file that declares a Control API service; the duplicate `control-api/control.proto` was removed from this pack only (see `../SOURCE_CORRECTIONS.md`).
++- `protocols/agent_loop.proto` is the normative loop contract: `LoopInput`, the fenced `LoopDecision`, and its six decision variants.
++- `CommandRequest.command_type` is the fully-qualified protobuf message name of a payload message declared in `control-api/commands.proto` (design D2).
++
++## Snapshot inventory
++
++- `control-api/mvp_control.proto` — Control API and event API services, command envelope, and subscription frames.
++- `control-api/commands.proto` — one payload message per catalogued command (18 total).
++- `domain/core.proto`, `domain/entities.proto`, `domain/effects.proto`, `domain/security.proto` — canonical domain records and enums.
++- `events/event.proto`, `events/catalog.yaml` — event envelope and event catalog.
++- `protocols/agent_loop.proto`, `protocols/effect.proto`, `protocols/external_adapter.proto`, `protocols/adapter_frames.proto` — loop, effect, and adapter protocol frames.
++- `ports/*.proto` — public port contracts.
++- `capabilities/*.yaml` — capability declarations.
++- `config/agent-os.schema.json` — configuration schema.
++- `manifests/extension.schema.json` — extension manifest schema.
++- `catalog.yaml` — port version catalog.
++- `contract-lock.sha256` — snapshot hash lock.
++
++## Rules
++
++- Protocol/domain/public port fields come from here, not from ad-hoc hand-written duplicates.
++- `config.schema_version` and `extension.manifest_version` are normalized to inception version `1` as documented in `../SOURCE_CORRECTIONS.md`.
++- Implementation-specific semantics live in `../specs/` and must not contradict these contracts.
++- Re-run `scripts/validate_buildpack.py` after any intentional contract edit and update `contract-lock.sha256`.
+diff --git a/agent-os/proto/capabilities/adapter-capabilities.yaml b/agent-os/proto/capabilities/adapter-capabilities.yaml
+new file mode 100644
+index 0000000..a1228c5
+--- /dev/null
++++ b/agent-os/proto/capabilities/adapter-capabilities.yaml
+@@ -0,0 +1,45 @@
++version: 1
++sandbox:
++  required_for_t2:
++  - host_fs_default_deny
++  - network_default_deny
++  - host_socket_deny
++  - process_tree_containment
++  - cpu_limit
++  - memory_limit
++  - pid_limit
++  - disk_quota
++  - wall_clock_limit
++  - descendant_cleanup
++  optional:
++  - checkpoint
++  - restore
++  - suspend_resume
++  - gpu
++workspace:
++  optional:
++  - git
++  - snapshot
++  - atomic_rename
++  - locking
++  - version_checks
++  - conflict_detection
++  - shared_coordinated_write
++  - enforced_write_lease
++message_queue:
++  optional:
++  - durable
++  - strict_ordering
++  - replay
++  - delayed_delivery
++  - consumer_groups
++  - dead_letter
++model:
++  optional:
++  - streaming
++  - tools
++  - structured_output
++  - reasoning_controls
++  - multimodal
++  - status_lookup
++  - provider_idempotency
+diff --git a/agent-os/proto/capabilities/security-capabilities.yaml b/agent-os/proto/capabilities/security-capabilities.yaml
+new file mode 100644
+index 0000000..088926c
+--- /dev/null
++++ b/agent-os/proto/capabilities/security-capabilities.yaml
+@@ -0,0 +1,10 @@
++version: 1
++families:
++  workspace: [read, write, fork, merge, transfer_exclusive_write, shared_coordinated_write]
++  network: [connect]
++  secret: [use, sign_or_act]
++  agent: [spawn]
++  extension: [install, enable, disable]
++  config: [propose, test, activate, rollback]
++  effect: [reconcile, resolve_unknown]
++  resource: [reserve]
+diff --git a/agent-os/proto/catalog.yaml b/agent-os/proto/catalog.yaml
+new file mode 100644
+index 0000000..c2feccb
+--- /dev/null
++++ b/agent-os/proto/catalog.yaml
+@@ -0,0 +1,80 @@
++spec_version: 1
++ports:
++  kernel-store:
++    version: 1
++    scope: bootstrap-global
++    extension_policy: trusted-native-only
++  event-journal:
++    version: 1
++    scope: generation-global
++    extension_policy: reviewed-external-allowed
++  message-queue:
++    version: 1
++    scope: generation-global
++    extension_policy: reviewed-external-allowed
++  sandbox:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  workspace:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  artifact-store:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  model:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  memory-store:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  context:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  tool-runtime:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++  secret-store:
++    version: 1
++    scope: generation-global
++    extension_policy: reviewed-external-allowed
++  transport:
++    version: 1
++    scope: generation-global
++    extension_policy: external-allowed
++  agent-loop:
++    version: 1
++    scope: run-scoped
++    extension_policy: external-allowed
++effect_classes:
++- EFFECT_CLASS_READ_ONLY
++- LOCAL_MUTATION
++- EXTERNAL_MUTATION
++- OPAQUE
++idempotency:
++- NATURALLY_IDEMPOTENT
++- IDEMPOTENCY_KEY_SUPPORTED
++- NOT_IDEMPOTENT
++- UNKNOWN
++reconciliation:
++- STATUS_LOOKUP
++- RESULT_LOOKUP
++- DETERMINISTIC_INSPECTION
++- IMPOSSIBLE
++- UNKNOWN
++sandbox_tiers:
++- T0_TRUSTED
++- T1_CONSTRAINED
++- T2_UNTRUSTED
++- T3_HOSTILE
++workspace_modes:
++- READ_ONLY
++- EXCLUSIVE_WRITE
++- ISOLATED_FORK
++- SHARED_COORDINATED_WRITE
+diff --git a/agent-os/proto/config/agent-os.schema.json b/agent-os/proto/config/agent-os.schema.json
+new file mode 100644
+index 0000000..55a2adf
+--- /dev/null
++++ b/agent-os/proto/config/agent-os.schema.json
+@@ -0,0 +1,313 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://agentos.local/spec/config/v1.json",
++  "title": "Agent OS Configuration v1",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "schema_version",
++    "kernel",
++    "services",
++    "profiles"
++  ],
++  "properties": {
++    "schema_version": {
++      "const": 1
++    },
++    "kernel": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "store"
++      ],
++      "properties": {
++        "store": {
++          "type": "string"
++        },
++        "daemon_identity": {
++          "type": "string"
++        }
++      }
++    },
++    "services": {
++      "type": "object",
++      "additionalProperties": true,
++      "properties": {
++        "event_journal": {
++          "type": "string"
++        },
++        "message_queue": {
++          "type": "string"
++        },
++        "secret_store": {
++          "type": "string"
++        },
++        "transport": {
++          "type": "string"
++        }
++      }
++    },
++    "profiles": {
++      "type": "object",
++      "additionalProperties": {
++        "type": "object",
++        "additionalProperties": true,
++        "properties": {
++          "extends": {
++            "type": "string"
++          },
++          "sandbox": {
++            "type": "string"
++          },
++          "workspace": {
++            "type": "string"
++          },
++          "artifact_store": {
++            "type": "string"
++          },
++          "memory_store": {
++            "type": "string"
++          },
++          "model_provider": {
++            "type": "string"
++          },
++          "tool_runtime": {
++            "type": "string"
++          },
++          "agent_loop": {
++            "type": "string"
++          }
++        }
++      }
++    },
++    "policies": {
++      "type": "object",
++      "description": "Deprecated: legacy untyped policy bag. Use typed sections such as limits instead."
++    },
++    "limits": {
++      "type": "object",
++      "description": "Normative MVP thresholds. Source of truth: specs/limits.yaml; every key must be present.",
++      "additionalProperties": false,
++      "required": [
++        "queue",
++        "adapters",
++        "effects",
++        "runs",
++        "daemon",
++        "approvals",
++        "shutdown",
++        "events",
++        "streams",
++        "fs"
++      ],
++      "properties": {
++        "queue": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "capacity_messages"
++          ],
++          "properties": {
++            "capacity_messages": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "adapters": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "max_frame_bytes",
++            "handshake_timeout_ms",
++            "request_deadline_ms",
++            "health_ping_ms",
++            "health_missed_allowed",
++            "supervisor_max_restarts",
++            "supervisor_backoff_initial_ms",
++            "supervisor_backoff_max_ms"
++          ],
++          "properties": {
++            "max_frame_bytes": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "handshake_timeout_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "request_deadline_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "health_ping_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "health_missed_allowed": {
++              "type": "integer",
++              "minimum": 0
++            },
++            "supervisor_max_restarts": {
++              "type": "integer",
++              "minimum": 0
++            },
++            "supervisor_backoff_initial_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "supervisor_backoff_max_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "effects": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "lease_ms",
++            "lease_renew_ms"
++          ],
++          "properties": {
++            "lease_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "lease_renew_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "runs": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "claim_ttl_ms"
++          ],
++          "properties": {
++            "claim_ttl_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "daemon": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "fence_lease_ms",
++            "fence_renew_ms"
++          ],
++          "properties": {
++            "fence_lease_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "fence_renew_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "approvals": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "ttl_ms"
++          ],
++          "properties": {
++            "ttl_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "shutdown": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "drain_deadline_ms"
++          ],
++          "properties": {
++            "drain_deadline_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "events": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "live_buffer_events",
++            "dispatcher_poll_ms",
++            "scheduler_poll_ms"
++          ],
++          "properties": {
++            "live_buffer_events": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "dispatcher_poll_ms": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "scheduler_poll_ms": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "streams": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "read_default_limit",
++            "read_max_limit"
++          ],
++          "properties": {
++            "read_default_limit": {
++              "type": "integer",
++              "minimum": 1
++            },
++            "read_max_limit": {
++              "type": "integer",
++              "minimum": 1
++            }
++          }
++        },
++        "fs": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "db_file_mode",
++            "runtime_dir_mode",
++            "control_socket_mode"
++          ],
++          "properties": {
++            "db_file_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            },
++            "runtime_dir_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            },
++            "control_socket_mode": {
++              "type": "string",
++              "pattern": "^0[0-7]{3}$"
++            }
++          }
++        }
++      }
++    },
++    "remote_access": {
++      "type": "object"
++    },
++    "observability": {
++      "type": "object"
++    }
++  }
++}
+diff --git a/agent-os/proto/contract-lock.sha256 b/agent-os/proto/contract-lock.sha256
+new file mode 100644
+index 0000000..8471860
+--- /dev/null
++++ b/agent-os/proto/contract-lock.sha256
+@@ -0,0 +1,32 @@
++2478a883d185d1284379cf12b46d8f7edccddeaeeb9d16666c48b0344c48145d  ./README.md
++d1ea4acacd677d0a53d0ad2a628e9364a52c5d03e1c1147f7bb70a9317b03956  ./capabilities/adapter-capabilities.yaml
++d4a122b7c690840ec6b0aaef5cf42242e18f70a88049a25346d1f8a041fdaa3b  ./capabilities/security-capabilities.yaml
++c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0  ./catalog.yaml
++f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625  ./config/agent-os.schema.json
++fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/commands.proto
++89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e  ./control-api/mvp_control.proto
++0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f  ./domain/core.proto
++157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb  ./domain/effects.proto
++41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc  ./domain/entities.proto
++924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
++33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
++eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799  ./events/event.proto
++819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
++92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
++16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto
++a2f02b6baf3a5b0177ba5d65d6db725d7fe589f36c95befe369c0f83aa2386fe  ./ports/common.proto
++afec5f2df4c8d029155df1de4fa3dbf62fc90d3d8f4cab27e1048094c1ad5aab  ./ports/context.proto
++bf6f9a72f5b76e603a7b8f82fdf5bd674ec6a099126745d3b1d17b3c58df4605  ./ports/event_journal.proto
++0a6ae3992bbfca0b67cef7f99753b826147d42319bc9288d7f1d785b152b5bae  ./ports/kernel_store.proto
++2d268f1b76b957df101938039448465d5557951db6580ce7a5df24823331fbd8  ./ports/memory_store.proto
++3dba75ac41b8ee9b835fe68b764cd7c232945a9d96ae842e7218bda108e7ef38  ./ports/message_queue.proto
++2504c73fc48510d7facf0a98e9ac4e9149636b01e1b4ca7784e2277ebe5b7006  ./ports/model.proto
++3dbfb7e7ef5f19a0837b1452d976538a398206b7329e03e8759dbc1d1fac0788  ./ports/sandbox.proto
++f86cbd5b1623bc7c9487149aa96a721c2ab4efde09e904a05cf0d89b79a0d721  ./ports/secret_store.proto
++7a8a71ae34d6f123f86b655829d0994995e675d5aeca281d357703d6dd8b2c47  ./ports/tool_runtime.proto
++163c139e8b3cb7e766677bd1ca783408b05557a872617ac40444412c783037a0  ./ports/transport.proto
++816b8318501e09eeadb79e359d086409b6f7eb1646e84c4c3a1499e6564b40c5  ./ports/workspace.proto
++cdcd8248c4ba66e51357968c8e5399624be3c0a1664bd1710491d497f278231b  ./protocols/adapter_frames.proto
++43c01a57725c8967da5a5c373a041a6d1a68d51ae4281ebf286d4df43f832284  ./protocols/agent_loop.proto
++deea2c5fdb3c13943cb9a6eec1a3582ffeb8aba9cacb781a7457f88886693d10  ./protocols/effect.proto
++a0b6c4d599eed8a2b1e664f4c0a49ea239459a065ee8451a786290fcfda85fdc  ./protocols/external_adapter.proto
+diff --git a/agent-os/proto/control-api/commands.proto b/agent-os/proto/control-api/commands.proto
+new file mode 100644
+index 0000000..b5a0be6
+--- /dev/null
++++ b/agent-os/proto/control-api/commands.proto
+@@ -0,0 +1,139 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++import "domain/core.proto";
++import "domain/entities.proto";
++import "domain/effects.proto";
++import "protocols/agent_loop.proto";
++
++message CreateSession {
++  string session_id = 1;
++  bytes metadata = 2;
++}
++
++message PutAgentSpecRevision {
++  string agent_spec_id = 1;
++  string version = 2;
++  bytes body_bytes = 3;
++  string body_digest = 4;
++}
++
++message CreateTaskRun {
++  string task_id = 1;
++  string run_id = 2;
++  string session_id = 3;
++  string task_kind = 4;
++  bytes task_payload = 5;
++  VersionedRef agent_spec_ref = 6;
++  string parent_run_id = 7;
++  uint64 observed_parent_cancellation_epoch = 8;
++  string requested_profile = 9;
++  string workspace_uri = 10;
++  repeated string requested_capabilities = 11;
++  bytes requested_budget = 12;
++}
++
++message BindRun {
++  string run_id = 1;
++  uint64 expected_run_revision = 2;
++  string config_generation_id = 3;
++  ResolvedRunEnvironment resolved_environment = 4;
++}
++
++message ClaimReadyRun {
++  string run_id = 1;
++  string claim_owner = 2;
++  uint64 claim_ttl_ms = 3;
++}
++
++message AddRunDependency {
++  string source_run_id = 1;
++  string target_run_id = 2;
++  DependencyCondition condition = 3;
++  uint64 expected_graph_revision = 4;
++}
++
++message CancelRun {
++  string run_id = 1;
++  uint64 expected_run_revision = 2;
++  string reason = 3;
++}
++
++message SubmitLoopDecision {
++  LoopDecision decision = 1;
++}
++
++message ResolveUnknownEffect {
++  string effect_id = 1;
++  EffectState expected_effect_state = 2;
++  string action = 3;
++  string result_ref = 4;
++  string reason = 5;
++  string approval_request_id = 6;
++}
++
++message CreateApprovalRequest {
++  string request_id = 1;
++  string request_digest = 2;
++  string principal_id = 3;
++  string actor_id = 4;
++  string run_id = 5;
++  string operation = 6;
++  string target_resource = 7;
++  repeated string capability_ids = 8;
++  string extension_bundle_digest = 9;
++  string config_generation_digest = 10;
++  int64 expires_at_ms = 11;
++  string nonce = 12;
++}
++
++message RespondApproval {
++  string request_id = 1;
++  string request_digest = 2;
++  string decision = 3;
++  string device_id = 4;
++  string responder_principal_id = 5;
++}
++
++message ProposeConfigGeneration {
++  string generation_id = 1;
++  bytes document_bytes = 2;
++  string digest = 3;
++}
++
++message MarkConfigTested {
++  string generation_id = 1;
++  string digest = 2;
++  string test_report_digest = 3;
++  string test_result = 4;
++}
++
++message ActivateConfigGeneration {
++  string generation_id = 1;
++  uint64 expected_active_revision = 2;
++}
++
++message ScheduleTimer {
++  string timer_id = 1;
++  string run_id = 2;
++  string timer_kind = 3;
++  int64 due_at_ms = 4;
++  bytes payload = 5;
++}
++
++message CancelTimer {
++  string timer_id = 1;
++  uint64 expected_version = 2;
++}
++
++message RollbackConfigGeneration {
++  string generation_id = 1;
++  uint64 expected_active_revision = 2;
++  string reason = 3;
++}
++
++message ResolveBlockedRun {
++  string run_id = 1;
++  string action = 2;
++  string reason = 3;
++}
+diff --git a/agent-os/proto/control-api/mvp_control.proto b/agent-os/proto/control-api/mvp_control.proto
+new file mode 100644
+index 0000000..733a5e8
+--- /dev/null
++++ b/agent-os/proto/control-api/mvp_control.proto
+@@ -0,0 +1,81 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++import "domain/core.proto";
++import "domain/effects.proto";
++import "domain/entities.proto";
++import "events/event.proto";
++
++service MvpControlApi {
++  rpc SubmitCommand(CommandRequest) returns (CommandResponse);
++  rpc GetRun(GetRunRequest) returns (GetRunResponse);
++  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
++  rpc GetEffect(GetEffectRequest) returns (GetEffectResponse);
++  rpc GetRunGraph(GetRunGraphRequest) returns (GetRunGraphResponse);
++  rpc GetActiveConfig(GetActiveConfigRequest) returns (GetActiveConfigResponse);
++  rpc ListAdapters(ListAdaptersRequest) returns (ListAdaptersResponse);
++  rpc RespondApproval(ApprovalResponseRequest) returns (ApprovalResponseResult);
++  rpc Health(HealthRequest) returns (HealthResponse);
++}
++
++service MvpEventApi {
++  rpc ReadStream(ReadEventStreamRequest) returns (ReadEventStreamResponse);
++  rpc Subscribe(SubscribeEventsRequest) returns (stream EventStreamFrame);
++}
++
++message CommandRequest {
++  string command_id = 1;
++  string idempotency_key = 2;
++  string principal_id = 3;
++  string actor_id = 4;
++  string device_id = 5;
++  string request_digest = 6;
++  string correlation_id = 7;
++  string causation_id = 8;
++  int64 deadline_unix_ms = 9;
++  string command_type = 10;
++  bytes payload = 11;
++}
++message CommandResponse { string command_id = 1; string outcome_code = 2; bytes payload = 3; }
++
++message GetRunRequest { string run_id = 1; }
++message GetRunResponse { AgentRun run = 1; ResolvedRunEnvironment resolved_environment = 2; }
++message GetTaskRequest { string task_id = 1; }
++message GetTaskResponse { Task task = 1; }
++message GetEffectRequest { string effect_id = 1; }
++message GetEffectResponse { EffectRecord effect = 1; }
++message GetRunGraphRequest { string task_id = 1; }
++message GetRunGraphResponse { RunGraphView graph = 1; }
++message GetActiveConfigRequest {}
++message GetActiveConfigResponse { ConfigGeneration generation = 1; uint64 active_revision = 2; }
++message ListAdaptersRequest { string port_id = 1; }
++message ListAdaptersResponse { repeated AdapterRegistrationView adapters = 1; }
++
++message ApprovalResponseRequest {
++  string request_id = 1;
++  string request_digest = 2;
++  string decision = 3;
++  string device_id = 4;
++  string responder_principal_id = 5;
++}
++message ApprovalResponseResult { string status = 1; }
++
++message HealthRequest {}
++message HealthResponse {
++  string status = 1;
++  string daemon_instance_id = 2;
++  uint64 daemon_fencing_epoch = 3;
++  string active_config_generation_id = 4;
++  uint64 outbox_unpublished_count = 5;
++}
++
++message ReadEventStreamRequest { string stream_key = 1; uint64 from_sequence = 2; uint32 limit = 3; }
++message ReadEventStreamResponse { repeated EventEnvelope events = 1; bool retention_gap = 2; }
++message SubscribeEventsRequest { string stream_key = 1; uint64 after_sequence = 2; }
++message EventStreamFrame {
++  oneof frame {
++    EventEnvelope event = 1;
++    LagNotice lag = 2;
++  }
++}
++message LagNotice { string stream_key = 1; uint64 resume_sequence = 2; }
+diff --git a/agent-os/proto/domain/core.proto b/agent-os/proto/domain/core.proto
+new file mode 100644
+index 0000000..9ff980a
+--- /dev/null
++++ b/agent-os/proto/domain/core.proto
+@@ -0,0 +1,36 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++message VersionedRef { string id = 1; string version = 2; string digest = 3; }
++message ResourceUri { string uri = 1; }
++
++enum RunState { RUN_STATE_UNSPECIFIED=0; CREATED=1; READY=2; RUNNING=3; WAITING_TOOL=4; WAITING_CHILD=5; WAITING_HUMAN=6; SUSPENDED=7; CANCELLING=8; COMPLETED=9; FAILED=10; CANCELLED=11; }
++enum RecoveryDisposition { RECOVERY_UNSPECIFIED=0; NORMAL=1; NEEDS_RECONCILIATION=2; RECOVERING=3; BLOCKED_UNKNOWN_EFFECT=4; BLOCKED_MISSING_RESOURCE=5; REQUIRES_HUMAN_DECISION=6; }
++enum WorkspaceAccessMode { WORKSPACE_MODE_UNSPECIFIED=0; READ_ONLY=1; EXCLUSIVE_WRITE=2; ISOLATED_FORK=3; SHARED_COORDINATED_WRITE=4; }
++
++message AgentRun {
++  string run_id = 1; string task_id = 2; string session_id = 3; string parent_run_id = 4;
++  RunState state = 5; RecoveryDisposition recovery = 6;
++  uint64 run_revision = 7; uint64 loop_epoch = 8; uint64 step_sequence = 9;
++  string input_event_cursor = 10; uint64 cancellation_epoch = 11;
++  string resolved_environment_id = 12;
++  string output_ref = 13;
++  string current_turn_id = 14;
++}
++
++message ResolvedBinding {
++  string port_id = 1; VersionedRef adapter = 2; map<string,string> capabilities = 3;
++}
++message ResolvedRunEnvironment {
++  string id = 1; string run_id = 2; VersionedRef agent_spec = 3; VersionedRef agent_loop = 4;
++  string config_generation_id = 5; repeated ResolvedBinding bindings = 6;
++  ResourceUri workspace_uri = 7; string workspace_base_revision = 8; WorkspaceAccessMode workspace_mode = 9;
++  string model_provider = 10; string model_id = 11; bytes model_parameters_json = 12;
++  string kernel_version = 13; repeated string protocol_versions = 14;
++  repeated string capability_grant_ids = 15; repeated string approval_request_ids = 16;
++}
++
++message WorkspaceLease {
++  string lease_id = 1; string workspace_id = 2; string owner_run_id = 3; WorkspaceAccessMode mode = 4;
++  uint64 lease_epoch = 5; repeated string delegated_from_run_ids = 6;
++}
+diff --git a/agent-os/proto/domain/effects.proto b/agent-os/proto/domain/effects.proto
+new file mode 100644
+index 0000000..3aa59f0
+--- /dev/null
++++ b/agent-os/proto/domain/effects.proto
+@@ -0,0 +1,24 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++enum EffectClass { EFFECT_CLASS_UNSPECIFIED=0; EFFECT_CLASS_READ_ONLY=1; LOCAL_MUTATION=2; EXTERNAL_MUTATION=3; OPAQUE=4; }
++enum IdempotencySemantics { IDEMPOTENCY_UNSPECIFIED=0; NATURALLY_IDEMPOTENT=1; IDEMPOTENCY_KEY_SUPPORTED=2; NOT_IDEMPOTENT=3; UNKNOWN_IDEMPOTENCY=4; }
++enum ReconciliationSemantics { RECONCILIATION_UNSPECIFIED=0; STATUS_LOOKUP=1; RESULT_LOOKUP=2; DETERMINISTIC_INSPECTION=3; IMPOSSIBLE=4; UNKNOWN_RECONCILIATION=5; }
++enum EffectState { EFFECT_STATE_UNSPECIFIED=0; PREPARED=1; CLAIMED=2; DISPATCHED=3; ACKNOWLEDGED=4; COMMITTED=5; EFFECT_STATE_FAILED=6; EFFECT_STATE_CANCELLED=7; UNKNOWN=8; }
++
++message EffectContract {
++  EffectClass effect_class = 1; IdempotencySemantics idempotency = 2; ReconciliationSemantics reconciliation = 3;
++  string cancellation_semantics = 4; string compensation_capability = 5;
++}
++message EffectRecord {
++  string effect_id = 1; string run_id = 2; uint64 step_sequence = 3; string decision_id = 4;
++  string operation = 5; string request_hash = 6; EffectContract effective_contract = 7;
++  string adapter_id = 8; string adapter_version = 9; string adapter_digest = 10;
++  EffectState state = 11; string executor_id = 12; uint64 executor_fencing_token = 13;
++  int64 lease_expires_unix_ms = 14; string result_ref = 15; string error_code = 16;
++}
++
++message ResourceReservation {
++  string reservation_id = 1; string run_id = 2; string resource_type = 3; string state = 4;
++  int64 amount = 5; string unit = 6; uint64 fencing_token = 7;
++}
+diff --git a/agent-os/proto/domain/entities.proto b/agent-os/proto/domain/entities.proto
+new file mode 100644
+index 0000000..0d226fa
+--- /dev/null
++++ b/agent-os/proto/domain/entities.proto
+@@ -0,0 +1,70 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++import "domain/core.proto";
++
++message AgentSpecRevision {
++  string agent_spec_id = 1;
++  string version = 2;
++  string digest = 3;
++  bytes body = 4;
++  int64 created_unix_ms = 5;
++}
++
++message Session {
++  string session_id = 1;
++  string principal_id = 2;
++  bytes metadata = 3;
++  int64 created_unix_ms = 4;
++}
++
++message Task {
++  string task_id = 1;
++  string session_id = 2;
++  string created_by_actor_id = 3;
++  string task_kind = 4;
++  bytes payload = 5;
++  int64 created_unix_ms = 6;
++}
++
++enum DependencyCondition {
++  DEPENDENCY_CONDITION_UNSPECIFIED = 0;
++  COMPLETED_SUCCESSFULLY = 1;
++  ANY_TERMINAL = 2;
++  COMPLETED_OR_CANCELLED = 3;
++}
++
++message RunDependency {
++  string dependency_id = 1;
++  string task_id = 2;
++  string source_run_id = 3;
++  string target_run_id = 4;
++  DependencyCondition condition = 5;
++  uint64 created_graph_revision = 6;
++}
++
++message RunGraphView {
++  string task_id = 1;
++  uint64 graph_revision = 2;
++  repeated AgentRun runs = 3;
++  repeated RunDependency dependencies = 4;
++}
++
++message ConfigGeneration {
++  string generation_id = 1;
++  string digest = 2;
++  bytes document = 3;
++  string validation_state = 4;
++  string test_state = 5;
++  int64 created_unix_ms = 6;
++}
++
++message AdapterRegistrationView {
++  VersionedRef adapter = 1;
++  string manifest_digest = 2;
++  string runtime_type = 3;
++  repeated string implemented_ports = 4;
++  bytes capabilities_json = 5;
++  string trust_state = 6;
++  string conformance_state = 7;
++}
+diff --git a/agent-os/proto/domain/security.proto b/agent-os/proto/domain/security.proto
+new file mode 100644
+index 0000000..71940ef
+--- /dev/null
++++ b/agent-os/proto/domain/security.proto
+@@ -0,0 +1,9 @@
++syntax = "proto3";
++package agentos.spec.v1;
++message DelegationHop { string principal_or_actor_id = 1; string run_id = 2; repeated string capability_grant_ids = 3; }
++message DelegationChain { string principal_id = 1; repeated DelegationHop hops = 2; }
++message ApprovalRequest {
++  string request_id = 1; string request_digest = 2; string actor_id = 3; string run_id = 4;
++  repeated string capability_ids = 5; string target_resource = 6; string operation = 7;
++  string extension_bundle_digest = 8; string config_generation_digest = 9; int64 expires_unix_ms = 10; string nonce = 11;
++}
+diff --git a/agent-os/proto/events/catalog.yaml b/agent-os/proto/events/catalog.yaml
+new file mode 100644
+index 0000000..74dcc36
+--- /dev/null
++++ b/agent-os/proto/events/catalog.yaml
+@@ -0,0 +1,431 @@
++version: 1
++sensitivity_values: [public, internal, confidential, secret]
++retention_values: [ephemeral, standard, audit]
++events:
++  - id: SessionCreated
++    version: 1
++    category: session
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: session/<session-id>
++    produced_by: CreateSession
++  - id: AgentSpecRevisionStored
++    version: 1
++    category: session
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: PutAgentSpecRevision
++  - id: TaskCreated
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: task/<task-id>
++    produced_by: CreateTaskRun
++  - id: RunCreated
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: CreateTaskRun
++  - id: RunReady
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: BindRun
++  - id: RunBound
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: BindRun
++  - id: RunStarted
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: ClaimReadyRun
++  - id: RunWaitingTool
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: RunWaitingChild
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: RunWaitingHuman
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: RunStateChanged
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: RunStateTransition
++  - id: RunCompleted
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: RunFailed
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: RunCancelled
++    version: 1
++    category: runtime
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: CancelRun
++  - id: ChildRunCreated
++    version: 1
++    category: graph
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<parent-run-id>
++    produced_by: CreateTaskRun
++  - id: DependencyAdded
++    version: 1
++    category: graph
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: task/<task-id>
++    produced_by: AddRunDependency
++  - id: RunClaimed
++    version: 1
++    category: graph
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: ClaimReadyRun
++  - id: CancellationEpochAdvanced
++    version: 1
++    category: graph
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: CancelRun
++  - id: LoopTurnIssued
++    version: 1
++    category: loop
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: LoopTurnIssue
++  - id: LoopDecisionAccepted
++    version: 1
++    category: loop
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: LoopDecisionRejectedStale
++    version: 1
++    category: loop
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: SubmitLoopDecision
++  - id: EffectPrepared
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: effect/<effect-id>
++    produced_by: prepare_effect
++  - id: EffectClaimed
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: effect/<effect-id>
++    produced_by: "Prepared -> Claimed"
++  - id: EffectDispatched
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: effect/<effect-id>
++    produced_by: "Claimed -> Dispatched"
++  - id: EffectAcknowledged
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: effect/<effect-id>
++    produced_by: "Dispatched -> Acknowledged"
++  - id: EffectCommitted
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: effect/<effect-id>
++    produced_by: "Acknowledged -> Committed"
++  - id: EffectFailed
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: effect/<effect-id>
++    produced_by: "Dispatched|Acknowledged -> Failed"
++  - id: EffectCancelled
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: effect/<effect-id>
++    produced_by: "Dispatched -> Cancelled"
++  - id: EffectUnknown
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: effect/<effect-id>
++    produced_by: "Dispatched -> Unknown"
++  - id: EffectReconciled
++    version: 1
++    category: effect
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: effect/<effect-id>
++    produced_by: ResolveUnknownEffect
++  - id: TimerScheduled
++    version: 1
++    category: timer
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: ScheduleTimer
++  - id: TimerClaimed
++    version: 1
++    category: timer
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "Scheduled -> Claimed"
++  - id: TimerFired
++    version: 1
++    category: timer
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "Claimed -> Fired"
++  - id: TimerCancelled
++    version: 1
++    category: timer
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "Scheduled -> Cancelled"
++  - id: ResourceReserved
++    version: 1
++    category: resource
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "none -> reserved"
++  - id: ResourceAllocated
++    version: 1
++    category: resource
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "reserved -> allocated"
++  - id: ResourceReleased
++    version: 1
++    category: resource
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: "allocated -> released"
++  - id: ResourceUnknown
++    version: 1
++    category: resource
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: "allocated|reserved -> unknown"
++  - id: WorkspaceLeaseGranted
++    version: 1
++    category: workspace
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: WorkspaceLeaseGrant
++  - id: WorkspaceLeaseTransferred
++    version: 1
++    category: workspace
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: WorkspaceLeaseTransfer
++  - id: WorkspaceForked
++    version: 1
++    category: workspace
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: WorkspaceFork
++  - id: WorkspaceMerged
++    version: 1
++    category: workspace
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: WorkspaceMerge
++  - id: CapabilityRequested
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: PermissionEvaluation
++  - id: CapabilityGranted
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: Allow
++  - id: CapabilityDenied
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: Deny
++  - id: ApprovalRequested
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: CreateApprovalRequest
++  - id: ApprovalResolved
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: RespondApproval
++  - id: SecretActionPerformed
++    version: 1
++    category: security
++    default_sensitivity: confidential
++    default_retention: audit
++    stream_key: security/principal/<principal-id>
++    produced_by: sign_or_act
++  - id: AdapterRegistered
++    version: 1
++    category: adapter
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: adapter/<adapter-id>/<version>/<digest>
++    produced_by: AdapterRegistration
++  - id: AdapterStarted
++    version: 1
++    category: adapter
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: adapter/<adapter-id>/<version>/<digest>
++    produced_by: AdapterInstanceStart
++  - id: AdapterHealthy
++    version: 1
++    category: adapter
++    default_sensitivity: internal
++    default_retention: ephemeral
++    stream_key: adapter/<adapter-id>/<version>/<digest>
++    produced_by: AdapterHealthPing
++  - id: AdapterUnhealthy
++    version: 1
++    category: adapter
++    default_sensitivity: internal
++    default_retention: ephemeral
++    stream_key: adapter/<adapter-id>/<version>/<digest>
++    produced_by: AdapterHealthMiss
++  - id: AdapterStopped
++    version: 1
++    category: adapter
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: adapter/<adapter-id>/<version>/<digest>
++    produced_by: AdapterInstanceStop
++  - id: ConfigProposed
++    version: 1
++    category: config
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: ProposeConfigGeneration
++  - id: ConfigTested
++    version: 1
++    category: config
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: MarkConfigTested
++  - id: ConfigActivated
++    version: 1
++    category: config
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: ActivateConfigGeneration
++  - id: ConfigRolledBack
++    version: 1
++    category: config
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: RollbackConfigGeneration
++  - id: RecoveryStarted
++    version: 1
++    category: recovery
++    default_sensitivity: internal
++    default_retention: standard
++    stream_key: run/<run-id>
++    produced_by: RecoveryReconciliation
++  - id: RunRecoveryDispositionChanged
++    version: 1
++    category: recovery
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: run/<run-id>
++    produced_by: RecoveryReconciliation
++  - id: DaemonFenceAcquired
++    version: 1
++    category: recovery
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: acquire_daemon_fence
++  - id: DaemonFenceLost
++    version: 1
++    category: recovery
++    default_sensitivity: internal
++    default_retention: audit
++    stream_key: config/global
++    produced_by: DaemonAuthorityRelease
+diff --git a/agent-os/proto/events/event.proto b/agent-os/proto/events/event.proto
+new file mode 100644
+index 0000000..5a6d574
+--- /dev/null
++++ b/agent-os/proto/events/event.proto
+@@ -0,0 +1,10 @@
++syntax = "proto3";
++package agentos.spec.v1;
++enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; PRIVATE=3; SECRET=4; }
++enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; SESSION=2; AUDIT=3; DURABLE=4; }
++message EventEnvelope {
++  string event_id=1; string event_type=2; uint32 event_version=3; string stream_key=4; uint64 sequence=5;
++  int64 occurred_unix_ms=6; string run_id=7; string task_id=8; string session_id=9; string effect_id=10;
++  string causation_id=11; string correlation_id=12; Sensitivity sensitivity=13; RetentionClass retention=14;
++  bytes payload=15;
++}
+diff --git a/agent-os/proto/manifests/extension.schema.json b/agent-os/proto/manifests/extension.schema.json
+new file mode 100644
+index 0000000..6e8d43f
+--- /dev/null
++++ b/agent-os/proto/manifests/extension.schema.json
+@@ -0,0 +1,83 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://agentos.local/spec/extension-manifest/v1.json",
++  "title": "Extension Manifest v1",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "manifest_version",
++    "id",
++    "version",
++    "kind",
++    "runtime"
++  ],
++  "properties": {
++    "manifest_version": {
++      "const": 1
++    },
++    "id": {
++      "type": "string",
++      "minLength": 1
++    },
++    "version": {
++      "type": "string",
++      "minLength": 1
++    },
++    "kind": {
++      "enum": [
++        "tool",
++        "skill",
++        "service",
++        "runtime",
++        "adapter"
++      ]
++    },
++    "runtime": {
++      "type": "object",
++      "required": [
++        "type",
++        "entrypoint"
++      ],
++      "properties": {
++        "type": {
++          "enum": [
++            "process",
++            "wasm",
++            "native"
++          ]
++        },
++        "entrypoint": {
++          "type": "string"
++        },
++        "language": {
++          "type": "string"
++        }
++      },
++      "additionalProperties": false
++    },
++    "implements": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      }
++    },
++    "exports": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      }
++    },
++    "requested_capabilities": {
++      "type": "object"
++    },
++    "effect_claims": {
++      "type": "object"
++    },
++    "config_schema": {
++      "type": "string"
++    },
++    "dependency_lock": {
++      "type": "string"
++    }
++  }
++}
+diff --git a/agent-os/proto/ports/agent_loop.proto b/agent-os/proto/ports/agent_loop.proto
+new file mode 100644
+index 0000000..9de0657
+--- /dev/null
++++ b/agent-os/proto/ports/agent_loop.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto"; import "protocols/agent_loop.proto";
++service AgentLoopPort { rpc Next(LoopInput) returns (LoopDecision); rpc Checkpoint(LoopCheckpointRequest) returns (GenericResult); rpc Restore(LoopRestoreRequest) returns (GenericResult); rpc Shutdown(LoopShutdownRequest) returns (GenericResult); }
++message LoopCheckpointRequest { ExecutionContext context=1; bytes loop_private_state=2; }
++message LoopRestoreRequest { ExecutionContext context=1; string checkpoint_ref=2; }
++message LoopShutdownRequest { ExecutionContext context=1; string reason=2; }
+diff --git a/agent-os/proto/ports/artifact_store.proto b/agent-os/proto/ports/artifact_store.proto
+new file mode 100644
+index 0000000..55e6e02
+--- /dev/null
++++ b/agent-os/proto/ports/artifact_store.proto
+@@ -0,0 +1,6 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service ArtifactStorePort { rpc Put(ArtifactPutRequest) returns (ArtifactResult); rpc Get(ArtifactRefRequest) returns (GenericResult); rpc Head(ArtifactRefRequest) returns (GenericResult); rpc List(ArtifactListRequest) returns (GenericResult); rpc Delete(ArtifactRefRequest) returns (GenericResult); }
++message ArtifactPutRequest { ExecutionContext context=1; string logical_name=2; bytes data=3; bytes metadata_json=4; }
++message ArtifactResult { string artifact_uri=1; string version=2; }
++message ArtifactRefRequest { ExecutionContext context=1; string artifact_uri=2; }
++message ArtifactListRequest { ExecutionContext context=1; bytes query_json=2; }
+diff --git a/agent-os/proto/ports/common.proto b/agent-os/proto/ports/common.proto
+new file mode 100644
+index 0000000..f93b424
+--- /dev/null
++++ b/agent-os/proto/ports/common.proto
+@@ -0,0 +1,11 @@
++syntax="proto3";
++package agentos.spec.v1;
++message ExecutionContext {
++  string call_id=1; string operation_id=2; string effect_id=3; string actor_id=4; string run_id=5;
++  string delegation_chain_ref=6; int64 deadline_unix_ms=7; uint64 fencing_token=8; repeated string capability_grant_ids=9;
++}
++message Empty {}
++message StatusRequest { ExecutionContext context=1; string provider_operation_ref=2; }
++message StatusResponse { string status=1; string result_ref=2; string error_code=3; }
++message CancelRequest { ExecutionContext context=1; string provider_operation_ref=2; }
++message GenericResult { bytes payload=1; string error_code=2; }
+diff --git a/agent-os/proto/ports/context.proto b/agent-os/proto/ports/context.proto
+new file mode 100644
+index 0000000..1ed3876
+--- /dev/null
++++ b/agent-os/proto/ports/context.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service ContextPort { rpc Build(ContextBuildRequest) returns (ContextResult); rpc Stream(ContextBuildRequest) returns (stream ContextChunk); }
++message ContextBuildRequest { ExecutionContext context=1; uint64 token_budget=2; repeated string source_uris=3; bytes request_json=4; }
++message ContextResult { bytes bundle_json=1; }
++message ContextChunk { uint64 sequence=1; bytes chunk_json=2; bool terminal=3; }
+diff --git a/agent-os/proto/ports/event_journal.proto b/agent-os/proto/ports/event_journal.proto
+new file mode 100644
+index 0000000..be6c977
+--- /dev/null
++++ b/agent-os/proto/ports/event_journal.proto
+@@ -0,0 +1,10 @@
++syntax="proto3"; package agentos.spec.v1;
++import "events/event.proto";
++service EventJournalPort {
++  rpc Append(AppendEventsRequest) returns (AppendEventsResult);
++  rpc ReadStream(ReadStreamRequest) returns (ReadStreamResult);
++}
++message AppendEventsRequest { string stream_key=1; uint64 expected_sequence=2; repeated EventEnvelope events=3; }
++message AppendEventsResult { uint64 final_sequence=1; }
++message ReadStreamRequest { string stream_key=1; uint64 from_sequence=2; uint32 limit=3; }
++message ReadStreamResult { repeated EventEnvelope events=1; bool retention_gap=2; }
+diff --git a/agent-os/proto/ports/kernel_store.proto b/agent-os/proto/ports/kernel_store.proto
+new file mode 100644
+index 0000000..ae4f7f6
+--- /dev/null
++++ b/agent-os/proto/ports/kernel_store.proto
+@@ -0,0 +1,9 @@
++syntax="proto3"; package agentos.spec.v1;
++service KernelStorePort {
++  rpc ExecuteTransaction(KernelTransactionRequest) returns (KernelTransactionResult);
++  rpc AcquireDaemonFence(AcquireFenceRequest) returns (AcquireFenceResult);
++}
++message KernelTransactionRequest { string transaction_id=1; bytes operations=2; }
++message KernelTransactionResult { bool committed=1; bytes results=2; }
++message AcquireFenceRequest { string daemon_instance_id=1; }
++message AcquireFenceResult { uint64 fencing_epoch=1; int64 lease_expires_unix_ms=2; }
+diff --git a/agent-os/proto/ports/memory_store.proto b/agent-os/proto/ports/memory_store.proto
+new file mode 100644
+index 0000000..6f801ae
+--- /dev/null
++++ b/agent-os/proto/ports/memory_store.proto
+@@ -0,0 +1,7 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service MemoryStorePort { rpc Put(MemoryPutRequest) returns (MemoryResult); rpc Get(MemoryRefRequest) returns (MemoryResult); rpc Search(MemorySearchRequest) returns (GenericResult); rpc Delete(MemoryRefRequest) returns (GenericResult); rpc List(MemoryListRequest) returns (GenericResult); }
++message MemoryPutRequest { ExecutionContext context=1; string namespace=2; bytes memory_record_json=3; }
++message MemoryRefRequest { ExecutionContext context=1; string memory_id=2; }
++message MemorySearchRequest { ExecutionContext context=1; string namespace=2; bytes query_json=3; }
++message MemoryListRequest { ExecutionContext context=1; string namespace=2; string cursor=3; }
++message MemoryResult { string memory_id=1; bytes memory_record_json=2; }
+diff --git a/agent-os/proto/ports/message_queue.proto b/agent-os/proto/ports/message_queue.proto
+new file mode 100644
+index 0000000..9e9029c
+--- /dev/null
++++ b/agent-os/proto/ports/message_queue.proto
+@@ -0,0 +1,8 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service MessageQueuePort { rpc Publish(QueuePublishRequest) returns (QueuePublishResult); rpc Consume(QueueConsumeRequest) returns (stream QueueDelivery); rpc Ack(QueueAckRequest) returns (GenericResult); rpc Nack(QueueNackRequest) returns (GenericResult); }
++message QueuePublishRequest { ExecutionContext context=1; string stream=2; string message_id=3; bytes payload=4; bytes options_json=5; }
++message QueuePublishResult { string message_id=1; }
++message QueueConsumeRequest { ExecutionContext context=1; string subscription=2; bytes options_json=3; }
++message QueueDelivery { string delivery_id=1; string message_id=2; bytes payload=3; }
++message QueueAckRequest { ExecutionContext context=1; string delivery_id=2; }
++message QueueNackRequest { ExecutionContext context=1; string delivery_id=2; bytes options_json=3; }
+diff --git a/agent-os/proto/ports/model.proto b/agent-os/proto/ports/model.proto
+new file mode 100644
+index 0000000..2db1fcb
+--- /dev/null
++++ b/agent-os/proto/ports/model.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service ModelPort { rpc ListModels(Empty) returns (GenericResult); rpc Invoke(ModelInvokeRequest) returns (ModelInvokeResult); rpc Stream(ModelInvokeRequest) returns (stream ModelStreamChunk); rpc Status(StatusRequest) returns (StatusResponse); rpc Cancel(CancelRequest) returns (GenericResult); }
++message ModelInvokeRequest { ExecutionContext context=1; string model_id=2; bytes request_json=3; }
++message ModelInvokeResult { string provider_operation_ref=1; bytes response_json=2; bytes usage_json=3; }
++message ModelStreamChunk { string provider_operation_ref=1; uint64 sequence=2; bytes chunk_json=3; bool terminal=4; }
+diff --git a/agent-os/proto/ports/sandbox.proto b/agent-os/proto/ports/sandbox.proto
+new file mode 100644
+index 0000000..e1a6769
+--- /dev/null
++++ b/agent-os/proto/ports/sandbox.proto
+@@ -0,0 +1,8 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service SandboxPort { rpc Create(SandboxCreateRequest) returns (SandboxCreateResult); rpc Exec(SandboxExecRequest) returns (GenericResult); rpc Status(SandboxStatusRequest) returns (StatusResponse); rpc Checkpoint(SandboxStatusRequest) returns (GenericResult); rpc Restore(SandboxRestoreRequest) returns (SandboxCreateResult); rpc Terminate(SandboxTerminateRequest) returns (GenericResult); }
++message SandboxCreateRequest { ExecutionContext context=1; string trust_tier=2; bytes spec_json=3; }
++message SandboxCreateResult { string sandbox_uri=1; bytes negotiated_capabilities_json=2; }
++message SandboxExecRequest { ExecutionContext context=1; string sandbox_uri=2; bytes exec_json=3; }
++message SandboxStatusRequest { ExecutionContext context=1; string sandbox_uri=2; }
++message SandboxRestoreRequest { ExecutionContext context=1; string checkpoint_uri=2; }
++message SandboxTerminateRequest { ExecutionContext context=1; string sandbox_uri=2; string mode=3; }
+diff --git a/agent-os/proto/ports/secret_store.proto b/agent-os/proto/ports/secret_store.proto
+new file mode 100644
+index 0000000..272d6a0
+--- /dev/null
++++ b/agent-os/proto/ports/secret_store.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service SecretStorePort { rpc Metadata(SecretRefRequest) returns (GenericResult); rpc ResolveForBroker(SecretRefRequest) returns (SecretMaterial); rpc Rotate(SecretRotateRequest) returns (GenericResult); rpc Revoke(SecretRefRequest) returns (GenericResult); }
++message SecretRefRequest { ExecutionContext context=1; string secret_uri=2; }
++message SecretMaterial { bytes material=1; string secret_version=2; }
++message SecretRotateRequest { ExecutionContext context=1; string secret_uri=2; bytes new_material=3; }
+diff --git a/agent-os/proto/ports/tool_runtime.proto b/agent-os/proto/ports/tool_runtime.proto
+new file mode 100644
+index 0000000..e7b1273
+--- /dev/null
++++ b/agent-os/proto/ports/tool_runtime.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service ToolRuntimePort { rpc ListTools(ExecutionContext) returns (GenericResult); rpc Describe(ToolDescribeRequest) returns (GenericResult); rpc Invoke(ToolInvokeRequest) returns (ToolInvokeResult); rpc Status(StatusRequest) returns (StatusResponse); rpc Reconcile(StatusRequest) returns (StatusResponse); rpc Cancel(CancelRequest) returns (GenericResult); }
++message ToolDescribeRequest { ExecutionContext context=1; string tool_id=2; }
++message ToolInvokeRequest { ExecutionContext context=1; string tool_id=2; bytes arguments_json=3; }
++message ToolInvokeResult { string provider_operation_ref=1; bytes result_json=2; }
+diff --git a/agent-os/proto/ports/transport.proto b/agent-os/proto/ports/transport.proto
+new file mode 100644
+index 0000000..fb0df6f
+--- /dev/null
++++ b/agent-os/proto/ports/transport.proto
+@@ -0,0 +1,6 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service TransportPort { rpc Connect(TransportConnectRequest) returns (TransportChannel); rpc Send(TransportSendRequest) returns (GenericResult); rpc Health(TransportChannelRequest) returns (GenericResult); rpc Close(TransportChannelRequest) returns (GenericResult); }
++message TransportConnectRequest { ExecutionContext context=1; string endpoint=2; bytes auth_context_json=3; }
++message TransportChannel { string channel_id=1; bytes capabilities_json=2; }
++message TransportSendRequest { ExecutionContext context=1; string channel_id=2; string frame_id=3; bytes payload=4; }
++message TransportChannelRequest { ExecutionContext context=1; string channel_id=2; }
+diff --git a/agent-os/proto/ports/workspace.proto b/agent-os/proto/ports/workspace.proto
+new file mode 100644
+index 0000000..b264273
+--- /dev/null
++++ b/agent-os/proto/ports/workspace.proto
+@@ -0,0 +1,12 @@
++syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
++service WorkspacePort { rpc Create(WorkspaceCreateRequest) returns (WorkspaceResult); rpc Read(WorkspacePathRequest) returns (GenericResult); rpc Write(WorkspaceWriteRequest) returns (GenericResult); rpc List(WorkspacePathRequest) returns (GenericResult); rpc AcquireLease(WorkspaceLeaseRequest) returns (WorkspaceLeaseResult); rpc TransferExclusiveWrite(WorkspaceTransferRequest) returns (WorkspaceLeaseResult); rpc Fork(WorkspaceForkRequest) returns (WorkspaceResult); rpc Snapshot(WorkspaceRefRequest) returns (GenericResult); rpc Merge(WorkspaceMergeRequest) returns (GenericResult); }
++message WorkspaceCreateRequest { ExecutionContext context=1; bytes spec_json=2; }
++message WorkspaceResult { string workspace_uri=1; string base_revision=2; }
++message WorkspaceRefRequest { ExecutionContext context=1; string workspace_uri=2; }
++message WorkspacePathRequest { ExecutionContext context=1; string workspace_uri=2; string relative_path=3; }
++message WorkspaceWriteRequest { ExecutionContext context=1; string workspace_uri=2; string relative_path=3; bytes data=4; string expected_version=5; }
++message WorkspaceLeaseRequest { ExecutionContext context=1; string workspace_uri=2; string access_mode=3; }
++message WorkspaceLeaseResult { string lease_id=1; uint64 lease_epoch=2; string enforcement=3; }
++message WorkspaceTransferRequest { ExecutionContext context=1; string lease_id=2; string from_run_id=3; string to_run_id=4; uint64 expected_lease_epoch=5; }
++message WorkspaceForkRequest { ExecutionContext context=1; string parent_workspace_uri=2; string parent_revision=3; string child_run_id=4; }
++message WorkspaceMergeRequest { ExecutionContext context=1; string target_workspace_uri=2; string source_workspace_uri=3; bytes merge_policy_json=4; }
+diff --git a/agent-os/proto/protocols/adapter_frames.proto b/agent-os/proto/protocols/adapter_frames.proto
+new file mode 100644
+index 0000000..dbe4102
+--- /dev/null
++++ b/agent-os/proto/protocols/adapter_frames.proto
+@@ -0,0 +1,37 @@
++syntax = "proto3";
++package agentos.spec.v1;
++
++import "protocols/external_adapter.proto";
++import "ports/common.proto";
++
++message PortCallRequest {
++  string call_id = 1;
++  string port_id = 2;
++  string operation = 3;
++  ExecutionContext context = 4;
++  bytes payload = 5;
++}
++
++message PortCallResponse {
++  string call_id = 1;
++  bytes payload = 2;
++  string error_code = 3;
++}
++
++message CancelCall { string call_id = 1; }
++message AdapterPing { string nonce = 1; }
++message AdapterPong { string nonce = 1; }
++message AdapterShutdown { string reason = 1; }
++
++message AdapterFrame {
++  oneof body {
++    AdapterBootstrap bootstrap = 1;
++    AdapterHello hello = 2;
++    PortCallRequest request = 3;
++    PortCallResponse response = 4;
++    CancelCall cancel = 5;
++    AdapterPing ping = 6;
++    AdapterPong pong = 7;
++    AdapterShutdown shutdown = 8;
++  }
++}
+diff --git a/agent-os/proto/protocols/agent_loop.proto b/agent-os/proto/protocols/agent_loop.proto
+new file mode 100644
+index 0000000..5c42ac6
+--- /dev/null
++++ b/agent-os/proto/protocols/agent_loop.proto
+@@ -0,0 +1,19 @@
++syntax="proto3"; package agentos.spec.v1;
++message LoopInput {
++  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
++  string input_event_cursor=5; string turn_id=6; bytes state=7; bytes events=8;
++}
++message LoopDecision {
++  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
++  string input_event_cursor=5; string turn_id=6; string decision_id=7;
++  oneof decision {
++    Complete complete=8; Fail fail=9; Wait wait=10; SpawnAgent spawn_agent=11;
++    InvokeEffect invoke_effect=12; RequestApproval request_approval=13;
++  }
++}
++message Complete { string output_ref=1; }
++message Fail { string reason_code=1; }
++message Wait { string reason=1; string timer_id=2; }
++message SpawnAgent { bytes child_request=1; }
++message InvokeEffect { string operation=1; bytes payload=2; bytes effect_claim=3; }
++message RequestApproval { bytes approval_draft=1; }
+diff --git a/agent-os/proto/protocols/effect.proto b/agent-os/proto/protocols/effect.proto
+new file mode 100644
+index 0000000..b084aab
+--- /dev/null
++++ b/agent-os/proto/protocols/effect.proto
+@@ -0,0 +1,5 @@
++syntax="proto3"; package agentos.spec.v1;
++message EffectExecutionRequest { string effect_id=1; string operation_id=2; string request_hash=3; uint64 fencing_token=4; bytes payload=5; }
++message EffectExecutionResponse { string effect_id=1; string status=2; string result_ref=3; string provider_operation_ref=4; string error_code=5; }
++message EffectStatusRequest { string effect_id=1; string operation_id=2; string provider_operation_ref=3; }
++message EffectStatusResponse { string status=1; string result_ref=2; string error_code=3; }
+diff --git a/agent-os/proto/protocols/external_adapter.proto b/agent-os/proto/protocols/external_adapter.proto
+new file mode 100644
+index 0000000..951ef7b
+--- /dev/null
++++ b/agent-os/proto/protocols/external_adapter.proto
+@@ -0,0 +1,9 @@
++syntax="proto3"; package agentos.spec.v1;
++message AdapterBootstrap {
++  string daemon_instance_id=1; uint64 daemon_fencing_epoch=2; string adapter_instance_id=3;
++  string expected_bundle_digest=4; string bootstrap_nonce=5; uint32 protocol_version=6;
++}
++message AdapterHello {
++  string adapter_instance_id=1; string adapter_id=2; string adapter_version=3; string bundle_digest=4;
++  uint32 protocol_version=5; repeated string implemented_ports=6; bytes capability_document=7;
++}
+diff --git a/agent-os/schema/event_journal.sql b/agent-os/schema/event_journal.sql
+new file mode 100644
+index 0000000..a58a988
+--- /dev/null
++++ b/agent-os/schema/event_journal.sql
+@@ -0,0 +1,18 @@
++-- Event Journal inception schema for events.db.
++-- Extracted verbatim from specs/event-pipeline.md ("Event Journal SQLite schema", C8).
++-- events.db is a downstream durable projection; kernel.db remains the single
++-- authority for current execution correctness (architecture/persistence.md).
++-- This file is self-contained: execute it when events.db is created. It shares
++-- no tables with kernel.db (specs/kernel-store-schema.sql).
++
++CREATE TABLE events (
++  event_id TEXT PRIMARY KEY,
++  stream_key TEXT NOT NULL,
++  sequence INTEGER NOT NULL,
++  event_type TEXT NOT NULL,
++  event_version INTEGER NOT NULL,
++  occurred_at_ms INTEGER NOT NULL,
++  envelope BLOB NOT NULL,
++  UNIQUE(stream_key, sequence)
++);
++CREATE INDEX idx_events_stream ON events(stream_key, sequence);
+diff --git a/agent-os/schema/kernel_store.sql b/agent-os/schema/kernel_store.sql
+new file mode 100644
+index 0000000..2d39fc9
+--- /dev/null
++++ b/agent-os/schema/kernel_store.sql
+@@ -0,0 +1,554 @@
++-- Inception KernelStore schema. Executed verbatim when kernel.db is created.
++-- Normative PRAGMA block (architecture/persistence.md:12-19, R6.3).
++PRAGMA foreign_keys = ON;
++PRAGMA journal_mode = WAL;
++PRAGMA synchronous = FULL;
++PRAGMA busy_timeout = 5000;
++
++CREATE TABLE IF NOT EXISTS kernel_meta (
++  key TEXT PRIMARY KEY,
++  value BLOB NOT NULL
++);
++
++-- Inception schema version (design Data model, R5.2). Only this schema creates tables.
++INSERT OR IGNORE INTO kernel_meta (key, value) VALUES ('schema_version', '1');
++
++CREATE TABLE IF NOT EXISTS daemon_fence (
++  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
++  instance_id TEXT NOT NULL,
++  fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
++  lease_expires_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS agent_specs (
++  agent_spec_id TEXT NOT NULL,
++  version TEXT NOT NULL,
++  digest TEXT NOT NULL,
++  body BLOB NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  PRIMARY KEY (agent_spec_id, version),
++  UNIQUE (digest)
++);
++
++CREATE TABLE IF NOT EXISTS sessions (
++  session_id TEXT PRIMARY KEY,
++  principal_id TEXT NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  metadata BLOB
++);
++
++CREATE TABLE IF NOT EXISTS tasks (
++  task_id TEXT PRIMARY KEY,
++  session_id TEXT,
++  created_by_actor_id TEXT NOT NULL,
++  task_kind TEXT NOT NULL,
++  payload BLOB NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (session_id) REFERENCES sessions(session_id)
++);
++
++CREATE TABLE IF NOT EXISTS resolved_run_environments (
++  environment_id TEXT PRIMARY KEY,
++  run_id TEXT NOT NULL UNIQUE,
++  agent_spec_id TEXT NOT NULL,
++  agent_spec_version TEXT NOT NULL,
++  agent_spec_digest TEXT NOT NULL,
++  agent_loop_id TEXT NOT NULL,
++  agent_loop_version TEXT NOT NULL,
++  agent_loop_digest TEXT NOT NULL,
++  config_generation_id TEXT NOT NULL,
++  workspace_uri TEXT,
++  workspace_base_revision TEXT,
++  workspace_mode INTEGER NOT NULL,
++  model_provider TEXT,
++  model_id TEXT,
++  model_parameters BLOB,
++  kernel_version TEXT NOT NULL,
++  protocol_versions BLOB NOT NULL,
++  capability_grant_ids BLOB NOT NULL,
++  approval_request_ids BLOB NOT NULL,
++  created_at_ms INTEGER NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS runs (
++  run_id TEXT PRIMARY KEY,
++  task_id TEXT NOT NULL,
++  session_id TEXT,
++  parent_run_id TEXT,
++  -- RunState (contracts/domain/core.proto): 1=CREATED, 2=READY, 3=RUNNING, 4=WAITING_TOOL,
++  -- 5=WAITING_CHILD, 6=WAITING_HUMAN, 7=SUSPENDED, 8=CANCELLING, 9=COMPLETED, 10=FAILED,
++  -- 11=CANCELLED. 0=RUN_STATE_UNSPECIFIED is never persisted.
++  state INTEGER NOT NULL CHECK (state BETWEEN 1 AND 11),
++  -- RecoveryDisposition (contracts/domain/core.proto): 1=NORMAL, 2=NEEDS_RECONCILIATION,
++  -- 3=RECOVERING, 4=BLOCKED_UNKNOWN_EFFECT, 5=BLOCKED_MISSING_RESOURCE,
++  -- 6=REQUIRES_HUMAN_DECISION. 0=RECOVERY_UNSPECIFIED is never persisted.
++  recovery_disposition INTEGER NOT NULL CHECK (recovery_disposition BETWEEN 1 AND 6),
++  run_revision INTEGER NOT NULL DEFAULT 0,
++  loop_epoch INTEGER NOT NULL DEFAULT 0,
++  step_sequence INTEGER NOT NULL DEFAULT 0,
++  input_event_cursor TEXT NOT NULL DEFAULT '',
++  cancellation_epoch INTEGER NOT NULL DEFAULT 0,
++  resolved_environment_id TEXT,
++  output_ref TEXT,
++  current_turn_id TEXT,
++  claim_owner TEXT,
++  claim_token INTEGER,
++  claim_expires_ms INTEGER,
++  claim_daemon_epoch INTEGER,
++  terminal_reason TEXT,
++  created_at_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (task_id) REFERENCES tasks(task_id),
++  FOREIGN KEY (parent_run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (resolved_environment_id) REFERENCES resolved_run_environments(environment_id)
++);
++CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
++CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
++CREATE INDEX IF NOT EXISTS idx_runs_state ON runs(state);
++
++CREATE TABLE IF NOT EXISTS resolved_bindings (
++  environment_id TEXT NOT NULL,
++  port_id TEXT NOT NULL,
++  adapter_id TEXT NOT NULL,
++  adapter_version TEXT NOT NULL,
++  adapter_digest TEXT NOT NULL,
++  capabilities BLOB NOT NULL,
++  PRIMARY KEY (environment_id, port_id),
++  FOREIGN KEY (environment_id) REFERENCES resolved_run_environments(environment_id) ON DELETE CASCADE
++);
++
++CREATE TABLE IF NOT EXISTS run_graph_heads (
++  task_id TEXT PRIMARY KEY,
++  graph_revision INTEGER NOT NULL DEFAULT 0,
++  FOREIGN KEY (task_id) REFERENCES tasks(task_id)
++);
++
++CREATE TABLE IF NOT EXISTS run_dependencies (
++  dependency_id TEXT PRIMARY KEY,
++  task_id TEXT NOT NULL,
++  source_run_id TEXT NOT NULL,
++  target_run_id TEXT NOT NULL,
++  -- DependencyCondition (contracts/domain/entities.proto): completed_successfully=COMPLETED_SUCCESSFULLY,
++  -- any_terminal=ANY_TERMINAL, completed_or_cancelled=COMPLETED_OR_CANCELLED.
++  dependency_condition TEXT NOT NULL CHECK (dependency_condition IN ('completed_successfully','any_terminal','completed_or_cancelled')),
++  created_graph_revision INTEGER NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  UNIQUE (source_run_id, target_run_id),
++  FOREIGN KEY (task_id) REFERENCES tasks(task_id),
++  FOREIGN KEY (source_run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (target_run_id) REFERENCES runs(run_id)
++);
++CREATE INDEX IF NOT EXISTS idx_run_dependencies_target ON run_dependencies(target_run_id);
++CREATE INDEX IF NOT EXISTS idx_run_dependencies_source ON run_dependencies(source_run_id);
++
++CREATE TABLE IF NOT EXISTS workspace_leases (
++  lease_id TEXT PRIMARY KEY,
++  workspace_id TEXT NOT NULL,
++  owner_run_id TEXT NOT NULL,
++  -- WorkspaceAccessMode (contracts/domain/core.proto): 1=READ_ONLY, 2=EXCLUSIVE_WRITE,
++  -- 3=ISOLATED_FORK, 4=SHARED_COORDINATED_WRITE. 0=WORKSPACE_MODE_UNSPECIFIED is never persisted.
++  mode INTEGER NOT NULL CHECK (mode BETWEEN 1 AND 4),
++  lease_epoch INTEGER NOT NULL,
++  -- Workspace lease enforcement lifecycle (specs/workspace.md): active -> revoked on transfer.
++  enforcement_state TEXT NOT NULL CHECK (enforcement_state IN ('active','revoked')),
++  delegated_from BLOB NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (owner_run_id) REFERENCES runs(run_id)
++);
++CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_exclusive_lease
++  ON workspace_leases(workspace_id)
++  WHERE mode = 2 AND enforcement_state = 'active';
++
++CREATE TABLE IF NOT EXISTS effects (
++  effect_id TEXT PRIMARY KEY,
++  run_id TEXT NOT NULL,
++  step_sequence INTEGER NOT NULL,
++  decision_id TEXT NOT NULL,
++  operation TEXT NOT NULL,
++  request_hash TEXT NOT NULL,
++  request_payload BLOB NOT NULL,
++  -- EffectClass (contracts/domain/effects.proto): 1=EFFECT_CLASS_READ_ONLY, 2=LOCAL_MUTATION,
++  -- 3=EXTERNAL_MUTATION, 4=OPAQUE. 0=EFFECT_CLASS_UNSPECIFIED is never persisted.
++  effect_class INTEGER NOT NULL CHECK (effect_class BETWEEN 1 AND 4),
++  -- IdempotencySemantics (contracts/domain/effects.proto): 1=NATURALLY_IDEMPOTENT,
++  -- 2=IDEMPOTENCY_KEY_SUPPORTED, 3=NOT_IDEMPOTENT, 4=UNKNOWN_IDEMPOTENCY.
++  -- 0=IDEMPOTENCY_UNSPECIFIED is never persisted.
++  idempotency_semantics INTEGER NOT NULL CHECK (idempotency_semantics BETWEEN 1 AND 4),
++  -- ReconciliationSemantics (contracts/domain/effects.proto): 1=STATUS_LOOKUP, 2=RESULT_LOOKUP,
++  -- 3=DETERMINISTIC_INSPECTION, 4=IMPOSSIBLE, 5=UNKNOWN_RECONCILIATION.
++  -- 0=RECONCILIATION_UNSPECIFIED is never persisted.
++  reconciliation_semantics INTEGER NOT NULL CHECK (reconciliation_semantics BETWEEN 1 AND 5),
++  cancellation_semantics TEXT NOT NULL,
++  compensation_capability TEXT,
++  adapter_id TEXT NOT NULL,
++  adapter_version TEXT NOT NULL,
++  adapter_digest TEXT NOT NULL,
++  -- EffectState (contracts/domain/effects.proto): 1=PREPARED, 2=CLAIMED, 3=DISPATCHED,
++  -- 4=ACKNOWLEDGED, 5=COMMITTED, 6=EFFECT_STATE_FAILED, 7=EFFECT_STATE_CANCELLED, 8=UNKNOWN.
++  -- 0=EFFECT_STATE_UNSPECIFIED is never persisted.
++  state INTEGER NOT NULL CHECK (state BETWEEN 1 AND 8),
++  executor_id TEXT,
++  executor_fencing_token INTEGER,
++  daemon_fencing_epoch INTEGER,
++  lease_expires_ms INTEGER,
++  provider_operation_ref TEXT,
++  result_ref TEXT,
++  error_code TEXT,
++  created_at_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL,
++  UNIQUE (run_id, decision_id, operation, request_hash),
++  FOREIGN KEY (run_id) REFERENCES runs(run_id)
++);
++CREATE INDEX IF NOT EXISTS idx_effects_state ON effects(state);
++CREATE INDEX IF NOT EXISTS idx_effects_run ON effects(run_id);
++
++CREATE TABLE IF NOT EXISTS resource_reservations (
++  reservation_id TEXT PRIMARY KEY,
++  run_id TEXT NOT NULL,
++  resource_type TEXT NOT NULL,
++  state TEXT NOT NULL CHECK (state IN ('reserved','allocated','released','expired','unknown')),
++  amount INTEGER NOT NULL,
++  unit TEXT NOT NULL,
++  fencing_token INTEGER NOT NULL,
++  parent_reservation_id TEXT,
++  created_at_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (parent_reservation_id) REFERENCES resource_reservations(reservation_id)
++);
++CREATE INDEX IF NOT EXISTS idx_reservations_run ON resource_reservations(run_id);
++
++CREATE TABLE IF NOT EXISTS timers (
++  timer_id TEXT PRIMARY KEY,
++  run_id TEXT,
++  timer_kind TEXT NOT NULL,
++  payload BLOB NOT NULL,
++  due_at_ms INTEGER NOT NULL,
++  state TEXT NOT NULL CHECK (state IN ('scheduled','claimed','fired','cancelled')),
++  version INTEGER NOT NULL DEFAULT 0,
++  claim_owner TEXT,
++  claim_fencing_token INTEGER,
++  claim_daemon_epoch INTEGER,
++  created_at_ms INTEGER NOT NULL,
++  updated_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (run_id) REFERENCES runs(run_id)
++);
++CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(state, due_at_ms);
++
++CREATE TABLE IF NOT EXISTS capability_grants (
++  grant_id TEXT PRIMARY KEY,
++  principal_id TEXT NOT NULL,
++  actor_id TEXT NOT NULL,
++  run_id TEXT,
++  capability_id TEXT NOT NULL,
++  scope BLOB NOT NULL,
++  delegated_from_grant_id TEXT,
++  expires_at_ms INTEGER,
++  revoked_at_ms INTEGER,
++  created_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (delegated_from_grant_id) REFERENCES capability_grants(grant_id)
++);
++
++CREATE TABLE IF NOT EXISTS delegation_hops (
++  chain_id TEXT NOT NULL,
++  hop_index INTEGER NOT NULL,
++  principal_or_actor_id TEXT NOT NULL,
++  run_id TEXT,
++  capability_grant_ids BLOB NOT NULL,
++  PRIMARY KEY (chain_id, hop_index),
++  FOREIGN KEY (run_id) REFERENCES runs(run_id)
++);
++
++CREATE TABLE IF NOT EXISTS approval_requests (
++  request_id TEXT PRIMARY KEY,
++  request_digest TEXT NOT NULL,
++  principal_id TEXT NOT NULL,
++  actor_id TEXT NOT NULL,
++  run_id TEXT,
++  operation TEXT NOT NULL,
++  target_resource TEXT,
++  capability_ids BLOB NOT NULL,
++  extension_bundle_digest TEXT,
++  config_generation_digest TEXT,
++  expires_at_ms INTEGER NOT NULL,
++  nonce TEXT NOT NULL,
++  state TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
++  created_at_ms INTEGER NOT NULL,
++  resolved_at_ms INTEGER,
++  UNIQUE (request_digest, nonce)
++);
++
++CREATE TABLE IF NOT EXISTS approval_responses (
++  request_id TEXT PRIMARY KEY,
++  request_digest TEXT NOT NULL,
++  decision TEXT NOT NULL CHECK (decision IN ('approve','deny')),
++  device_id TEXT NOT NULL,
++  responder_principal_id TEXT NOT NULL,
++  responded_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (request_id) REFERENCES approval_requests(request_id)
++);
++
++CREATE TABLE IF NOT EXISTS adapter_registrations (
++  adapter_id TEXT NOT NULL,
++  version TEXT NOT NULL,
++  bundle_digest TEXT NOT NULL,
++  manifest_digest TEXT NOT NULL,
++  runtime_type TEXT NOT NULL,
++  implemented_ports BLOB NOT NULL,
++  capabilities BLOB NOT NULL,
++  -- Adapter trust lifecycle (specs/adapter-registry.md).
++  trust_state TEXT NOT NULL CHECK (trust_state IN ('trusted','untrusted')),
++  -- Conformance lifecycle (specs/adapter-registry.md, ADP-006): reports bind to exact identity.
++  conformance_state TEXT NOT NULL CHECK (conformance_state IN ('untested','passed','failed')),
++  created_at_ms INTEGER NOT NULL,
++  PRIMARY KEY (adapter_id, version, bundle_digest)
++);
++
++CREATE TABLE IF NOT EXISTS config_generations (
++  generation_id TEXT PRIMARY KEY,
++  digest TEXT NOT NULL UNIQUE,
++  document BLOB NOT NULL,
++  -- Config generation pipeline (specs/config-engine.md): proposed -> validated -> tested.
++  validation_state TEXT NOT NULL CHECK (validation_state IN ('proposed','validated','rejected')),
++  test_state TEXT NOT NULL CHECK (test_state IN ('untested','passed','failed')),
++  created_by_actor_id TEXT NOT NULL,
++  created_at_ms INTEGER NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS active_config_generation (
++  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
++  generation_id TEXT NOT NULL,
++  revision INTEGER NOT NULL,
++  activated_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (generation_id) REFERENCES config_generations(generation_id)
++);
++
++CREATE TABLE IF NOT EXISTS idempotency_records (
++  principal_id TEXT NOT NULL,
++  idempotency_key TEXT NOT NULL,
++  request_digest TEXT NOT NULL,
++  command_id TEXT NOT NULL,
++  outcome_code TEXT NOT NULL,
++  outcome_payload BLOB NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  PRIMARY KEY (principal_id, idempotency_key)
++);
++
++CREATE TABLE IF NOT EXISTS event_stream_heads (
++  stream_key TEXT PRIMARY KEY,
++  last_sequence INTEGER NOT NULL DEFAULT 0
++);
++
++CREATE TABLE IF NOT EXISTS outbox_events (
++  event_id TEXT PRIMARY KEY,
++  event_type TEXT NOT NULL,
++  event_version INTEGER NOT NULL,
++  stream_key TEXT NOT NULL,
++  sequence INTEGER NOT NULL,
++  occurred_at_ms INTEGER NOT NULL,
++  run_id TEXT,
++  task_id TEXT,
++  session_id TEXT,
++  effect_id TEXT,
++  causation_id TEXT,
++  correlation_id TEXT,
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  -- 0=SENSITIVITY_UNSPECIFIED is never persisted.
++  sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
++  -- 0=RETENTION_UNSPECIFIED is never persisted.
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  payload BLOB NOT NULL,
++  journal_published_at_ms INTEGER,
++  live_published_at_ms INTEGER,
++  UNIQUE (stream_key, sequence)
++);
++CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
++  ON outbox_events(journal_published_at_ms, stream_key, sequence);
++
++-- ---------------------------------------------------------------------------
++-- GC-3 new durable records (design.md Data model, R5.1)
++-- ---------------------------------------------------------------------------
++
++CREATE TABLE IF NOT EXISTS artifacts (
++  artifact_id TEXT PRIMARY KEY,
++  uri TEXT NOT NULL UNIQUE,
++  digest TEXT NOT NULL,
++  media_type TEXT NOT NULL,
++  size_bytes INTEGER NOT NULL,
++  origin_run_id TEXT NOT NULL,
++  origin_effect_id TEXT,
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  locator TEXT NOT NULL,
++  created_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (origin_run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (origin_effect_id) REFERENCES effects(effect_id)
++);
++
++CREATE TABLE IF NOT EXISTS workspaces (
++  workspace_id TEXT PRIMARY KEY,
++  kind TEXT NOT NULL,
++  base_revision TEXT,
++  parent_workspace_id TEXT,
++  created_at_ms INTEGER NOT NULL,
++  FOREIGN KEY (parent_workspace_id) REFERENCES workspaces(workspace_id)
++);
++
++CREATE TABLE IF NOT EXISTS loop_turns (
++  turn_id TEXT PRIMARY KEY,
++  run_id TEXT NOT NULL,
++  run_revision INTEGER NOT NULL,
++  loop_epoch INTEGER NOT NULL,
++  step_sequence INTEGER NOT NULL,
++  input_event_cursor TEXT NOT NULL,
++  -- Turn lifecycle (specs/runtime-manager.md): issued -> accepted; stale = fenced-out response.
++  state TEXT NOT NULL CHECK (state IN ('issued','accepted','stale')),
++  issued_at_ms INTEGER NOT NULL,
++  UNIQUE (run_id, turn_id),
++  FOREIGN KEY (run_id) REFERENCES runs(run_id)
++);
++
++CREATE TABLE IF NOT EXISTS decisions (
++  decision_id TEXT PRIMARY KEY,
++  run_id TEXT NOT NULL,
++  turn_id TEXT NOT NULL,
++  -- Persisted literals are the canonical LoopDecision message names
++  -- (contracts/protocols/agent_loop.proto; specs/command-catalog.md:94-101).
++  decision_type TEXT NOT NULL CHECK (decision_type IN ('Complete','Fail','Wait','SpawnAgent','InvokeEffect','RequestApproval')),
++  decision_digest TEXT NOT NULL,
++  decision_bytes BLOB NOT NULL,
++  run_revision INTEGER NOT NULL,
++  loop_epoch INTEGER NOT NULL,
++  step_sequence INTEGER NOT NULL,
++  input_event_cursor TEXT NOT NULL,
++  accepted_at_ms INTEGER NOT NULL,
++  UNIQUE (run_id, decision_id),
++  FOREIGN KEY (run_id) REFERENCES runs(run_id),
++  FOREIGN KEY (turn_id) REFERENCES loop_turns(turn_id)
++);
++
++CREATE TABLE IF NOT EXISTS adapter_instances (
++  adapter_instance_id TEXT PRIMARY KEY,
++  adapter_id TEXT NOT NULL,
++  adapter_version TEXT NOT NULL,
++  bundle_digest TEXT NOT NULL,
++  daemon_instance_id TEXT NOT NULL,
++  pid INTEGER,
++  process_start_identity TEXT,
++  -- Instance lifecycle (specs/process-supervisor.md): starting -> ready -> exited|failed.
++  state TEXT NOT NULL CHECK (state IN ('starting','ready','exited','failed')),
++  exit_reason TEXT,
++  last_heartbeat_ms INTEGER,
++  started_at_ms INTEGER NOT NULL,
++  ended_at_ms INTEGER,
++  FOREIGN KEY (adapter_id, adapter_version, bundle_digest)
++    REFERENCES adapter_registrations(adapter_id, version, bundle_digest)
++);
++
++CREATE TABLE IF NOT EXISTS conformance_reports (
++  adapter_id TEXT NOT NULL,
++  adapter_version TEXT NOT NULL,
++  bundle_digest TEXT NOT NULL,
++  report_digest TEXT NOT NULL,
++  harness_version TEXT NOT NULL,
++  -- Conformance outcome (specs/adapter-registry.md, ADP-006).
++  result TEXT NOT NULL CHECK (result IN ('pass','fail')),
++  run_at_ms INTEGER NOT NULL,
++  details BLOB,
++  PRIMARY KEY (adapter_id, adapter_version, bundle_digest),
++  FOREIGN KEY (adapter_id, adapter_version, bundle_digest)
++    REFERENCES adapter_registrations(adapter_id, version, bundle_digest)
++);
++
++-- ---------------------------------------------------------------------------
++-- Immutability triggers (design.md Data model, R5.4)
++-- ---------------------------------------------------------------------------
++
++CREATE TRIGGER IF NOT EXISTS trg_resolved_run_environments_update
++BEFORE UPDATE ON resolved_run_environments
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_resolved_run_environments_delete
++BEFORE DELETE ON resolved_run_environments
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_resolved_bindings_update
++BEFORE UPDATE ON resolved_bindings
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_resolved_bindings_delete
++BEFORE DELETE ON resolved_bindings
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_agent_specs_update
++BEFORE UPDATE ON agent_specs
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_agent_specs_delete
++BEFORE DELETE ON agent_specs
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_approval_requests_update
++BEFORE UPDATE ON approval_requests
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_approval_requests_delete
++BEFORE DELETE ON approval_requests
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_conformance_reports_update
++BEFORE UPDATE ON conformance_reports
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++CREATE TRIGGER IF NOT EXISTS trg_conformance_reports_delete
++BEFORE DELETE ON conformance_reports
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;
++
++-- Outbox rows are immutable except publication metadata
++-- (journal_published_at_ms, live_published_at_ms; architecture/persistence.md:37-44).
++CREATE TRIGGER IF NOT EXISTS trg_outbox_events_publication_only
++BEFORE UPDATE ON outbox_events
++WHEN OLD.event_id IS NOT NEW.event_id
++  OR OLD.event_type IS NOT NEW.event_type
++  OR OLD.event_version IS NOT NEW.event_version
++  OR OLD.stream_key IS NOT NEW.stream_key
++  OR OLD.sequence IS NOT NEW.sequence
++  OR OLD.occurred_at_ms IS NOT NEW.occurred_at_ms
++  OR OLD.run_id IS NOT NEW.run_id
++  OR OLD.task_id IS NOT NEW.task_id
++  OR OLD.session_id IS NOT NEW.session_id
++  OR OLD.effect_id IS NOT NEW.effect_id
++  OR OLD.causation_id IS NOT NEW.causation_id
++  OR OLD.correlation_id IS NOT NEW.correlation_id
++  OR OLD.sensitivity IS NOT NEW.sensitivity
++  OR OLD.retention IS NOT NEW.retention
++  OR OLD.payload IS NOT NEW.payload
++BEGIN
++  SELECT RAISE(ABORT, 'immutable record');
++END;

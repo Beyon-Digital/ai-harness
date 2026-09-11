@@ -82,8 +82,8 @@
 
 ### Task GC-2: Align the command and event catalogs
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc2
 - depends_on: GC-1, GC-3, GC-5
 - files: `agent-os-microkernel-mvp-buildpack/specs/command-catalog.md`, `agent-os-microkernel-mvp-buildpack/specs/command-coordinator.md`, `agent-os-microkernel-mvp-buildpack/specs/event-catalog.md`, `agent-os-microkernel-mvp-buildpack/contracts/events/catalog.yaml`, `agent-os-microkernel-mvp-buildpack/specs/README.md`
 - requirements: R2.4, R8.1, R8.2, R8.3, R8.4, R9.1, R9.2, R9.3, R9.4
@@ -269,8 +269,8 @@
 
 ### Task GC-6: Repair the DAG sources and add the sync script
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-gc6
 - depends_on: GC-1, GC-3, GC-5
 - files: `agent-os-microkernel-mvp-buildpack/dag.yaml`, `agent-os-microkernel-mvp-buildpack/dag.json`, `agent-os-microkernel-mvp-buildpack/DAG.md`, `agent-os-microkernel-mvp-buildpack/tasks.csv`, `agent-os-microkernel-mvp-buildpack/scripts/sync_dag_sources.py`, `agent-os-microkernel-mvp-buildpack/tasks/FND-001.md`, `agent-os-microkernel-mvp-buildpack/tasks/FND-002.md`, `agent-os-microkernel-mvp-buildpack/tasks/API-001.md`, `agent-os-microkernel-mvp-buildpack/tasks/RUN-002.md`, `agent-os-microkernel-mvp-buildpack/tasks/CFG-002.md`
 - requirements: R11.1, R11.2, R11.3, R11.4, G2
@@ -314,9 +314,9 @@
 
 ### Task GC-7: Extend the validator, regenerate the lock and manifest
 
-- status: pending
-- owner: -
-- depends_on: GC-1, GC-2, GC-3, GC-4, GC-5, GC-6
+- status: done
+- owner: agent-gc7
+- depends_on: GC-1, GC-2, GC-3, GC-4, GC-5, GC-6, GC-8
 - files: `agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py`, `agent-os-microkernel-mvp-buildpack/scripts/test_validator_mutations.sh`, `agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256`, `agent-os-microkernel-mvp-buildpack/MANIFEST.json`
 - requirements: R1.4, R12.1, R12.2, N3, G1, G2
 - scope: large
@@ -326,7 +326,7 @@
 
 **Context the implementer cannot infer:**
 
-- Add checks to `validate_buildpack.py`: (a) module-root ownership — every path matching a crate source file has exactly one owning task and no same-wave pair writes the same path; (b) limits — every required key from `specs/limits.yaml` is present and numeric, with the required-key list hard-coded from design GC-5; (c) schema coverage — the `CREATE TABLE` set includes the six new tables from design GC-3 and the fifteen CHECK-constrained columns; (d) DAG-source equality — `dag.yaml`, `dag.json`, `DAG.md` mermaid edges, `tasks.csv`, and every `tasks/*.md` dependency line agree on ids, edges, titles, tests (extend the existing partial test equality check); (e) event-catalog equality — ids in `contracts/events/catalog.yaml` equal those in `specs/event-catalog.md`; (f) `MANIFEST.json` count and every hash; (g) duplicate proto symbols; (h) new CLI flags `--update-lock` (rewrite `contracts/contract-lock.sha256`) and `--write-manifest` (rewrite `MANIFEST.json` with the true count including itself).
+- Add checks to `validate_buildpack.py`: (a) module-root ownership — every path matching a crate source file has exactly one owning task and no same-wave pair writes the same path; (b) limits — every required key from `specs/limits.yaml` is present and numeric, with the required-key list hard-coded from design GC-5; (c) schema coverage — the `CREATE TABLE` set includes the six new tables from design GC-3 and the fifteen CHECK-constrained columns; (d) DAG-source equality — `dag.yaml`, `dag.json`, `DAG.md` mermaid edges, `tasks.csv`, and every `tasks/*.md` dependency line agree on ids, edges, titles, tests (extend the existing partial test equality check); (e) event-catalog equality — ids in `contracts/events/catalog.yaml` equal those in `specs/event-catalog.md`; (f) `MANIFEST.json` count and every hash; (g) duplicate proto symbols — messages, services, and top-level enum values within a package — plus the existing CLI flags `--update-lock` (rewrite `contracts/contract-lock.sha256`) and `--write-manifest` (rewrite `MANIFEST.json` with the true count including itself).
 - `scripts/test_validator_mutations.sh` copies the pack to a temporary directory, applies one mutation per defect class (drop a table name, delete a limits key, break a DAG edge, corrupt a manifest hash, duplicate a proto message, add an unbounded glob), runs the validator against the copy with `SPECFLOW`-style path override if needed or from inside the copy's parent, and asserts exit 2 for each. The script must clean up and exit non-zero if any mutation is not caught.
 - Regenerate the lock and manifest LAST, after the validator changes, using the new flags. Every contract file changed by GC-1, GC-2, and GC-5 must be reflected (R1.4, N3).
 - Keep the existing `BUILD PACK OK` success line and exit codes.
@@ -356,6 +356,51 @@
 - [ ] `python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py` prints `BUILD PACK OK`
 - [ ] `python3 tools/validate_repo.py` prints `OK`
 - [ ] `python3 -c "import json; m=json.load(open('agent-os-microkernel-mvp-buildpack/MANIFEST.json')); print(m['file_count']==len(m['files'])+1 or m['file_count']==len(m['files']))"` prints `True`
+
+---
+
+### Task GC-8: Resolve duplicate protobuf enum value symbols
+
+- status: done
+- owner: agent-gc8
+- depends_on: GC-1, GC-3, GC-4
+- files: `agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto`, `agent-os-microkernel-mvp-buildpack/contracts/catalog.yaml`, `agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql`, `agent-os-microkernel-mvp-buildpack/specs/effect-coordinator.md`, `agent-os-microkernel-mvp-buildpack/specs/recovery-table.md`, `agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md`
+- requirements: R1.1, R1.2
+- scope: small
+- model: standard
+
+**Objective:** The contract snapshot compiles: no two top-level enums in package `agentos.spec.v1` define the same value name.
+
+**Context the implementer cannot infer:**
+
+- protoc rejects three package-scope duplicates: `READ_ONLY` (`WorkspaceAccessMode` in `core.proto` vs `EffectClass` in `effects.proto`), `FAILED` and `CANCELLED` (`RunState` in `core.proto` vs `EffectState` in `effects.proto`). FND-002's scratch probe confirmed renaming the effects-side values makes the whole snapshot compile.
+- Rename only the effects side: `EffectClass.READ_ONLY` becomes `EFFECT_CLASS_READ_ONLY`; `EffectState.FAILED` becomes `EFFECT_STATE_FAILED`; `EffectState.CANCELLED` becomes `EFFECT_STATE_CANCELLED`. Do not touch `core.proto` or the canonical repo-root `spec/` tree.
+- Update every effect-side reference in the leased files: the `effect_classes` list in `contracts/catalog.yaml`; the enum comments at `specs/kernel-store-schema.sql:172` (EffectClass) and `:189` (EffectState); the `EffectClass` rendering at `specs/effect-coordinator.md:11`; the settled effect states at `specs/recovery-table.md:16`.
+- Leave run-state and workspace-mode references unchanged: `specs/kernel-store-schema.sql:80-81` and `:149`, `specs/workspace.md:12`, the `workspace_modes` list in `contracts/catalog.yaml`, and the error code at `specs/error-model.md:43` are not effect-side.
+- Document the correction in `SOURCE_CORRECTIONS.md` next to the version-const corrections: the canonical `spec/` tree keeps the unprefixed names; this pack snapshot diverges so protobuf code generation works.
+- Do not touch `contract-lock.sha256` (task GC-7 regenerates it).
+
+**Steps:**
+
+- [ ] Rename the three enum values and update every effect-side reference in the leased files
+- [ ] Run this duplicate scan and expect zero output:
+      `python3 -c "import re,pathlib,collections; vals=collections.defaultdict(list); [ [vals[(m.group(1) if (m:=re.search(r'^package\\s+([\\w.]+)\\s*;', p.read_text(), re.M)) else '', v.group(1))].append(str(p)) for em in re.finditer(r'enum\\s+(\\w+)\\s*\\{(.*?)\\}', p.read_text(), re.S) for v in re.finditer(r'([A-Z][A-Z0-9_]*)\\s*=\\s*\\d+', em.group(2))] for p in pathlib.Path('agent-os-microkernel-mvp-buildpack/contracts').rglob('*.proto')]; print([k for k,l in vals.items() if len(l)>1])"`
+- [ ] Run `python3 tools/validate_repo.py` and confirm `OK`
+- [ ] Commit: `docs(contracts): rename colliding effect enum values [GC-8]`
+
+**Acceptance criteria:**
+
+- [ ] R1.1 — no duplicate message, service, or enum value symbol within a package
+- [ ] R1.2 — effects-side values renamed; `core.proto` untouched
+- [ ] effect-side references updated in all six leased files; run-state/workspace-mode references untouched
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] The duplicate scan prints `[]`
+- [ ] `grep -n 'EFFECT_CLASS_READ_ONLY\|EFFECT_STATE_FAILED\|EFFECT_STATE_CANCELLED' agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto` shows all three
+- [ ] `grep -c 'READ_ONLY' agent-os-microkernel-mvp-buildpack/contracts/domain/core.proto` is unchanged
+- [ ] `python3 tools/validate_repo.py` prints `OK`
 
 ---
 
@@ -411,19 +456,21 @@
 
 ### Task FND-002: Install the contract mirror and hermetic code generation
 
-- status: pending
-- owner: -
-- depends_on: FND-001, GC-1, GC-3
-- files: `agent-os/proto/catalog.yaml`, `agent-os/proto/contract-lock.sha256`, `agent-os/proto/capabilities/adapter-capabilities.yaml`, `agent-os/proto/capabilities/security-capabilities.yaml`, `agent-os/proto/config/agent-os.schema.json`, `agent-os/proto/control-api/commands.proto`, `agent-os/proto/control-api/mvp_control.proto`, `agent-os/proto/domain/core.proto`, `agent-os/proto/domain/effects.proto`, `agent-os/proto/domain/entities.proto`, `agent-os/proto/domain/security.proto`, `agent-os/proto/events/catalog.yaml`, `agent-os/proto/events/event.proto`, `agent-os/proto/manifests/extension.schema.json`, `agent-os/proto/ports/agent_loop.proto`, `agent-os/proto/ports/artifact_store.proto`, `agent-os/proto/ports/common.proto`, `agent-os/proto/ports/context.proto`, `agent-os/proto/ports/event_journal.proto`, `agent-os/proto/ports/kernel_store.proto`, `agent-os/proto/ports/memory_store.proto`, `agent-os/proto/ports/message_queue.proto`, `agent-os/proto/ports/model.proto`, `agent-os/proto/ports/sandbox.proto`, `agent-os/proto/ports/secret_store.proto`, `agent-os/proto/ports/tool_runtime.proto`, `agent-os/proto/ports/transport.proto`, `agent-os/proto/ports/workspace.proto`, `agent-os/proto/protocols/adapter_frames.proto`, `agent-os/proto/protocols/agent_loop.proto`, `agent-os/proto/protocols/effect.proto`, `agent-os/proto/protocols/external_adapter.proto`, `agent-os/schema/kernel_store.sql`, `agent-os/schema/event_journal.sql`, `agent-os/crates/domain/build.rs`, `agent-os/crates/domain/src/generated.rs`, `agent-os/crates/domain/tests/contract_codegen.rs`
+- status: done
+- owner: agent-fnd002
+- depends_on: FND-001, GC-1, GC-3, GC-8
+- files: `agent-os/proto/catalog.yaml`, `agent-os/proto/contract-lock.sha256`, `agent-os/proto/README.md`, `agent-os/proto/capabilities/adapter-capabilities.yaml`, `agent-os/proto/capabilities/security-capabilities.yaml`, `agent-os/proto/config/agent-os.schema.json`, `agent-os/proto/control-api/commands.proto`, `agent-os/proto/control-api/mvp_control.proto`, `agent-os/proto/domain/core.proto`, `agent-os/proto/domain/effects.proto`, `agent-os/proto/domain/entities.proto`, `agent-os/proto/domain/security.proto`, `agent-os/proto/events/catalog.yaml`, `agent-os/proto/events/event.proto`, `agent-os/proto/manifests/extension.schema.json`, `agent-os/proto/ports/agent_loop.proto`, `agent-os/proto/ports/artifact_store.proto`, `agent-os/proto/ports/common.proto`, `agent-os/proto/ports/context.proto`, `agent-os/proto/ports/event_journal.proto`, `agent-os/proto/ports/kernel_store.proto`, `agent-os/proto/ports/memory_store.proto`, `agent-os/proto/ports/message_queue.proto`, `agent-os/proto/ports/model.proto`, `agent-os/proto/ports/sandbox.proto`, `agent-os/proto/ports/secret_store.proto`, `agent-os/proto/ports/tool_runtime.proto`, `agent-os/proto/ports/transport.proto`, `agent-os/proto/ports/workspace.proto`, `agent-os/proto/protocols/adapter_frames.proto`, `agent-os/proto/protocols/agent_loop.proto`, `agent-os/proto/protocols/effect.proto`, `agent-os/proto/protocols/external_adapter.proto`, `agent-os/schema/kernel_store.sql`, `agent-os/schema/event_journal.sql`, `agent-os/crates/domain/build.rs`, `agent-os/crates/domain/src/generated.rs`, `agent-os/crates/domain/tests/contract_codegen.rs`
 - requirements: R1.1, R14.1, R14.2, R14.3, N3, N4
 - scope: large
 - model: capable
+- blocked_reason: need agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto: R1.1 unmet by dependency GC-1 snapshot; protoc 31.1 rejects duplicate package-scope enum values READ_ONLY (EffectClass vs WorkspaceAccessMode in core.proto) and FAILED/CANCELLED (EffectState vs RunState in core.proto); N3 forbids editing the mirrored copy; probed minimal fix (prefix the three values) makes all protos compile
 
 **Objective:** The fixed contract snapshot is installed into the workspace and compiles deterministically with a vendored protoc, with a test that proves byte-identical regeneration.
 
 **Context the implementer cannot infer:**
 
-- Copy every file from `agent-os-microkernel-mvp-buildpack/contracts/` into `agent-os/proto/` preserving relative paths — including `catalog.yaml`, `contract-lock.sha256`, the capability YAMLs, JSON schemas, and all `.proto` files. Copy the two SQL schemas from the pack into `agent-os/schema/`: `specs/kernel-store-schema.sql` becomes `kernel_store.sql` and the new `specs/event-journal-schema.sql` becomes `event_journal.sql`. The mirror is verbatim; do not edit copied content.
+- Copy every file from `agent-os-microkernel-mvp-buildpack/contracts/` into `agent-os/proto/` preserving relative paths — including `catalog.yaml`, `contract-lock.sha256`, `README.md`, the capability YAMLs, JSON schemas, and all `.proto` files. Copy the two SQL schemas from the pack into `agent-os/schema/`: `specs/kernel-store-schema.sql` becomes `kernel_store.sql` and the new `specs/event-journal-schema.sql` becomes `event_journal.sql`. The mirror is verbatim; do not edit copied content.
+- Mirror the pack only after GC-8's enum renames have landed, and take the mirror against the current pack (GC-2 finalized `events/catalog.yaml`).
 - Imports inside the protos are relative to the contracts root (for example `import "domain/core.proto";`), so the prost include path is `agent-os/proto`.
 - `domain/build.rs` sets `std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap())` before invoking `prost_build::Config::new().out_dir(env::var("OUT_DIR")).compile_protos(&[...all proto files...], &["../proto"])` — use the API version matching the pinned prost-build, and re-run on proto changes via `cargo:rerun-if-changed=../proto`. Collect the proto file list explicitly by walking `../proto` at build time.
 - Prost emits one file per protobuf package inside `OUT_DIR`. Inspect the actual filename during implementation and include it with `include!(concat!(env!("OUT_DIR"), "/FILE_NAME.rs"))` in `generated.rs`, re-exporting the package module as `pub mod contract`. If the snapshot compiles to multiple package files, include each.
@@ -506,8 +553,8 @@
 
 ### Task FND-004: Implement the stable error model
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-fnd004
 - depends_on: FND-001
 - files: `agent-os/crates/errors/src/codes.rs`, `agent-os/crates/errors/src/lib.rs`, `agent-os/crates/errors/tests/codes.rs`
 - requirements: R16.1, R16.2
@@ -591,8 +638,8 @@
 
 ### Task FND-006: Implement the classification and redaction substrate
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-fnd006
 - depends_on: FND-001
 - files: `agent-os/crates/observability/src/classification.rs`, `agent-os/crates/observability/src/lib.rs`, `agent-os/crates/observability/tests/redaction.rs`
 - requirements: R18.1, R18.2, R18.3, N1

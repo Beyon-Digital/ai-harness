@@ -1,0 +1,185 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+index 194c249..5142af0 100644
+--- a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
++++ b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+@@ -4,20 +4,30 @@
+ 
+ The canonical inception docs describe both the configuration schema and extension manifest as version 1, but the source JSON Schemas contained stale `const: 2` values.
+ 
+ For this inception implementation pack:
+ 
+ - `config.schema_version == 1`.
+ - `extension.manifest_version == 1`.
+ 
+ These are inception-contract consistency corrections only.
+ 
++## Effect enum value prefixing
++
++protoc rejects duplicate value names within one package. The `agentos.spec.v1` snapshot declared `READ_ONLY` in both `WorkspaceAccessMode` (`contracts/domain/core.proto`) and `EffectClass` (`contracts/domain/effects.proto`), and `FAILED` / `CANCELLED` in both `RunState` (`contracts/domain/core.proto`) and `EffectState` (`contracts/domain/effects.proto`). This pack renames only the effects side:
++
++- `EffectClass.READ_ONLY` -> `EFFECT_CLASS_READ_ONLY`;
++- `EffectState.FAILED` -> `EFFECT_STATE_FAILED`;
++- `EffectState.CANCELLED` -> `EFFECT_STATE_CANCELLED`.
++
++`contracts/domain/core.proto` is unchanged. The canonical repo-root `spec/` tree keeps the unprefixed names; this pack snapshot diverges so protobuf code generation works.
++
+ ## Contract snapshot unification
+ 
+ - Removed `contracts/control-api/control.proto`. It declared the same `agentos.spec.v1` package and the same six message names (`CommandRequest`, `CommandResponse`, `GetRunRequest`, `GetRunResponse`, `GetEffectRequest`, `GetEffectResponse`, `ApprovalResponseRequest`, `ApprovalResponseResult`) as `contracts/control-api/mvp_control.proto`, so the snapshot could not compile. `mvp_control.proto` is the single normative Control API definition; the removal applies to this pack snapshot only.
+ - Added `contracts/control-api/commands.proto`: one payload message per command in `specs/command-catalog.md` (16) plus the two commands added by design D9 (`RollbackConfigGeneration`, `ResolveBlockedRun`), for 18 messages total. `CommandRequest.command_type` is the fully-qualified name of one of these messages (design D2).
+ - Replaced the free-string `decision_type` and `bytes payload` in `contracts/protocols/agent_loop.proto` with the fenced `LoopDecision` tuple plus a `oneof decision` over `Complete`, `Fail`, `Wait`, `SpawnAgent`, `InvokeEffect`, and `RequestApproval`.
+ - Added `AgentRun.output_ref = 13` and `AgentRun.current_turn_id = 14` in `contracts/domain/core.proto` so loop output can be persisted on the run.
+ - Replaced the `EventEnvelope` subscription stream element with `EventStreamFrame` (an `EventEnvelope` or a `LagNotice`) in `contracts/control-api/mvp_control.proto` so a lagging subscriber receives a resumable cursor (design D15).
+ 
+ The following snapshot files existed but were previously undocumented:
+ 
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/catalog.yaml b/agent-os-microkernel-mvp-buildpack/contracts/catalog.yaml
+index 4dc44f2..c2feccb 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/catalog.yaml
++++ b/agent-os-microkernel-mvp-buildpack/contracts/catalog.yaml
+@@ -46,21 +46,21 @@ ports:
+     extension_policy: reviewed-external-allowed
+   transport:
+     version: 1
+     scope: generation-global
+     extension_policy: external-allowed
+   agent-loop:
+     version: 1
+     scope: run-scoped
+     extension_policy: external-allowed
+ effect_classes:
+-- READ_ONLY
++- EFFECT_CLASS_READ_ONLY
+ - LOCAL_MUTATION
+ - EXTERNAL_MUTATION
+ - OPAQUE
+ idempotency:
+ - NATURALLY_IDEMPOTENT
+ - IDEMPOTENCY_KEY_SUPPORTED
+ - NOT_IDEMPOTENT
+ - UNKNOWN
+ reconciliation:
+ - STATUS_LOOKUP
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto b/agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto
+index f16240b..3aa59f0 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto
++++ b/agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto
+@@ -1,17 +1,17 @@
+ syntax = "proto3";
+ package agentos.spec.v1;
+ 
+-enum EffectClass { EFFECT_CLASS_UNSPECIFIED=0; READ_ONLY=1; LOCAL_MUTATION=2; EXTERNAL_MUTATION=3; OPAQUE=4; }
++enum EffectClass { EFFECT_CLASS_UNSPECIFIED=0; EFFECT_CLASS_READ_ONLY=1; LOCAL_MUTATION=2; EXTERNAL_MUTATION=3; OPAQUE=4; }
+ enum IdempotencySemantics { IDEMPOTENCY_UNSPECIFIED=0; NATURALLY_IDEMPOTENT=1; IDEMPOTENCY_KEY_SUPPORTED=2; NOT_IDEMPOTENT=3; UNKNOWN_IDEMPOTENCY=4; }
+ enum ReconciliationSemantics { RECONCILIATION_UNSPECIFIED=0; STATUS_LOOKUP=1; RESULT_LOOKUP=2; DETERMINISTIC_INSPECTION=3; IMPOSSIBLE=4; UNKNOWN_RECONCILIATION=5; }
+-enum EffectState { EFFECT_STATE_UNSPECIFIED=0; PREPARED=1; CLAIMED=2; DISPATCHED=3; ACKNOWLEDGED=4; COMMITTED=5; FAILED=6; CANCELLED=7; UNKNOWN=8; }
++enum EffectState { EFFECT_STATE_UNSPECIFIED=0; PREPARED=1; CLAIMED=2; DISPATCHED=3; ACKNOWLEDGED=4; COMMITTED=5; EFFECT_STATE_FAILED=6; EFFECT_STATE_CANCELLED=7; UNKNOWN=8; }
+ 
+ message EffectContract {
+   EffectClass effect_class = 1; IdempotencySemantics idempotency = 2; ReconciliationSemantics reconciliation = 3;
+   string cancellation_semantics = 4; string compensation_capability = 5;
+ }
+ message EffectRecord {
+   string effect_id = 1; string run_id = 2; uint64 step_sequence = 3; string decision_id = 4;
+   string operation = 5; string request_hash = 6; EffectContract effective_contract = 7;
+   string adapter_id = 8; string adapter_version = 9; string adapter_digest = 10;
+   EffectState state = 11; string executor_id = 12; uint64 executor_fencing_token = 13;
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/effect-coordinator.md b/agent-os-microkernel-mvp-buildpack/specs/effect-coordinator.md
+index aeb0629..f994bda 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/effect-coordinator.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/effect-coordinator.md
+@@ -1,21 +1,21 @@
+ > **Navigation:** [Home](../README.md) · [Plan](../PLAN.md) · [DAG](../DAG.md) · [Architecture](../architecture/README.md) · [Specs](../specs/README.md) · [Testing](../testing/README.md)
+ 
+ 
+ # Effect Coordinator
+ 
+ ## Effective contract
+ 
+ Effect semantics use independent axes:
+ 
+ ```text
+-EffectClass: ReadOnly | LocalMutation | ExternalMutation | Opaque
++EffectClass: EffectClassReadOnly | LocalMutation | ExternalMutation | Opaque
+ Idempotency: NaturallyIdempotent | IdempotencyKeySupported | NotIdempotent | Unknown
+ Reconciliation: StatusLookup | ResultLookup | DeterministicInspection | Impossible | Unknown
+ Cancellation: BeforeDispatch | Cooperative | ProviderSpecific | Unsupported
+ Compensation: optional capability only
+ ```
+ 
+ An external/generated tool's declaration is a claim. Effective policy is the conservative intersection of:
+ 
+ - kernel-known port semantics;
+ - adapter/extension declaration;
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+index b0ed0da..2d39fc9 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
++++ b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+@@ -162,38 +162,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_exclusive_lease
+   WHERE mode = 2 AND enforcement_state = 'active';
+ 
+ CREATE TABLE IF NOT EXISTS effects (
+   effect_id TEXT PRIMARY KEY,
+   run_id TEXT NOT NULL,
+   step_sequence INTEGER NOT NULL,
+   decision_id TEXT NOT NULL,
+   operation TEXT NOT NULL,
+   request_hash TEXT NOT NULL,
+   request_payload BLOB NOT NULL,
+-  -- EffectClass (contracts/domain/effects.proto): 1=READ_ONLY, 2=LOCAL_MUTATION,
++  -- EffectClass (contracts/domain/effects.proto): 1=EFFECT_CLASS_READ_ONLY, 2=LOCAL_MUTATION,
+   -- 3=EXTERNAL_MUTATION, 4=OPAQUE. 0=EFFECT_CLASS_UNSPECIFIED is never persisted.
+   effect_class INTEGER NOT NULL CHECK (effect_class BETWEEN 1 AND 4),
+   -- IdempotencySemantics (contracts/domain/effects.proto): 1=NATURALLY_IDEMPOTENT,
+   -- 2=IDEMPOTENCY_KEY_SUPPORTED, 3=NOT_IDEMPOTENT, 4=UNKNOWN_IDEMPOTENCY.
+   -- 0=IDEMPOTENCY_UNSPECIFIED is never persisted.
+   idempotency_semantics INTEGER NOT NULL CHECK (idempotency_semantics BETWEEN 1 AND 4),
+   -- ReconciliationSemantics (contracts/domain/effects.proto): 1=STATUS_LOOKUP, 2=RESULT_LOOKUP,
+   -- 3=DETERMINISTIC_INSPECTION, 4=IMPOSSIBLE, 5=UNKNOWN_RECONCILIATION.
+   -- 0=RECONCILIATION_UNSPECIFIED is never persisted.
+   reconciliation_semantics INTEGER NOT NULL CHECK (reconciliation_semantics BETWEEN 1 AND 5),
+   cancellation_semantics TEXT NOT NULL,
+   compensation_capability TEXT,
+   adapter_id TEXT NOT NULL,
+   adapter_version TEXT NOT NULL,
+   adapter_digest TEXT NOT NULL,
+   -- EffectState (contracts/domain/effects.proto): 1=PREPARED, 2=CLAIMED, 3=DISPATCHED,
+-  -- 4=ACKNOWLEDGED, 5=COMMITTED, 6=FAILED, 7=CANCELLED, 8=UNKNOWN.
++  -- 4=ACKNOWLEDGED, 5=COMMITTED, 6=EFFECT_STATE_FAILED, 7=EFFECT_STATE_CANCELLED, 8=UNKNOWN.
+   -- 0=EFFECT_STATE_UNSPECIFIED is never persisted.
+   state INTEGER NOT NULL CHECK (state BETWEEN 1 AND 8),
+   executor_id TEXT,
+   executor_fencing_token INTEGER,
+   daemon_fencing_epoch INTEGER,
+   lease_expires_ms INTEGER,
+   provider_operation_ref TEXT,
+   result_ref TEXT,
+   error_code TEXT,
+   created_at_ms INTEGER NOT NULL,
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md b/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
+index 2c67a8f..cf1cf23 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/recovery-table.md
+@@ -6,21 +6,21 @@
+ At startup (lifecycle step 7) the daemon classifies every non-terminal run and every
+ non-terminal effect. Each `(run state, effect state)` pair maps to exactly one
+ `RecoveryDisposition` from the frozen enum in `contracts/domain/core.proto`: `NORMAL`,
+ `NEEDS_RECONCILIATION`, `RECOVERING`, `BLOCKED_UNKNOWN_EFFECT`, `BLOCKED_MISSING_RESOURCE`,
+ `REQUIRES_HUMAN_DECISION`. `RunPaused` and `RunResumed` no longer exist in the MVP catalog
+ (design D8), so no disposition references them.
+ 
+ Notation:
+ 
+ - Effect state `NONE` means no `effects` row references the run. The settled states
+-  `COMMITTED`, `FAILED`, and `CANCELLED` are equivalent to `NONE` for recovery: a settled
++  `COMMITTED`, `EFFECT_STATE_FAILED`, and `EFFECT_STATE_CANCELLED` are equivalent to `NONE` for recovery: a settled
+   effect adds no ambiguity, so the run-state row applies.
+ - `PREPARED`, `CLAIMED`, `DISPATCHED`, `ACKNOWLEDGED`, and `UNKNOWN` are the in-flight
+   effect states.
+ - `lease` is `effects.lease_expires_ms`; `epoch` is the daemon fencing epoch acquired at
+   startup (lifecycle step 4), which is always newer than any epoch owned by a prior daemon.
+ 
+ ## Precedence
+ 
+ A pair can match rows in more than one matrix. Exactly one disposition wins; apply this
+ global order and take the first matching class:

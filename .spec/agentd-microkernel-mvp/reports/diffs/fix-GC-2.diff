@@ -1,0 +1,72 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/command-catalog.md b/agent-os-microkernel-mvp-buildpack/specs/command-catalog.md
+index 72a53c1..d6e199d 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/command-catalog.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/command-catalog.md
+@@ -155,20 +155,21 @@ expected_run_revision?
+ reason
+ ```
+ 
+ Advances cancellation epoch and transitions/cancels reachable nonterminal descendants according to state.
+ 
+ ## `SubmitLoopDecision`
+ 
+ - Payload message: `agentos.spec.v1.SubmitLoopDecision`
+ - Idempotency: duplicate detection by `decision_id`; the same `decision_id` with the same bytes returns the stored acceptance, a different payload for the same `decision_id` is a conflict, and a stale fencing tuple is rejected with no mutation.
+ - Emits: `LoopDecisionAccepted`, `LoopDecisionRejectedStale`, `RunWaitingTool`, `RunWaitingChild`, `RunWaitingHuman`, `RunCompleted`, `RunFailed`, `EffectPrepared`, `ApprovalRequested`, `RunStateChanged`
++- The `Emits:` list includes transitively emitted events (events emitted by the commands and worker transitions this command invokes), so it may name events whose `produced_by` is another transition.
+ 
+ ```text
+ LoopDecision
+ ```
+ 
+ Internal. Validates run revision, loop epoch, step sequence, input cursor, turn ID and decision ID. Decision types in MVP (canonical variant names, GC-3):
+ 
+ - `Complete { output_ref? }` — emits `RunCompleted`
+ - `Fail { reason_code }` — emits `RunFailed`
+ - `Wait { reason, timer_id? }` — timer-backed wait emits `RunWaitingTool`
+@@ -286,17 +287,18 @@ payload
+ ```text
+ timer_id
+ expected_version
+ ```
+ 
+ ## `ResolveBlockedRun`
+ 
+ - Payload message: `agentos.spec.v1.ResolveBlockedRun`
+ - Idempotency: requires `runs.recovery_disposition = BLOCKED_MISSING_RESOURCE` (any other disposition is `FAILED_PRECONDITION`); an identical `(principal_id, idempotency_key)` replay returns the stored outcome.
+ - Emits: `RunRecoveryDispositionChanged`, `RunCancelled`, `RunStateChanged`
++- The `Emits:` list includes transitively emitted events (events emitted by the commands and worker transitions this command invokes), so it may name events whose `produced_by` is another transition.
+ - `resume` re-validates the same frozen resource references without substituting anything (frozen `ResolvedRunEnvironment` stays immutable); `cancel` terminalizes the run through the cancellation path.
+ 
+ ```text
+ run_id
+ action                     # resume | cancel
+ reason
+ ```
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/event-catalog.md b/agent-os-microkernel-mvp-buildpack/specs/event-catalog.md
+index 3bb59df..136dc35 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/event-catalog.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/event-catalog.md
+@@ -15,21 +15,21 @@ fails catalog validation. Stream keys use the canonical durable stream keys from
+ 
+ Sensitivity levels are ordered `public` < `internal` < `confidential` < `secret`. The catalog
+ value is the event type's minimum and default classification. A caller may raise the
+ sensitivity of a payload above the type default, and the raised class is recorded on the
+ `outbox_events` row; a downgrade below the event type's minimum is rejected (R9.4). Retention
+ values are `ephemeral` (liveness telemetry only), `standard` (routine durable history), and
+ `audit` (authority, security, configuration, recovery, and irreversible outcome records).
+ 
+ Applied policy:
+ 
+-- `no` security, config, approval, or secret event is classified below `confidential`;
++- no security, approval, or secret event is classified below `confidential`;
+ - externally mutating effect outcomes, workspace authority changes, cancellation epoch
+   advances, recovery dispositions, daemon fencing, and resource-unknown records are `audit`;
+ - only adapter health telemetry is `ephemeral`.
+ 
+ ## Session
+ 
+ | Event | Version | Sensitivity | Retention | Stream key | Produced by |
+ |---|---|---|---|---|---|
+ | `SessionCreated` | 1 | `internal` | `standard` | `session/<session-id>` | `CreateSession` |
+ | `AgentSpecRevisionStored` | 1 | `internal` | `audit` | `config/global` | `PutAgentSpecRevision` |

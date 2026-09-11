@@ -48,3 +48,40 @@
 - 2026-09-11T03:34:44Z FND-001 -> done (@agent-fnd001)
 - 2026-09-11T03:43:48Z GC-4 -> done (@agent-gc4)
 - 2026-09-11T03:44:47Z Wave 1 checkpoint: repo validator OK; cargo check --workspace OK; all 5 wave-1 tasks reviewed and done (GC-1, GC-3, GC-4, GC-5, FND-001); 2 fix rounds on GC-4, 1 each on GC-3/FND-001; all re-reviews clean.
+- 2026-09-11T03:45:28Z GC-2 -> claimed (@agent-gc2)
+- 2026-09-11T03:45:36Z GC-2 -> in_progress (@agent-gc2)
+- 2026-09-11T03:45:43Z FND-006 -> claimed (@agent-fnd006)
+- 2026-09-11T03:45:44Z FND-006 -> in_progress (@agent-fnd006)
+- 2026-09-11T03:45:47Z FND-004 -> claimed (@agent-fnd004)
+- 2026-09-11T03:45:47Z GC-6 -> claimed (@agent-gc6)
+- 2026-09-11T03:45:48Z FND-004 -> in_progress (@agent-fnd004)
+- 2026-09-11T03:45:49Z GC-6 -> in_progress (@agent-gc6)
+- 2026-09-11T03:45:49Z FND-002 -> claimed (@agent-fnd002)
+- 2026-09-11T03:45:50Z FND-002 -> in_progress (@agent-fnd002)
+- 2026-09-11T03:53:05Z FND-006 -> review (@agent-fnd006)
+- 2026-09-11T03:54:38Z FND-004 -> review (@agent-fnd004)
+- 2026-09-11T04:00:07Z GC-2 -> review (@agent-gc2)
+- 2026-09-11T04:07:00Z GC-6 -> review (@agent-gc6)
+- 2026-09-11T04:11:06Z FND-002 -> blocked (@agent-fnd002) — need agent-os-microkernel-mvp-buildpack/contracts/domain/effects.proto: R1.1 unmet by dependency GC-1 snapshot; protoc 31.1 rejects duplicate package-scope enum values READ_ONLY (EffectClass vs WorkspaceAccessMode in core.proto) and FAILED/CANCELLED (EffectState vs RunState in core.proto); N3 forbids editing the mirrored copy; probed minimal fix (prefix the three values) makes all protos compile
+- 2026-09-11T04:16:47Z FND-002 -> pending (@controller)
+- 2026-09-11T04:22:13Z GC-8 -> claimed (@agent-gc8)
+- 2026-09-11T04:24:19Z GC-8 -> in_progress (@agent-gc8)
+- 2026-09-11T04:29:33Z GC-8 -> review (@agent-gc8)
+- 2026-09-11T04:33:04Z GC-6 -> done (@agent-gc6)
+- 2026-09-11T04:33:06Z FND-004 -> done (@agent-fnd004)
+- 2026-09-11T04:33:09Z FND-006 -> done (@agent-fnd006)
+- 2026-09-11T04:33:11Z Wave 2 reviews: GC-6/FND-004/FND-006 approved and done; GC-2 one fix (classification-floor contradiction); GC-8 implemented pending review. Deferred: four unleased task briefs still carry globs (API-002/003, ADP-005, LOOP-001); unused thiserror in errors manifest; test-file ownership residual.
+- 2026-09-11T04:37:14Z GC-8 -> done (@agent-gc8)
+- 2026-09-11T04:37:15Z GC-8 approved and done; GC-2 fix committed pending scoped re-review.
+- 2026-09-11T04:38:03Z GC-2 -> done (@agent-gc2)
+- 2026-09-11T04:38:04Z Wave 2 checkpoint: sync --check OK; GC-2 fix re-reviewed clean and done.
+- 2026-09-11T04:40:46Z FND-002 -> claimed (@agent-fnd002)
+- 2026-09-11T04:40:47Z FND-002 -> in_progress (@agent-fnd002)
+- 2026-09-11T04:40:58Z GC-7 -> claimed (@agent-gc7)
+- 2026-09-11T04:41:02Z GC-7 -> in_progress (@agent-gc7)
+- 2026-09-11T04:52:55Z GC-7 -> review (@agent-gc7)
+- 2026-09-11T05:05:15Z FND-002 -> review (@agent-fnd002)
+- 2026-09-11T05:07:18Z FND-002 + GC-7 implemented pending review. Checkpoint caught fmt failure in FND-004 tests file; fix dispatched. Ruling: done task repairs go to the original implementer session, state stays done, fix tabled in final review.
+- 2026-09-11T05:11:57Z FND-002 -> done (@agent-fnd002)
+- 2026-09-11T05:11:58Z GC-7 -> done (@agent-gc7)
+- 2026-09-11T05:12:00Z Wave 3 done: FND-002 and GC-7 approved; fmt repair on FND-004 verified; validator BUILD PACK OK, lock+manifest regenerated. 12/14 tasks done.

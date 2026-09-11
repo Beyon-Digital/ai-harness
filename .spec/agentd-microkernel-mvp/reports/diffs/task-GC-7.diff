@@ -1,0 +1,1074 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/MANIFEST.json b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+index cf1798f..e3ccbef 100644
+--- a/agent-os-microkernel-mvp-buildpack/MANIFEST.json
++++ b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+@@ -1,14 +1,14 @@
+ {
+   "schema_version": 1,
+   "name": "agent-os-microkernel-mvp-buildpack",
+-  "file_count": 156,
++  "file_count": 160,
+   "files": [
+     {
+       "path": "AGENTS.md",
+       "bytes": 2675,
+       "sha256": "492d95b754ffcff7bf15d614e1f8604f61977acaec95051f052ea1d108d47a77"
+     },
+     {
+       "path": "DAG.md",
+       "bytes": 13293,
+       "sha256": "a1e40ffdfc5d338a72b7de944136fb03c2565b522b4a9ef4ef06db801e940b54"
+@@ -38,22 +38,22 @@
+       "bytes": 4481,
+       "sha256": "51f8463f924d9647f309c8d8a8106bd72df8027bc9df509f6d8099f8789dabde"
+     },
+     {
+       "path": "SCOPE.md",
+       "bytes": 1835,
+       "sha256": "27982e9d3b862c1ddd0b7fb10ab1ea726166475402ce9599be7751e33635595e"
+     },
+     {
+       "path": "SOURCE_CORRECTIONS.md",
+-      "bytes": 397,
+-      "sha256": "a47a9ffb1313091272fdee70d4d2a77a3beaf3b891822563de935ad5dd1b76a2"
++      "bytes": 2944,
++      "sha256": "3c281280b66ed70f12be267eb50e3ddc4bfd967afca70078384b141307236d6d"
+     },
+     {
+       "path": "TASK_STATUS.yaml",
+       "bytes": 5515,
+       "sha256": "7becb848d7985f20221135ccf1c42e32452a9ec57077e8b57806363c3dc35ede"
+     },
+     {
+       "path": "architecture/README.md",
+       "bytes": 3416,
+       "sha256": "fa46b1a1a4a88ae3e69a4fcb557fccc2bb7ec4f772397e5fcdfe0bdf7d2cc69c"
+@@ -68,92 +68,92 @@
+       "bytes": 3272,
+       "sha256": "bb90a6d7a7d9fc5e69035d6ec2f7477e7d757885533cec3ac48eb00d49e490fd"
+     },
+     {
+       "path": "architecture/failure-model.md",
+       "bytes": 1244,
+       "sha256": "50dc06ba397447371089aeefe72b74d6c5a7df91c0d36d856712e02d19b5831d"
+     },
+     {
+       "path": "architecture/persistence.md",
+-      "bytes": 1544,
+-      "sha256": "3ef9a8f9a0f98c4f6d6e9c2b2b7cda525afb9314d91bdb780482eeb02a97cd67"
++      "bytes": 1691,
++      "sha256": "b51563374e3c5c4a57ff6efdb7dc4b2434664066b06a7d35bce50b95d38f2856"
+     },
+     {
+       "path": "architecture/runtime-flow.md",
+       "bytes": 1766,
+       "sha256": "bb78fedb414748394fc4763172dacada09c832e8ded8cde380e30bb2c180b98f"
+     },
+     {
+       "path": "contracts/README.md",
+-      "bytes": 619,
+-      "sha256": "32cc76ae11088a31cec5b51a12a2ec4ad222a03237f40adf54b9ce035d59ad8c"
++      "bytes": 2126,
++      "sha256": "2478a883d185d1284379cf12b46d8f7edccddeaeeb9d16666c48b0344c48145d"
+     },
+     {
+       "path": "contracts/capabilities/adapter-capabilities.yaml",
+       "bytes": 752,
+       "sha256": "d1ea4acacd677d0a53d0ad2a628e9364a52c5d03e1c1147f7bb70a9317b03956"
+     },
+     {
+       "path": "contracts/capabilities/security-capabilities.yaml",
+       "bytes": 327,
+       "sha256": "d4a122b7c690840ec6b0aaef5cf42242e18f70a88049a25346d1f8a041fdaa3b"
+     },
+     {
+       "path": "contracts/catalog.yaml",
+-      "bytes": 1688,
+-      "sha256": "48073360833671d8b4e63fbee9c190b49d26ee4eb6288a4a92ed51ec55054917"
++      "bytes": 1701,
++      "sha256": "c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0"
+     },
+     {
+       "path": "contracts/config/agent-os.schema.json",
+-      "bytes": 1909,
+-      "sha256": "58446b91e32cd9a559ff032ffd4cac434d695d538bc0913ba61b4cba6e4ff3df"
++      "bytes": 7632,
++      "sha256": "f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625"
+     },
+     {
+       "path": "contracts/contract-lock.sha256",
+-      "bytes": 2953,
+-      "sha256": "d1d7024d5590c3cc972b41dfb3879ee4086d168cc498ace0424fb2069aa80a80"
++      "bytes": 2954,
++      "sha256": "4c2799ae3d6025954b559c6d911ae8b505ac529981ca99288e499eaddccbf78b"
+     },
+     {
+-      "path": "contracts/control-api/control.proto",
+-      "bytes": 924,
+-      "sha256": "bcda77eb3e8a121cd4e67ea135b837bcb1a29769b85c7e5dd361446cddd49069"
++      "path": "contracts/control-api/commands.proto",
++      "bytes": 2907,
++      "sha256": "fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f"
+     },
+     {
+       "path": "contracts/control-api/mvp_control.proto",
+-      "bytes": 2817,
+-      "sha256": "00fe58f502383314ab53a730efa42e8ffdef443f69b40eed4e4d9c8a1872713c"
++      "bytes": 2994,
++      "sha256": "89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e"
+     },
+     {
+       "path": "contracts/domain/core.proto",
+-      "bytes": 1892,
+-      "sha256": "05ff59f74db26a4dd9085b284432363b2ec692842a42d566a5657275e9dea4be"
++      "bytes": 1949,
++      "sha256": "0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f"
+     },
+     {
+       "path": "contracts/domain/effects.proto",
+-      "bytes": 1482,
+-      "sha256": "54147f463e8a7813f44c7a70c77d4efe6aa9d6d210b26e39f42a2c9df5dcbdae"
++      "bytes": 1521,
++      "sha256": "157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb"
+     },
+     {
+       "path": "contracts/domain/entities.proto",
+       "bytes": 1464,
+       "sha256": "41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc"
+     },
+     {
+       "path": "contracts/domain/security.proto",
+       "bytes": 581,
+       "sha256": "924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c"
+     },
+     {
+       "path": "contracts/events/catalog.yaml",
+-      "bytes": 933,
+-      "sha256": "e40f93188e6875b9a453d1e5a158095813600fb07865ffacff5baa9346990ba0"
++      "bytes": 12137,
++      "sha256": "33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a"
+     },
+     {
+       "path": "contracts/events/event.proto",
+       "bytes": 594,
+       "sha256": "eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799"
+     },
+     {
+       "path": "contracts/manifests/extension.schema.json",
+       "bytes": 1501,
+       "sha256": "819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea"
+@@ -228,197 +228,217 @@
+       "bytes": 1816,
+       "sha256": "816b8318501e09eeadb79e359d086409b6f7eb1646e84c4c3a1499e6564b40c5"
+     },
+     {
+       "path": "contracts/protocols/adapter_frames.proto",
+       "bytes": 830,
+       "sha256": "cdcd8248c4ba66e51357968c8e5399624be3c0a1664bd1710491d497f278231b"
+     },
+     {
+       "path": "contracts/protocols/agent_loop.proto",
+-      "bytes": 467,
+-      "sha256": "5ac3fddc2a31c23030e8a308a712fbb444c93d230aa7c75a71b27f4a3db82471"
++      "bytes": 904,
++      "sha256": "43c01a57725c8967da5a5c373a041a6d1a68d51ae4281ebf286d4df43f832284"
+     },
+     {
+       "path": "contracts/protocols/effect.proto",
+       "bytes": 532,
+       "sha256": "deea2c5fdb3c13943cb9a6eec1a3582ffeb8aba9cacb781a7457f88886693d10"
+     },
+     {
+       "path": "contracts/protocols/external_adapter.proto",
+       "bytes": 474,
+       "sha256": "a0b6c4d599eed8a2b1e664f4c0a49ea239459a065ee8451a786290fcfda85fdc"
+     },
+     {
+       "path": "dag.json",
+-      "bytes": 44786,
+-      "sha256": "458c738abda8facec2ec6adca9c619dc46e8bafb177b4eca6789b0d6dd3fd8ee"
++      "bytes": 50551,
++      "sha256": "1ed1ee84e942f6d3ac8f8ed8ba9d2cc50099a5761e011aae6bea057d1a221e9d"
+     },
+     {
+       "path": "dag.yaml",
+-      "bytes": 34270,
+-      "sha256": "df0ab355525a9f65669e86baef8ab47f7e32ad85bfa7159e26f1ac85ec4e9b6f"
++      "bytes": 39122,
++      "sha256": "dfcdd650b5596a24adcc71fea7e64d2e7efb681ec79ca3085169ea01b0c26863"
+     },
+     {
+       "path": "examples/adapter-manifest.yaml",
+       "bytes": 407,
+       "sha256": "04cb53cf0758d34a39c460208aedaf0cf37a854262c3c5adab46ab2daa2cb79d"
+     },
+     {
+       "path": "examples/agent-spec.yaml",
+       "bytes": 413,
+       "sha256": "23866c61c9d057c0f64db4a7c637cc540a79bddc510bc6fcc3447e5db56c5201"
+     },
+     {
+       "path": "examples/default-config.yaml",
+-      "bytes": 511,
+-      "sha256": "a8fafce69b7fb26c104cbe01b80e59e09d6287d2aaf45874a98656d2e9b216aa"
++      "bytes": 1295,
++      "sha256": "dec35dd7f5b90e1f8cfc9fd05c7e5a932b91b074936a7fb9eb4b661ecde701d1"
+     },
+     {
+       "path": "examples/effect-flow.yaml",
+       "bytes": 503,
+       "sha256": "44b71a24b81e74fd7739880bed27e7164cbe500b87ea6a78bb84b12006b1f0f3"
+     },
+     {
+       "path": "examples/workspace-delegation.yaml",
+       "bytes": 546,
+       "sha256": "1a72e661d26bb13f61b055ef608782ab691fef445a70f144406c11faca100d2f"
+     },
++    {
++      "path": "scripts/sync_dag_sources.py",
++      "bytes": 5133,
++      "sha256": "4cad31be7b1dc89e8adf45d89b6abf22492cd12df94bc7b86fe4d884d785f025"
++    },
++    {
++      "path": "scripts/test_validator_mutations.sh",
++      "bytes": 4359,
++      "sha256": "55ff80f2324eb494e83c7d06ed4fb6a2b83be1f938c5b47dd73daef26d4c5006"
++    },
+     {
+       "path": "scripts/validate_buildpack.py",
+-      "bytes": 3987,
+-      "sha256": "f792d12067fcbd9717f9f828e68f086d37fd72f2d25b44ee745fdc8efdcee52b"
++      "bytes": 18990,
++      "sha256": "d52a80893a9e86f2226d67ec4a2977c081e1e1351a278dad55b2f2de2ed960a5"
+     },
+     {
+       "path": "specs/README.md",
+-      "bytes": 1545,
+-      "sha256": "7f2c2b840ad91c840fb45ebf6a08e67d3512e68d2604804699b3b0ae7402c568"
++      "bytes": 1630,
++      "sha256": "90e7ea82d157bf91a06618880d55fdf225b60483f04d213d197f3d71173f78aa"
+     },
+     {
+       "path": "specs/adapter-registry.md",
+-      "bytes": 1607,
+-      "sha256": "37a936d036ff6594f6cd6c8dbf9cc8b9a379b95bb7112b519c80417dc3b85a56"
++      "bytes": 2123,
++      "sha256": "de20ff282d9ccd44bc3e00a402f1f9bb0db5bc30caeffb7c70510d20410cbf87"
+     },
+     {
+       "path": "specs/agent-task-session.md",
+       "bytes": 2025,
+       "sha256": "40893bb13dbb2b16ba25867e1e20815d420a52c0c1c3358dabc949a75a51051a"
+     },
+     {
+       "path": "specs/approvals.md",
+       "bytes": 843,
+       "sha256": "f960c78317d859973234b1cbdac5cdb2016cab96b390a112e62dce09dfe4fc06"
+     },
+     {
+       "path": "specs/artifacts.md",
+-      "bytes": 709,
+-      "sha256": "8c90aae6551b66f1d9300e768179c6c5a63691cafb53e781d01234a39cf8578d"
++      "bytes": 1225,
++      "sha256": "84642e528a7364cd84135ae3cbd07d434fe9f58d207c572ff993ffa420e25ef2"
+     },
+     {
+       "path": "specs/command-catalog.md",
+-      "bytes": 3863,
+-      "sha256": "ca5c31a0d3f8555c5f7f3f0a045949246d835a80f489f9ea0ef3a5207a8708f7"
++      "bytes": 13368,
++      "sha256": "b171b7aa3fa7d0817ff7672973b60aa0d109725bf2bb2e608199b3526e390022"
+     },
+     {
+       "path": "specs/command-coordinator.md",
+-      "bytes": 1712,
+-      "sha256": "a9a4f26151989bd46a44a2c9f524b12af852b44894cbc4a8b58cecb4950338d2"
++      "bytes": 2634,
++      "sha256": "2b1197e4d85daebf8aa0227a7d1c8f14bdd5d1502fbcc4ec06945162e3749b34"
+     },
+     {
+       "path": "specs/config-engine.md",
+-      "bytes": 1522,
+-      "sha256": "746d1d29c985f2391afaceb4cdf5c3e46acb89970146c439eea474f096604b15"
++      "bytes": 2382,
++      "sha256": "e3d1838578d4038f8e38a97335b438df9a6dc2baba89c5a22ca7f1f93c0622fe"
+     },
+     {
+       "path": "specs/control-api.md",
+       "bytes": 1670,
+       "sha256": "64e9c478bb9f6ed763932e3fb55b7bc384449dec7c54902ce12aac459865926a"
+     },
+     {
+       "path": "specs/effect-coordinator.md",
+-      "bytes": 2211,
+-      "sha256": "f01f1fda2c0b5a5dfbf7535c352af8cb9147efc1786756902cd635d8fa9499a0"
++      "bytes": 2222,
++      "sha256": "5afe902b4bf3518f5d07f7a8325814ec535dee2c7903c047166dc4cd128650df"
+     },
+     {
+       "path": "specs/error-model.md",
+       "bytes": 1149,
+       "sha256": "20cdd3ef0dc588b2355636af118057b37acccabf391352934bcce274346179ac"
+     },
+     {
+       "path": "specs/event-catalog.md",
+-      "bytes": 1532,
+-      "sha256": "2ce82bca9df5a5f84d0795d199e118d3c727cbb12aa11b9305fd63d79d993023"
++      "bytes": 9058,
++      "sha256": "a8e585183e078b0f50ec24600c25b483e975669df97bf0168ec443a31af9c9e0"
++    },
++    {
++      "path": "specs/event-journal-schema.sql",
++      "bytes": 764,
++      "sha256": "61d37713359b1b57215008db7654b51955a8651105de93122a7646ff09682c2b"
+     },
+     {
+       "path": "specs/event-pipeline.md",
+       "bytes": 1494,
+       "sha256": "956694784c1fc2b0e75ee882f9dda6f093033f7b649f786f927f1ecde2e158b4"
+     },
+     {
+       "path": "specs/identity-delegation.md",
+       "bytes": 998,
+       "sha256": "67afa23ff7114fd3caca4067782aa9d471393265bec5224bbd8d702a512cc982"
+     },
+     {
+       "path": "specs/kernel-store-schema.sql",
+-      "bytes": 10368,
+-      "sha256": "0d31c4a8392f45a305614797d4b9cc97ef460e44158a05ea04f73a97dde41bf2"
++      "bytes": 20296,
++      "sha256": "22d739d91e733d680fa0c62d6a16b459912f1c17c7d63a1f98184abde95fcc60"
+     },
+     {
+       "path": "specs/kernel-store.md",
+-      "bytes": 1844,
+-      "sha256": "d5e225af11972472cb21aa8842214a7c06b51638bce73c1f1f8d63c6c1d0b3e7"
++      "bytes": 3829,
++      "sha256": "3ca923e4a3ffd46f1646f00eb4c93147de85433e74ee214d289b04b4fa342c10"
+     },
+     {
+       "path": "specs/lifecycle.md",
+       "bytes": 1313,
+       "sha256": "8b1623f8bc5b3c1b8110ffd82f281d465921ae4cdf234dfa04fae5150426e3cf"
+     },
++    {
++      "path": "specs/limits.yaml",
++      "bytes": 725,
++      "sha256": "1aedc4043d5c3829d74f01b1f2da150ca1385dd44f0c2798ab93ff9e3c72bfae"
++    },
+     {
+       "path": "specs/observability.md",
+       "bytes": 957,
+       "sha256": "b78256d026d033e06144b3b9dd5d56f7bdb41ef287404d70869363d013f5dc4b"
+     },
+     {
+       "path": "specs/permissions.md",
+       "bytes": 991,
+       "sha256": "6930924983db2587e40c9d75c327a5d9399825dfd36f36ee90f113e8b95c6e00"
+     },
+     {
+       "path": "specs/process-supervisor.md",
+-      "bytes": 1286,
+-      "sha256": "ae9156e3cbff2eb3a64e9b6fc57857b0ebedade104eded408114f7d4b2a3efb2"
++      "bytes": 1826,
++      "sha256": "9fe9c08cb9f6958ee6d18a90b6f4e5ae9d28d3a5a75e8118ecc8092a594c1ffa"
+     },
+     {
+       "path": "specs/recovery-table.md",
+-      "bytes": 2488,
+-      "sha256": "dae81cb7e6e512185a4a788bd2ce4fd0940de322c49f786019d22bf7f18f8d8e"
++      "bytes": 15282,
++      "sha256": "2ac121e4229b1c6f0286dc606e0a63a5cf14a85f5875a8f1d4a26242723894a2"
+     },
+     {
+       "path": "specs/resolved-run-environment.md",
+       "bytes": 1046,
+       "sha256": "0c9aff234008f6ae2845fe2c8f857feafcf893d29d06e11fe0f06bd8e7c762df"
+     },
+     {
+       "path": "specs/resource-uri.md",
+       "bytes": 725,
+       "sha256": "ce718a86614bb021f3dd1f8716bff287bd07af46327c0e8e110d688d8f63554b"
+     },
+     {
+       "path": "specs/resources.md",
+       "bytes": 1013,
+       "sha256": "cdf0cb3d90f8438a28adac1c9997af0b32e005a01dd8ccde833aecb2686d233d"
+     },
+     {
+       "path": "specs/run-graph.md",
+-      "bytes": 1847,
+-      "sha256": "ca21f5794497603339e048db9aa55f98fe49026a63a5cae741eb4c9df367b4d3"
++      "bytes": 2147,
++      "sha256": "0c9c7b171627666f20be29c8da92ab4d4372a58f1051184e210897e80a1e07a8"
+     },
+     {
+       "path": "specs/runtime-manager.md",
+       "bytes": 1385,
+       "sha256": "de71ccaa4c07fab89c0712b844b473c5b6b9a667fabf317887076b272056efae"
+     },
+     {
+       "path": "specs/sandbox.md",
+       "bytes": 985,
+       "sha256": "f5ecf36faaf81585678dc6f6872deb2c277f88b1083334392ba74d5681b5279b"
+@@ -433,27 +453,27 @@
+       "bytes": 830,
+       "sha256": "2d6dcdc3f937274cfbb33832fcdfadbebea4a5e9918866b3a11b8fa57debc5f6"
+     },
+     {
+       "path": "specs/transaction-recipes.md",
+       "bytes": 5417,
+       "sha256": "f39d248fe997e1931f0ce3dba0591fd2a48598baa34f2a44f701c5a11a6a1d38"
+     },
+     {
+       "path": "specs/types-and-ids.md",
+-      "bytes": 1282,
+-      "sha256": "8cc05ca8539d9f9a88019eb07cdcbb0fe9252571a6ed6ed56120e360db15532f"
++      "bytes": 7983,
++      "sha256": "e4833f5e7328751dafa766341edfa666efbc7717465b7e5ad5fc09dbdca5c1fe"
+     },
+     {
+       "path": "specs/workspace.md",
+-      "bytes": 1764,
+-      "sha256": "ff7a915f93c25796bd5fdb19ddaebbc38013acce141457ef5015ba0e392a575b"
++      "bytes": 2176,
++      "sha256": "39ce17a0db42f2f489ac5b9257511a6a192727cdfdfd4f1bcaae8cb952292e86"
+     },
+     {
+       "path": "tasks/ADP-001.md",
+       "bytes": 1516,
+       "sha256": "2049dc0f8da93bd4646ad138aa41f162c5ce7cad950e0bc3ab442ad796855966"
+     },
+     {
+       "path": "tasks/ADP-002.md",
+       "bytes": 1520,
+       "sha256": "146404a09ffb0ab928dac639659c20d4f3c140b6af9e264455b31d50c3eb8c33"
+@@ -558,27 +578,27 @@
+       "bytes": 1474,
+       "sha256": "7faef62ae70d16394f0caf9931b9f02c694d7ef60a105ecac9a86fb8fecc0140"
+     },
+     {
+       "path": "tasks/EVT-004.md",
+       "bytes": 1400,
+       "sha256": "4f0ded14c2bca644238e17d162b2f49c6a2a8f36356490feaf748ce0297063ee"
+     },
+     {
+       "path": "tasks/FND-001.md",
+-      "bytes": 1798,
+-      "sha256": "4d7c78fcc21cfe095076ce2b8837df7c25100030b86e43fabc0e3e629a99b708"
++      "bytes": 4871,
++      "sha256": "e2869843b32184bc9a273eb15ed9f0f6fa2a18a8a1e59789e1ac237d633f5107"
+     },
+     {
+       "path": "tasks/FND-002.md",
+-      "bytes": 1621,
+-      "sha256": "c6945eb8f46ea9bfbb52dc68dfedaedcfe6854f77ce030a29ecaa8ca6c44b99a"
++      "bytes": 2998,
++      "sha256": "957372d45b3e022b5a11abed361332b38c1d9d2bc3d5d158f85516b220548203"
+     },
+     {
+       "path": "tasks/FND-003.md",
+       "bytes": 1677,
+       "sha256": "d93282d9f16d8fa9bafafa29fbddcaf0cd8e2f663911626acf6931b3258ca6ad"
+     },
+     {
+       "path": "tasks/FND-004.md",
+       "bytes": 1430,
+       "sha256": "bcff319f01329da3f829fe4401111bbbc7a9dcefd6908a8897c8e36c5caa1ece"
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256 b/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
+index d7f62e0..8471860 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
++++ b/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
+@@ -1,32 +1,32 @@
+-32cc76ae11088a31cec5b51a12a2ec4ad222a03237f40adf54b9ce035d59ad8c  ./README.md
++2478a883d185d1284379cf12b46d8f7edccddeaeeb9d16666c48b0344c48145d  ./README.md
+ d1ea4acacd677d0a53d0ad2a628e9364a52c5d03e1c1147f7bb70a9317b03956  ./capabilities/adapter-capabilities.yaml
+ d4a122b7c690840ec6b0aaef5cf42242e18f70a88049a25346d1f8a041fdaa3b  ./capabilities/security-capabilities.yaml
+-48073360833671d8b4e63fbee9c190b49d26ee4eb6288a4a92ed51ec55054917  ./catalog.yaml
+-58446b91e32cd9a559ff032ffd4cac434d695d538bc0913ba61b4cba6e4ff3df  ./config/agent-os.schema.json
+-bcda77eb3e8a121cd4e67ea135b837bcb1a29769b85c7e5dd361446cddd49069  ./control-api/control.proto
+-00fe58f502383314ab53a730efa42e8ffdef443f69b40eed4e4d9c8a1872713c  ./control-api/mvp_control.proto
+-05ff59f74db26a4dd9085b284432363b2ec692842a42d566a5657275e9dea4be  ./domain/core.proto
+-54147f463e8a7813f44c7a70c77d4efe6aa9d6d210b26e39f42a2c9df5dcbdae  ./domain/effects.proto
++c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0  ./catalog.yaml
++f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625  ./config/agent-os.schema.json
++fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/commands.proto
++89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e  ./control-api/mvp_control.proto
++0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f  ./domain/core.proto
++157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb  ./domain/effects.proto
+ 41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc  ./domain/entities.proto
+ 924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
+-e40f93188e6875b9a453d1e5a158095813600fb07865ffacff5baa9346990ba0  ./events/catalog.yaml
++33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
+ eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799  ./events/event.proto
+ 819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
+ 92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
+ 16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto
+ a2f02b6baf3a5b0177ba5d65d6db725d7fe589f36c95befe369c0f83aa2386fe  ./ports/common.proto
+ afec5f2df4c8d029155df1de4fa3dbf62fc90d3d8f4cab27e1048094c1ad5aab  ./ports/context.proto
+ bf6f9a72f5b76e603a7b8f82fdf5bd674ec6a099126745d3b1d17b3c58df4605  ./ports/event_journal.proto
+ 0a6ae3992bbfca0b67cef7f99753b826147d42319bc9288d7f1d785b152b5bae  ./ports/kernel_store.proto
+ 2d268f1b76b957df101938039448465d5557951db6580ce7a5df24823331fbd8  ./ports/memory_store.proto
+ 3dba75ac41b8ee9b835fe68b764cd7c232945a9d96ae842e7218bda108e7ef38  ./ports/message_queue.proto
+ 2504c73fc48510d7facf0a98e9ac4e9149636b01e1b4ca7784e2277ebe5b7006  ./ports/model.proto
+ 3dbfb7e7ef5f19a0837b1452d976538a398206b7329e03e8759dbc1d1fac0788  ./ports/sandbox.proto
+ f86cbd5b1623bc7c9487149aa96a721c2ab4efde09e904a05cf0d89b79a0d721  ./ports/secret_store.proto
+ 7a8a71ae34d6f123f86b655829d0994995e675d5aeca281d357703d6dd8b2c47  ./ports/tool_runtime.proto
+ 163c139e8b3cb7e766677bd1ca783408b05557a872617ac40444412c783037a0  ./ports/transport.proto
+ 816b8318501e09eeadb79e359d086409b6f7eb1646e84c4c3a1499e6564b40c5  ./ports/workspace.proto
+ cdcd8248c4ba66e51357968c8e5399624be3c0a1664bd1710491d497f278231b  ./protocols/adapter_frames.proto
+-5ac3fddc2a31c23030e8a308a712fbb444c93d230aa7c75a71b27f4a3db82471  ./protocols/agent_loop.proto
++43c01a57725c8967da5a5c373a041a6d1a68d51ae4281ebf286d4df43f832284  ./protocols/agent_loop.proto
+ deea2c5fdb3c13943cb9a6eec1a3582ffeb8aba9cacb781a7457f88886693d10  ./protocols/effect.proto
+ a0b6c4d599eed8a2b1e664f4c0a49ea239459a065ee8451a786290fcfda85fdc  ./protocols/external_adapter.proto
+diff --git a/agent-os-microkernel-mvp-buildpack/scripts/test_validator_mutations.sh b/agent-os-microkernel-mvp-buildpack/scripts/test_validator_mutations.sh
+new file mode 100755
+index 0000000..0db2056
+--- /dev/null
++++ b/agent-os-microkernel-mvp-buildpack/scripts/test_validator_mutations.sh
+@@ -0,0 +1,134 @@
++#!/usr/bin/env bash
++# Mutation test for scripts/validate_buildpack.py.
++#
++# Copies the build pack to a temporary directory, applies exactly one mutation
++# per defect class, and requires the validator to reject every mutated copy
++# with an error naming that class. The validator's established failure exit
++# code is 1 (preserved); the script treats any non-zero exit as caught and
++# additionally checks the expected error signature is present.
++#
++# Exits 0 only when every mutation is caught.
++set -u
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
++TMP="$(mktemp -d "${TMPDIR:-/tmp}/buildpack-mutations.XXXXXX")"
++trap 'rm -rf "${TMP}"' EXIT
++
++BASELINE_LOG="${TMP}/baseline.log"
++if ! python3 "${ROOT}/scripts/validate_buildpack.py" >"${BASELINE_LOG}" 2>&1; then
++  echo "baseline: validator must pass before mutations can be attributed" >&2
++  cat "${BASELINE_LOG}" >&2
++  exit 1
++fi
++
++CASE_NAME=""
++CASE_DIR=""
++TOTAL=0
++CAUGHT=0
++
++prepare_case() {
++  CASE_NAME="$1"
++  CASE_DIR="${TMP}/${CASE_NAME}"
++  rm -rf "${CASE_DIR}"
++  cp -R "${ROOT}" "${CASE_DIR}"
++  find "${CASE_DIR}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
++}
++
++assert_caught() {
++  local signature="$1"
++  local log="${TMP}/${CASE_NAME}.log"
++  local code
++  TOTAL=$((TOTAL + 1))
++  python3 "${CASE_DIR}/scripts/validate_buildpack.py" >"${log}" 2>&1
++  code=$?
++  if [ "${code}" -ne 0 ] && grep -qF -- "${signature}" "${log}"; then
++    echo "CAUGHT ${CASE_NAME} (exit ${code})"
++    CAUGHT=$((CAUGHT + 1))
++  else
++    echo "MISSED ${CASE_NAME} (exit ${code}, expected error containing: ${signature})"
++    sed 's/^/    /' "${log}"
++  fi
++}
++
++# 1. schema coverage: drop a required table name
++prepare_case drop_table
++python3 - "${CASE_DIR}" <<'PY'
++import re, sys
++from pathlib import Path
++p=Path(sys.argv[1])/'specs/kernel-store-schema.sql'
++text=p.read_text()
++text,count=re.subn(r'(?i)CREATE TABLE(?: IF NOT EXISTS)?\s+artifacts\b',
++                   'CREATE TABLE IF NOT EXISTS artifacts_dropped', text, count=1)
++assert count==1, 'artifacts table not found'
++p.write_text(text)
++PY
++assert_caught "missing SQL table artifacts"
++
++# 2. limits: delete a required key
++prepare_case drop_limits_key
++python3 - "${CASE_DIR}" <<'PY'
++import sys
++from pathlib import Path
++p=Path(sys.argv[1])/'specs/limits.yaml'
++lines=[line for line in p.read_text().splitlines(True) if 'capacity_messages:' not in line]
++p.write_text(''.join(lines))
++PY
++assert_caught "missing limits key queue.capacity_messages"
++
++# 3. DAG sources: break one edge in the generated mermaid graph
++prepare_case break_dag_edge
++python3 - "${CASE_DIR}" <<'PY'
++import sys
++from pathlib import Path
++p=Path(sys.argv[1])/'DAG.md'
++text=p.read_text()
++mutated=text.replace('FND_001 --> FND_002','FND_001 --> FND_003',1)
++assert mutated!=text, 'edge not found'
++p.write_text(mutated)
++PY
++assert_caught "DAG.md"
++
++# 4. manifest: corrupt one recorded hash
++prepare_case corrupt_manifest_hash
++python3 - "${CASE_DIR}" <<'PY'
++import json, sys
++from pathlib import Path
++p=Path(sys.argv[1])/'MANIFEST.json'
++manifest=json.loads(p.read_text())
++manifest['files'][0]['sha256']='0'*64
++p.write_text(json.dumps(manifest, indent=2)+'\n')
++PY
++assert_caught "MANIFEST.json digest mismatch for"
++
++# 5. protobuf: duplicate a message across files of the same package
++prepare_case duplicate_proto_message
++python3 - "${CASE_DIR}" <<'PY'
++import sys
++from pathlib import Path
++p=Path(sys.argv[1])/'contracts/control-api/commands.proto'
++p.write_text(p.read_text()+'\nmessage GetRunRequest { string duplicate = 99; }\n')
++PY
++assert_caught "duplicate proto message GetRunRequest"
++
++# 6. ownership: add an unbounded glob to a task file list
++prepare_case add_unbounded_glob
++python3 - "${CASE_DIR}" <<'PY'
++import json, sys, yaml
++from pathlib import Path
++root=Path(sys.argv[1])
++for name in ('dag.yaml','dag.json'):
++    p=root/name
++    graph=yaml.safe_load(p.read_text()) if name.endswith('.yaml') else json.loads(p.read_text())
++    for task in graph['tasks']:
++        if task['id']=='FND-001':
++            task['files'].append('crates/agentd/src/*.rs')
++    if name.endswith('.yaml'):
++        p.write_text(yaml.safe_dump(graph, sort_keys=False))
++    else:
++        p.write_text(json.dumps(graph, indent=2, ensure_ascii=False)+'\n')
++PY
++assert_caught "unbounded glob"
++
++echo "mutations: ${CAUGHT}/${TOTAL} caught"
++[ "${TOTAL}" -gt 0 ] && [ "${CAUGHT}" -eq "${TOTAL}" ]
+diff --git a/agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py b/agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
+index 4e5cc00..c537199 100755
+--- a/agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
++++ b/agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
+@@ -1,20 +1,79 @@
+ #!/usr/bin/env python3
+ from pathlib import Path
+-import hashlib, json, re, sys, yaml
++import argparse, collections, csv, hashlib, heapq, io, json, re, sys, yaml
+ 
+ ROOT=Path(__file__).resolve().parents[1]
+ errors=[]
+ 
+ def err(msg): errors.append(msg)
+ 
++def sha256(p): return hashlib.sha256(p.read_bytes()).hexdigest()
++
++def rel(p): return p.relative_to(ROOT).as_posix()
++
++def flat(node, prefix=''):
++    out={}
++    for key,value in (node or {}).items():
++        path=f'{prefix}{key}'
++        if isinstance(value, dict): out.update(flat(value, f'{path}.'))
++        else: out[path]=value
++    return out
++
++def topological_order(tasks):
++    by_id={t['id']:t for t in tasks}
++    indegree={t['id']:len(t.get('depends_on',[])) for t in tasks}
++    children={t['id']:[] for t in tasks}
++    for t in tasks:
++        for dep in t.get('depends_on',[]): children[dep].append(t['id'])
++    ready=[task_id for task_id in indegree if indegree[task_id]==0]
++    heapq.heapify(ready)
++    order=[]
++    while ready:
++        current=heapq.heappop(ready)
++        order.append(by_id[current])
++        for child in children[current]:
++            indegree[child]-=1
++            if indegree[child]==0: heapq.heappush(ready,child)
++    return order
++
++def write_lock():
++    lock=ROOT/'contracts/contract-lock.sha256'
++    files=sorted((p for p in (ROOT/'contracts').rglob('*') if p.is_file() and p!=lock), key=rel)
++    lines=[f'{sha256(p)}  ./{p.relative_to(ROOT/"contracts").as_posix()}' for p in files]
++    lock.write_text('\n'.join(lines)+'\n')
++    print(f'wrote contracts/contract-lock.sha256 ({len(lines)} entries)')
++
++def write_manifest():
++    manifest_path=ROOT/'MANIFEST.json'
++    files=sorted((p for p in ROOT.rglob('*') if p.is_file() and p!=manifest_path
++                  and '__pycache__' not in p.parts and p.name!='.DS_Store'),
++                 key=lambda p: p.relative_to(ROOT).parts)
++    entries=[]
++    for p in files:
++        data=p.read_bytes()
++        entries.append({'path': rel(p), 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
++    manifest={'schema_version': 1, 'name': 'agent-os-microkernel-mvp-buildpack',
++              'file_count': len(entries)+1, 'files': entries}
++    manifest_path.write_text(json.dumps(manifest, indent=2)+'\n')
++    print(f'wrote MANIFEST.json ({len(entries)} files + itself = {len(entries)+1})')
++
++parser=argparse.ArgumentParser(description='Validate the agent-os microkernel MVP build pack.')
++parser.add_argument('--update-lock', action='store_true', help='rewrite contracts/contract-lock.sha256 and exit')
++parser.add_argument('--write-manifest', action='store_true', help='rewrite MANIFEST.json and exit')
++args=parser.parse_args()
++if args.update_lock: write_lock()
++if args.write_manifest: write_manifest()
++if args.update_lock or args.write_manifest: sys.exit(0)
++
+ # DAG consistency
++tasks=None
+ try:
+     y=yaml.safe_load((ROOT/'dag.yaml').read_text())
+     j=json.loads((ROOT/'dag.json').read_text())
+     if y!=j: err('dag.yaml and dag.json differ')
+     tasks=y['tasks']; ids=[t['id'] for t in tasks]
+     if len(ids)!=len(set(ids)): err('duplicate task IDs')
+     idset=set(ids)
+     for t in tasks:
+         for d in t.get('depends_on',[]):
+             if d not in idset: err(f'{t["id"]} missing dependency {d}')
+@@ -26,65 +85,302 @@ try:
+             indeg[t['id']]+=1; children[d].append(t['id'])
+     q=[i for i,v in indeg.items() if v==0]; seen=[]
+     while q:
+         n=q.pop(); seen.append(n)
+         for c in children[n]:
+             indeg[c]-=1
+             if indeg[c]==0:q.append(c)
+     if len(seen)!=len(idset): err('DAG contains a cycle')
+ except Exception as e: err(f'DAG parse/validation failed: {e}')
+ 
++if tasks is not None:
++    # Agent-side file ownership (R11.2-R11.4)
++    owners=collections.defaultdict(list)
++    for t in tasks:
++        declared=set()
++        for f in t.get('files',[]):
++            if f in declared: err(f'{t["id"]} lists file twice: {f}')
++            declared.add(f)
++            owners[f].append(t['id'])
++    for f,holders in owners.items():
++        if re.search(r'[*?\s]', f):
++            err(f'unbounded glob or prose in {holders[0]} files: {f}')
++    by_id={t['id']:t for t in tasks}
++    def ancestor_set(tid):
++        acc=set(); stack=[tid]
++        while stack:
++            for dep in by_id[stack.pop()].get('depends_on',[]):
++                if dep not in acc: acc.add(dep); stack.append(dep)
++        return acc
++    order=topological_order(tasks)
++    levels={}
++    if len(order)==len(tasks):
++        for t in order:
++            deps=t.get('depends_on',[])
++            levels[t['id']]=0 if not deps else 1+max(levels[d] for d in deps)
++    for f,holders in owners.items():
++        if len(holders)<2: continue
++        for i,a in enumerate(holders):
++            for b in holders[i+1:]:
++                if a in ancestor_set(b) or b in ancestor_set(a):
++                    if levels and levels[a]==levels[b]:
++                        err(f'path {f} written by same-wave tasks {a} and {b}')
++                else:
++                    err(f'path {f} written by incomparable tasks {a} and {b}')
++    for f,holders in owners.items():
++        if f.endswith('/Cargo.toml'):
++            base=f.rsplit('/',1)[0]
++            if not any(f'{base}/src/{m}.rs' in owners for m in ('lib','main')):
++                err(f'crate manifest {f} has no declared module root')
++        if re.search(r'/src/(lib|main)\.rs$', f):
++            base=f.rsplit('/src/',1)[0]
++            if f'{base}/Cargo.toml' not in owners:
++                err(f'module root {f} has no owning crate manifest')
++        if f.endswith('/mod.rs') and len(holders)!=1:
++            err(f'module root {f} must have exactly one owning task, has {holders}')
++
++    # DAG source equality (R11.1, G2)
++    ids=[t['id'] for t in tasks]
++    idmap={t['id']:t for t in tasks}
++    docs={p.stem for p in (ROOT/'tasks').glob('*.md') if p.name!='README.md'}
++    for tid in sorted(set(ids)-docs): err(f'missing task doc tasks/{tid}.md')
++    for tid in sorted(docs-set(ids)): err(f'unknown task doc tasks/{tid}.md')
++    for t in tasks:
++        text=(ROOT/'tasks'/f'{t["id"]}.md').read_text()
++        title=re.match(r'#\s+(\S+)\s+[—-]\s+(.+)', text)
++        if not title:
++            err(f'task doc title line malformed tasks/{t["id"]}.md')
++        elif title.group(1)!=t['id'] or title.group(2).strip()!=t['title']:
++            err(f'task doc title mismatch tasks/{t["id"]}.md')
++        dep_line=re.search(r'^\*\*Depends on:\*\*\s*(.*)$', text, re.M)
++        deps=[]
++        if dep_line:
++            raw=dep_line.group(1).strip()
++            if raw.lower() not in ('', 'none'):
++                deps=re.findall(r'\[([A-Z]+-\d+)\]\([^)]*\)', raw)
++        if deps!=t.get('depends_on',[]): err(f'task doc dependencies mismatch tasks/{t["id"]}.md')
++        tests_block=re.search(r'^## Required tests\s*\n(.*?)(?=^## |\Z)', text, re.M|re.S)
++        md_tests=[]
++        if tests_block:
++            for line in tests_block.group(1).splitlines():
++                line=line.strip()
++                if line.startswith(('-','*')):
++                    md_tests.append(line.lstrip('-* ').strip().strip('`'))
++        if md_tests!=t.get('tests',[]): err(f'task doc test list mismatch tasks/{t["id"]}.md')
++
++    md=(ROOT/'DAG.md').read_text()
++    node_pairs=re.findall(r'^\s*(\w+)\["([^"]+)"\]$', md, re.M)
++    nodes=dict(node_pairs)
++    if len(node_pairs)!=len(nodes): err('DAG.md contains duplicate mermaid nodes')
++    exp_nodes={t['id'].replace('-','_'):f"{t['id']}: {t['title']}" for t in tasks}
++    for node in sorted(set(exp_nodes)-set(nodes)): err(f'DAG.md missing node {node}')
++    for node in sorted(set(nodes)-set(exp_nodes)): err(f'DAG.md unknown node {node}')
++    for node in sorted(set(nodes)&set(exp_nodes)):
++        if nodes[node]!=exp_nodes[node]: err(f'DAG.md title mismatch {node}: {nodes[node]!r}')
++    edges=[(a,b) for a,b in re.findall(r'^\s*(\w+)\s*-->\s*(\w+)$', md, re.M)]
++    exp_edges=[(d.replace('-','_'),t['id'].replace('-','_')) for t in tasks for d in t.get('depends_on',[])]
++    if collections.Counter(edges)!=collections.Counter(exp_edges):
++        for edge in sorted(set(exp_edges)-set(edges)): err(f'DAG.md missing edge {edge[0]} -> {edge[1]}')
++        for edge in sorted(set(edges)-set(exp_edges)): err(f'DAG.md unknown edge {edge[0]} -> {edge[1]}')
++    order=topological_order(tasks)
++    topo=re.findall(r'^\d+\.\s+\[([A-Z]+-\d+)\s+—\s+([^\]]+)\]\(tasks/([A-Z]+-\d+)\.md\)$', md, re.M)
++    if len(topo)!=len(tasks): err(f'DAG.md topology lists {len(topo)} tasks, expected {len(tasks)}')
++    for entry,t in zip(topo,order):
++        if entry[0]!=t['id'] or entry[1]!=t['title'] or entry[2]!=t['id']:
++            err(f'DAG.md topological order mismatch at {t["id"]}')
++    csv_text=(ROOT/'tasks.csv').read_text()
++    reader=csv.DictReader(io.StringIO(csv_text))
++    if reader.fieldnames!=['id','phase','title','depends_on']: err('tasks.csv header mismatch')
++    rows=list(reader)
++    if len(rows)!=len(tasks): err(f'tasks.csv has {len(rows)} rows, expected {len(tasks)}')
++    for row,t in zip(rows,tasks):
++        if row['id']!=t['id']: err(f'tasks.csv ID order mismatch at {t["id"]}')
++        if row['phase']!=t['phase']: err(f'tasks.csv phase mismatch {t["id"]}')
++        if row['title']!=t['title']: err(f'tasks.csv title mismatch {t["id"]}')
++        if (row['depends_on'] or '').split()!=t.get('depends_on',[]): err(f'tasks.csv dependencies mismatch {t["id"]}')
++
++# Normative limits (R10, design GC-5)
++REQUIRED_LIMITS={
++    'schema_version':'int',
++    'queue.capacity_messages':'int',
++    'adapters.max_frame_bytes':'int',
++    'adapters.handshake_timeout_ms':'int',
++    'adapters.request_deadline_ms':'int',
++    'adapters.health_ping_ms':'int',
++    'adapters.health_missed_allowed':'int',
++    'adapters.supervisor_max_restarts':'int',
++    'adapters.supervisor_backoff_initial_ms':'int',
++    'adapters.supervisor_backoff_max_ms':'int',
++    'effects.lease_ms':'int',
++    'effects.lease_renew_ms':'int',
++    'runs.claim_ttl_ms':'int',
++    'daemon.fence_lease_ms':'int',
++    'daemon.fence_renew_ms':'int',
++    'approvals.ttl_ms':'int',
++    'shutdown.drain_deadline_ms':'int',
++    'events.live_buffer_events':'int',
++    'events.dispatcher_poll_ms':'int',
++    'events.scheduler_poll_ms':'int',
++    'streams.read_default_limit':'int',
++    'streams.read_max_limit':'int',
++    'fs.db_file_mode':'mode',
++    'fs.runtime_dir_mode':'mode',
++    'fs.control_socket_mode':'mode',
++}
++try:
++    limits=flat(yaml.safe_load((ROOT/'specs/limits.yaml').read_text()))
++except Exception as e:
++    limits=None; err(f'limits parse failed: {e}')
++if limits is not None:
++    for key,kind in REQUIRED_LIMITS.items():
++        if key not in limits:
++            err(f'missing limits key {key}')
++        elif kind=='int' and (isinstance(limits[key], bool) or not isinstance(limits[key], int)):
++            err(f'limits key {key} is not an integer')
++        elif kind=='mode' and not (isinstance(limits[key], str) and re.fullmatch(r'0[0-7]{3}', limits[key])):
++            err(f'limits key {key} is not a four-digit octal file mode string')
++    if limits.get('schema_version')!=1: err('limits schema_version must be 1')
++
++# Required SQL entities and CHECK constraints (R5, R6, design GC-3)
++REQUIRED_TABLES=['kernel_meta','daemon_fence','agent_specs','sessions','tasks','resolved_run_environments',
++                 'runs','resolved_bindings','run_graph_heads','run_dependencies','workspace_leases','effects',
++                 'resource_reservations','timers','capability_grants','delegation_hops','approval_requests',
++                 'approval_responses','adapter_registrations','config_generations','active_config_generation',
++                 'idempotency_records','event_stream_heads','outbox_events','artifacts','workspaces','loop_turns',
++                 'decisions','adapter_instances','conformance_reports']
++REQUIRED_CHECKS=[('runs','state'),('runs','recovery_disposition'),('effects','state'),('effects','effect_class'),
++                 ('effects','idempotency_semantics'),('effects','reconciliation_semantics'),
++                 ('workspace_leases','mode'),('workspace_leases','enforcement_state'),
++                 ('outbox_events','sensitivity'),('outbox_events','retention'),
++                 ('adapter_registrations','trust_state'),('adapter_registrations','conformance_state'),
++                 ('config_generations','validation_state'),('config_generations','test_state'),
++                 ('run_dependencies','dependency_condition')]
++sql=(ROOT/'specs/kernel-store-schema.sql').read_text()
++blocks={}
++for m in re.finditer(r'CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)\s*\((.*?)\)\s*;', sql, re.S|re.I):
++    blocks[m.group(1).lower()]=m.group(2)
++for table in REQUIRED_TABLES:
++    if table not in blocks: err(f'missing SQL table {table}')
++for table,column in REQUIRED_CHECKS:
++    body=blocks.get(table)
++    if body is None: continue
++    if not re.search(rf'^\s*{column}\b[^\n]*\bCHECK\s*\(', body, re.M):
++        err(f'missing CHECK constraint on {table}.{column}')
++if 'run_edges' in blocks: err('duplicate parent/dependency run_edges table should not exist')
++
++# Event catalog equality (R9)
++try:
++    catalog=yaml.safe_load((ROOT/'contracts/events/catalog.yaml').read_text())
++    catalog_ids=[e['id'] for e in catalog['events']]
++    event_md=(ROOT/'specs/event-catalog.md').read_text()
++    md_ids=re.findall(r'^\|\s*`([A-Za-z0-9]+)`\s*\|', event_md, re.M)
++    if len(catalog_ids)!=len(set(catalog_ids)): err('duplicate event IDs in contracts/events/catalog.yaml')
++    if len(md_ids)!=len(set(md_ids)): err('duplicate event IDs in specs/event-catalog.md')
++    for event in sorted(set(catalog_ids)-set(md_ids)): err(f'event {event} missing from specs/event-catalog.md')
++    for event in sorted(set(md_ids)-set(catalog_ids)): err(f'event {event} missing from contracts/events/catalog.yaml')
++except Exception as e: err(f'event catalog validation failed: {e}')
++
++# Contract lock
++lock=ROOT/'contracts/contract-lock.sha256'
++locked=set()
++if not lock.exists(): err('missing contract lock')
++else:
++    for line in lock.read_text().splitlines():
++        if not line.strip(): continue
++        parts=line.split()
++        if len(parts)<2: err(f'bad lock line {line}'); continue
++        expected=parts[0]; relpath=parts[-1]
++        if relpath.startswith('./'): relpath=relpath[2:]
++        locked.add(relpath)
++        p=ROOT/'contracts'/relpath
++        if not p.exists(): err(f'locked contract missing {relpath}'); continue
++        actual=sha256(p)
++        if actual!=expected: err(f'contract digest mismatch {relpath}')
++    contract_files={p.relative_to(ROOT/'contracts').as_posix() for p in (ROOT/'contracts').rglob('*') if p.is_file() and p!=lock}
++    for path in sorted(contract_files-locked): err(f'contract not covered by lock {path}')
++
++# Manifest count and hashes (R12.2)
++manifest_path=ROOT/'MANIFEST.json'
++try:
++    manifest=json.loads(manifest_path.read_text())
++    entries=manifest['files']
++    if manifest.get('file_count') not in (len(entries), len(entries)+1):
++        err(f'MANIFEST.json file_count {manifest.get("file_count")} does not match {len(entries)} listed files')
++    listed=[e['path'] for e in entries]
++    if len(listed)!=len(set(listed)): err('MANIFEST.json lists a path twice')
++    for entry in entries:
++        p=ROOT/entry['path']
++        if not p.exists(): err(f'MANIFEST.json lists missing file {entry["path"]}'); continue
++        data=p.read_bytes()
++        if entry.get('bytes')!=len(data): err(f'MANIFEST.json byte count mismatch for {entry["path"]}')
++        if entry.get('sha256')!=hashlib.sha256(data).hexdigest(): err(f'MANIFEST.json digest mismatch for {entry["path"]}')
++    disk={rel(p) for p in ROOT.rglob('*') if p.is_file() and p!=manifest_path
++          and '__pycache__' not in p.parts and p.name!='.DS_Store'}
++    for path in sorted(disk-set(listed)): err(f'file not recorded in MANIFEST.json: {path}')
++    for path in sorted(set(listed)-disk): err(f'MANIFEST.json records unknown file {path}')
++except Exception as e: err(f'MANIFEST.json validation failed: {e}')
++
++# Duplicate proto symbols (R1.2)
++symbols=collections.defaultdict(list)
++for p in sorted((ROOT/'contracts').rglob('*.proto')):
++    text=re.sub(r'/\*.*?\*/','',p.read_text(),flags=re.S)
++    text=re.sub(r'//[^\n]*','',text)
++    package=re.search(r'\bpackage\s+([\w.]+)\s*;', text)
++    package=package.group(1) if package else ''
++    position=0
++    while True:
++        m=re.search(r'\b(message|service|enum)\s+(\w+)\s*\{', text[position:])
++        if not m: break
++        start=position+m.start(); body_start=position+m.end()
++        depth=1; i=body_start
++        while i<len(text) and depth:
++            if text[i]=='{': depth+=1
++            elif text[i]=='}': depth-=1
++            i+=1
++        kind=m.group(1); name=m.group(2)
++        if kind=='enum':
++            for value in re.finditer(r'\b(\w+)\s*=\s*-?\d+', text[body_start:i-1]):
++                symbols[(package,'enum value',value.group(1))].append(f'{rel(p)}:{name}')
++        else:
++            symbols[(package,kind,name)].append(rel(p))
++        position=i
++for (package,kind,name),locations in sorted(symbols.items()):
++    if len(locations)>1:
++        err(f'duplicate proto {kind} {name} in package {package or "(none)"}: {", ".join(locations)}')
++
+ # Markdown links
+ link_re=re.compile(r'\[[^\]]+\]\(([^)]+)\)')
+ for p in ROOT.rglob('*.md'):
+     text=p.read_text(errors='replace')
+     for target in link_re.findall(text):
+         if target.startswith(('http://','https://','mailto:','#')): continue
+         path=target.split('#',1)[0]
+         if not path: continue
+         q=(p.parent/path).resolve()
+         if not q.exists(): err(f'broken link {p.relative_to(ROOT)} -> {target}')
+ 
+-# Contract lock
+-lock=ROOT/'contracts/contract-lock.sha256'
+-if not lock.exists(): err('missing contract lock')
+-else:
+-    for line in lock.read_text().splitlines():
+-        if not line.strip(): continue
+-        parts=line.split()
+-        if len(parts)<2: err(f'bad lock line {line}'); continue
+-        expected=parts[0]; rel=parts[-1].lstrip('./'); p=ROOT/'contracts'/rel
+-        if not p.exists(): err(f'locked contract missing {rel}'); continue
+-        actual=hashlib.sha256(p.read_bytes()).hexdigest()
+-        if actual!=expected: err(f'contract digest mismatch {rel}')
+-
+ # JSON/YAML parse and inception versions
+ for p in ROOT.rglob('*.json'):
+     try: json.loads(p.read_text())
+     except Exception as e: err(f'invalid JSON {p.relative_to(ROOT)}: {e}')
+ for p in ROOT.rglob('*.yaml'):
+     try: yaml.safe_load(p.read_text())
+     except Exception as e: err(f'invalid YAML {p.relative_to(ROOT)}: {e}')
+ try:
+     cfg=json.loads((ROOT/'contracts/config/agent-os.schema.json').read_text())
+     if cfg['properties']['schema_version']['const']!=1: err('config schema inception const != 1')
+     ext=json.loads((ROOT/'contracts/manifests/extension.schema.json').read_text())
+     if ext['properties']['manifest_version']['const']!=1: err('extension manifest inception const != 1')
+ except Exception as e: err(f'schema version check failed: {e}')
+ 
+-# Required SQL entities
+-sql=(ROOT/'specs/kernel-store-schema.sql').read_text().lower()
+-for table in ['daemon_fence','runs','run_dependencies','effects','resource_reservations','timers','capability_grants','approval_requests','adapter_registrations','config_generations','idempotency_records','event_stream_heads','outbox_events','resolved_run_environments','resolved_bindings','workspace_leases']:
+-    if f'create table if not exists {table}' not in sql: err(f'missing SQL table {table}')
+-if 'run_edges' in sql: err('duplicate parent/dependency run_edges table should not exist')
+-
+ # Status coverage
+-try:
+-    st=yaml.safe_load((ROOT/'TASK_STATUS.yaml').read_text())['tasks']
+-    if set(st)!=set(ids): err('TASK_STATUS task IDs do not match DAG')
+-except Exception as e: err(f'status validation failed: {e}')
++if tasks is not None:
++    try:
++        st=yaml.safe_load((ROOT/'TASK_STATUS.yaml').read_text())['tasks']
++        if set(st)!=set(ids): err('TASK_STATUS task IDs do not match DAG')
++    except Exception as e: err(f'status validation failed: {e}')
+ 
+ if errors:
+     print('BUILD PACK INVALID')
+     for e in errors: print(' -',e)
+     sys.exit(1)
+ print(f'BUILD PACK OK: {len(ids)} tasks, {len(list(ROOT.rglob("*.md")))} markdown files, contracts locked')
