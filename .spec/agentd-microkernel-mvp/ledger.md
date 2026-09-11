@@ -96,3 +96,5 @@
 - 2026-09-11T06:05:35Z FND-005 -> done (@agent-fnd005)
 - 2026-09-11T06:05:37Z FND-005 fix re-reviewed clean. All 14 tasks done. Final checkpoint and whole-branch review next.
 - 2026-09-11T06:28:04Z Final whole-branch review: Approved, Ready with follow-ups. Now: root CI dispatcher + mirror-freshness check; real R18 threshold helper + span classification. Deferred to next module gap closure: four brief globs + validator brief parsing; catalog<->event.proto sensitivity/retention vocabulary reconciliation. Rollup of all rulings in final message.
+- 2026-09-11T11:37:30Z Ruling: four task briefs with globs (API-002/003, ADP-005, LOOP-001) and validator brief parsing are deferred to the next module's gap closure. Cost if wrong: R11.2 stays unenforced for briefs; dag.yaml lists are clean.
+- 2026-09-11T11:37:31Z Ruling: catalog vs contracts/events/event.proto sensitivity/retention vocabulary reconciliation deferred to the events module as its first gap-closure task. Cost if wrong: the events module invents a mapping.
