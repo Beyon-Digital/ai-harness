@@ -31,6 +31,15 @@ fn context(ids: &DeterministicIds) -> TxContext {
     }
 }
 
+fn context_with_epoch(ids: &DeterministicIds, epoch: u64) -> TxContext {
+    TxContext {
+        daemon_epoch: epoch,
+        principal_id: PrincipalId::new(ids),
+        command_id: CommandId::new(ids),
+        correlation_id: None,
+    }
+}
+
 fn stream_key(run: RunId) -> EventStreamKey {
     match EventStreamKey::new(format!("run/{run}")) {
         Ok(key) => key,
@@ -57,7 +66,7 @@ fn fixture() -> Fixture {
     let ids = DeterministicIds::new(SEED_MS);
     let store = MockStore::new();
     store
-        .set_daemon_epoch(1)
+        .set_daemon_epoch(1, DaemonInstanceId::new(&ids))
         .expect("seed the persisted daemon epoch");
     Fixture {
         session_id: SessionId::new(&ids),
@@ -528,35 +537,29 @@ async fn stream_allocation_is_contiguous_across_transactions() {
 async fn begin_write_asserts_the_persisted_daemon_epoch() {
     let ids = DeterministicIds::new(SEED_MS);
     let store = MockStore::new();
-    let context_with_epoch = |epoch: u64| TxContext {
-        daemon_epoch: epoch,
-        principal_id: PrincipalId::new(&ids),
-        command_id: CommandId::new(&ids),
-        correlation_id: None,
-    };
 
-    let error = match store.begin_write(context_with_epoch(1)).await {
+    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
         Ok(_) => panic!("epoch 1 must be refused while no fence is recorded"),
         Err(error) => error,
     };
     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
-    let error = match store.begin_write(context_with_epoch(0)).await {
+    let error = match store.begin_write(context_with_epoch(&ids, 0)).await {
         Ok(_) => panic!("epoch 0 is the absent epoch and must be refused"),
         Err(error) => error,
     };
     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
 
     store
-        .set_daemon_epoch(2)
+        .set_daemon_epoch(2, DaemonInstanceId::new(&ids))
         .expect("simulate a persisted fence epoch");
-    let error = match store.begin_write(context_with_epoch(1)).await {
+    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
         Ok(_) => panic!("stale epoch 1 must be refused"),
         Err(error) => error,
     };
     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
 
     let txn = store
-        .begin_write(context_with_epoch(2))
+        .begin_write(context_with_epoch(&ids, 2))
         .await
         .expect("matching epoch must open a write transaction");
     txn.rollback().await.expect("rollback");
@@ -567,8 +570,54 @@ async fn begin_write_asserts_the_persisted_daemon_epoch() {
         .expect("acquire fence");
     assert_eq!(fence.epoch.0, 3);
     let txn = store
-        .begin_write(context_with_epoch(3))
+        .begin_write(context_with_epoch(&ids, 3))
         .await
         .expect("epoch recorded by acquire must open a write transaction");
     txn.rollback().await.expect("rollback");
+}
+
+#[tokio::test]
+async fn fence_acquisition_invalidates_in_flight_write() {
+    let ids = DeterministicIds::new(SEED_MS);
+    let store = MockStore::new();
+    let instance = DaemonInstanceId::new(&ids);
+    store
+        .set_daemon_epoch(1, instance)
+        .expect("seed the persisted fence at epoch 1");
+
+    let txn = store
+        .begin_write(context_with_epoch(&ids, 1))
+        .await
+        .expect("open a write transaction at epoch 1");
+    let fence = store
+        .acquire_daemon_fence(instance)
+        .await
+        .expect("acquire fence");
+    assert_eq!(fence.epoch.0, 2);
+
+    let error = match txn.commit().await {
+        Ok(()) => panic!("in-flight transaction must fail after fence acquisition"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::Conflict);
+
+    let error = match store.begin_write(context_with_epoch(&ids, 1)).await {
+        Ok(_) => panic!("stale epoch 1 must be refused after the fence moved to 2"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+
+    let txn = store
+        .begin_write(context_with_epoch(&ids, 2))
+        .await
+        .expect("epoch 2 must open a write transaction");
+    txn.rollback().await.expect("rollback");
+
+    let current = store
+        .current_fence()
+        .await
+        .expect("current fence")
+        .expect("the new fence must survive the failed commit");
+    assert_eq!(current.epoch.0, 2);
+    assert_eq!(current.instance_id, instance);
 }

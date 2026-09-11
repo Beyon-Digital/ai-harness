@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use domain::ids::{
     AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
-    ConfigGenerationId, DecisionId, DelegationChainId, DependencyId, EffectId, EnvironmentId,
-    EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId,
-    TaskId, TimerId, TurnId, WorkspaceId,
+    ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
+    EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
+    RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
 };
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
@@ -96,12 +96,22 @@ impl MockStore {
         Self::default()
     }
 
-    /// Sets the persisted daemon epoch, simulating an epoch recorded by
-    /// [`KernelStore::acquire_daemon_fence`]. The initial value is `0`; a
-    /// write transaction presenting epoch `0` or a non-matching epoch is
-    /// rejected with `FailedPrecondition`.
-    pub fn set_daemon_epoch(&self, epoch: u64) -> errors::Result<()> {
-        lock(&self.state)?.daemon_epoch = epoch;
+    /// Sets the persisted daemon epoch and fence, simulating state left by
+    /// [`KernelStore::acquire_daemon_fence`]. Pass `0` to clear the fence.
+    /// Any change bumps the store revision, so in-flight write transactions
+    /// fail their commit with `Conflict` and cannot restore the old epoch.
+    /// The initial value is `0` with no fence; a write transaction presenting
+    /// epoch `0` or a non-matching epoch is rejected with
+    /// `FailedPrecondition`.
+    pub fn set_daemon_epoch(&self, epoch: u64, instance: DaemonInstanceId) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if epoch == 0 {
+            state.daemon_epoch = 0;
+            state.daemon_fence = None;
+            state.revision = state.revision.saturating_add(1);
+        } else {
+            install_fence(&mut state, epoch, instance);
+        }
         Ok(())
     }
 }
@@ -126,6 +136,20 @@ fn not_found(message: &'static str) -> KernelError {
 
 fn failed_precondition(message: &'static str) -> KernelError {
     KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, message)
+}
+
+/// Persists a fence and bumps the store revision, invalidating any write
+/// transaction opened before the change.
+fn install_fence(state: &mut MockState, epoch: u64, instance: DaemonInstanceId) -> DaemonFence {
+    let fence = DaemonFence {
+        instance_id: instance,
+        epoch: DaemonEpoch(epoch),
+        lease_expires_unix_ms: i64::MAX,
+    };
+    state.daemon_epoch = epoch;
+    state.daemon_fence = Some(fence.clone());
+    state.revision = state.revision.saturating_add(1);
+    fence
 }
 
 fn insert_unique<K, V>(
@@ -306,18 +330,11 @@ impl KernelStore for MockStore {
 
     async fn acquire_daemon_fence(
         &self,
-        instance: domain::ids::DaemonInstanceId,
+        instance: DaemonInstanceId,
     ) -> errors::Result<DaemonFence> {
         let mut state = lock(&self.state)?;
         let epoch = state.daemon_epoch.saturating_add(1);
-        let fence = DaemonFence {
-            instance_id: instance,
-            epoch: DaemonEpoch(epoch),
-            lease_expires_unix_ms: i64::MAX,
-        };
-        state.daemon_epoch = epoch;
-        state.daemon_fence = Some(fence.clone());
-        Ok(fence)
+        Ok(install_fence(&mut state, epoch, instance))
     }
 
     async fn current_fence(&self) -> errors::Result<Option<DaemonFence>> {
