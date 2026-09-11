@@ -17,7 +17,7 @@ Notation:
   effect adds no ambiguity, so the run-state row applies.
 - `PREPARED`, `CLAIMED`, `DISPATCHED`, `ACKNOWLEDGED`, and `UNKNOWN` are the in-flight
   effect states.
-- `lease` is `effects.lease_expires_unix_ms`; `epoch` is the daemon fencing epoch acquired at
+- `lease` is `effects.lease_expires_ms`; `epoch` is the daemon fencing epoch acquired at
   startup (lifecycle step 4), which is always newer than any epoch owned by a prior daemon.
 
 ## Matrix A — runs with no in-flight effect
@@ -47,8 +47,8 @@ Notation:
 | `RUNNING` / `WAITING_TOOL` | `CLAIMED` | lease live and epoch unchanged | `RECOVERING` | Do not double-claim; wait for expiry or reclaim only under configured policy. |
 | `CANCELLING` | `CLAIMED` | — | `RECOVERING` | Fence the old executor and cancel the claim; never dispatch. |
 | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `STATUS_LOOKUP`, `RESULT_LOOKUP`, or `DETERMINISTIC_INSPECTION` | `NEEDS_RECONCILIATION` | Query the provider with the same operation ID/provider ref; never a fresh operation ID. |
-| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN` and idempotency is `NATURALLY_IDEMPOTENT` or `IDEMPOTENCY_KEY_SUPPORTED` | `NEEDS_RECONCILIATION` | Redispatch the same operation ID only under configured policy, then record the outcome. |
-| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN` and idempotency is `NOT_IDEMPOTENT` or `UNKNOWN_IDEMPOTENCY` | `BLOCKED_UNKNOWN_EFFECT` | Mark the effect `UNKNOWN`, block the run, and require a recorded `ResolveUnknownEffect` decision (R7.4). |
+| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN_RECONCILIATION` and idempotency is `NATURALLY_IDEMPOTENT` or `IDEMPOTENCY_KEY_SUPPORTED` | `NEEDS_RECONCILIATION` | Redispatch the same operation ID only under configured policy, then record the outcome. |
+| `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `DISPATCHED` | reconciliation is `IMPOSSIBLE` or `UNKNOWN_RECONCILIATION` and idempotency is `NOT_IDEMPOTENT` or `UNKNOWN_IDEMPOTENCY` | `BLOCKED_UNKNOWN_EFFECT` | Mark the effect `UNKNOWN`, block the run, and require a recorded `ResolveUnknownEffect` decision (R7.4). |
 | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `ACKNOWLEDGED` | owning run transition uncommitted | `RECOVERING` | Deterministic replay: commit effect `COMMITTED` and the uncommitted owning-run transition atomically under the current epoch. |
 | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `ACKNOWLEDGED` | owning run transition already committed | `RECOVERING` | Complete effect `COMMITTED` from the durable acknowledgment; no external call. |
 | `RUNNING` / `WAITING_TOOL` / `CANCELLING` | `UNKNOWN` | — | `BLOCKED_UNKNOWN_EFFECT` | Never dispatch again; the only exit is a recorded `ResolveUnknownEffect` decision (R7.4). |
@@ -59,7 +59,10 @@ Notation:
 ## Matrix C — effect with a terminal owning run
 
 Effects can outlive the run that owned them (for example, a crash during cancellation).
-Terminal run states do not change here; the effect is cleaned up or reconciled.
+Terminal run states do not change here; the effect is cleaned up or reconciled. Matrix C
+takes precedence over Matrix D: a terminal owning run has no disposition to block, and an
+orphaned `PREPARED` or `CLAIMED` effect is cancelled or fenced locally without resolving the
+frozen adapter.
 
 | Run state | Effect state | Condition | Disposition | Recovery action |
 |---|---|---|---|---|
@@ -78,7 +81,7 @@ immutable).
 | Run state | Condition | Disposition | Recovery action |
 |---|---|---|---|
 | any non-terminal run | the frozen `ResolvedRunEnvironment`, a binding's adapter id/version/digest, the workspace URI, or the referenced config generation cannot be loaded or validated | `BLOCKED_MISSING_RESOURCE` | Do not substitute a replacement; exit through `ResolveBlockedRun` (`resume` retries the same frozen references, `cancel` terminalizes the run). |
-| any run | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
+| any non-terminal run | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
 | any run | the same conditions as above and the effect state is `UNKNOWN` | `BLOCKED_UNKNOWN_EFFECT` | `BLOCKED_UNKNOWN_EFFECT` takes precedence because external side effects may already exist; resolve it first. |
 
 ## Unmapped combinations fail closed
@@ -120,7 +123,7 @@ or `cancel`.
 
 R7.4: an effect in state `UNKNOWN`, or any row that selects `BLOCKED_UNKNOWN_EFFECT`, is never
 dispatched again by recovery. The recorded exit is `ResolveUnknownEffect` with
-`expected_effect_state = Unknown` and an explicit `action` (`mark_succeeded`, `mark_failed`,
+`expected_effect_state = UNKNOWN` and an explicit `action` (`mark_succeeded`, `mark_failed`,
 or `retry_accepting_duplicate_risk`); the duplicate-risk retry additionally requires an
 approval request when policy demands one. `ResolveBlockedRun` does not apply here.
 
@@ -136,6 +139,7 @@ dispositions are persisted in `runs.recovery_disposition`.
 | Command idempotency outcome present | `NORMAL` | Return the stored outcome; never execute the command again. |
 | Outbox event not journal-published | `NORMAL` | Append the same event ID/sequence to the Event Journal. |
 | Outbox event journaled but the publication mark is absent | `NORMAL` | Reappend; an exact duplicate is success; then mark published. |
+| Effect result from a stale executor after a higher fencing token claimed | `NORMAL` | Reject the authoritative commit at the fencing check; retain the diagnostic trace only. |
 | Timer `Scheduled` and overdue | `NORMAL` | Claim it normally. |
 | Timer `Claimed` by a stale daemon/worker | `RECOVERING` | Reclaim under fencing/lease rules; never mark `Fired` without the command outcome. |
 | Resource reserved with a terminal owning run | `NORMAL` | Release if the resource is purely logical; reconcile first if an external allocation may exist. |

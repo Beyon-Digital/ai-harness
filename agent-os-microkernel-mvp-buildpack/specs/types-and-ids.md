@@ -150,8 +150,9 @@ sequence   = "0" / %x31-39 *DIGIT
   `v1:{stream_key}:{resume_sequence}`; sequence advancement is never fabricated and no event
   is silently skipped.
 - Persisted cursor columns (`runs.input_event_cursor`, `loop_turns.input_event_cursor`,
-  `decisions.input_event_cursor`, `agent_loop.proto` fencing fields) carry this exact string
-  encoding.
+  `decisions.input_event_cursor`) carry this exact string encoding.
+- Loop-decision fencing fields in `contracts/protocols/agent_loop.proto` carry the same
+  encoding on the wire.
 
 ## Time
 
