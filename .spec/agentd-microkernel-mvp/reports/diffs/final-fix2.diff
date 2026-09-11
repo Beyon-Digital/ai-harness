@@ -1,0 +1,31 @@
+diff --git a/.github/workflows/agent-os.yml b/.github/workflows/agent-os.yml
+index d567272..2b55bfd 100644
+--- a/.github/workflows/agent-os.yml
++++ b/.github/workflows/agent-os.yml
+@@ -5,17 +5,23 @@ on:
+   pull_request:
+ 
+ jobs:
+   validators:
+     name: Repository validators and contract mirror
+-    runs-on: macos-latest
++    runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+-      - name: Validate repository invariants
+-        run: python3 tools/validate_repo.py
++      - name: Set up Python 3
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.x"
++      - name: Install PyYAML
++        run: python3 -m pip install pyyaml
+       - name: Validate build pack (contract lock and derived sources)
+         run: python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
++      - name: Validate repository invariants
++        run: python3 tools/validate_repo.py
+       - name: Check contract mirror freshness and lock
+         run: bash agent-os/scripts/check-contract-mirror.sh
+ 
+   quality:
+     name: Rust quality gates

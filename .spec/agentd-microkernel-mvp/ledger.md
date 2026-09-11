@@ -95,3 +95,4 @@
 - 2026-09-11T05:56:21Z FND-005 -> review (@agent-fnd005)
 - 2026-09-11T06:05:35Z FND-005 -> done (@agent-fnd005)
 - 2026-09-11T06:05:37Z FND-005 fix re-reviewed clean. All 14 tasks done. Final checkpoint and whole-branch review next.
+- 2026-09-11T06:28:04Z Final whole-branch review: Approved, Ready with follow-ups. Now: root CI dispatcher + mirror-freshness check; real R18 threshold helper + span classification. Deferred to next module gap closure: four brief globs + validator brief parsing; catalog<->event.proto sensitivity/retention vocabulary reconciliation. Rollup of all rulings in final message.

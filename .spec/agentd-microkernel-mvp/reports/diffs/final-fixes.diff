@@ -1,0 +1,343 @@
+diff --git a/.github/workflows/agent-os.yml b/.github/workflows/agent-os.yml
+new file mode 100644
+index 0000000..d567272
+--- /dev/null
++++ b/.github/workflows/agent-os.yml
+@@ -0,0 +1,50 @@
++name: agent-os
++
++on:
++  push:
++  pull_request:
++
++jobs:
++  validators:
++    name: Repository validators and contract mirror
++    runs-on: macos-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Validate repository invariants
++        run: python3 tools/validate_repo.py
++      - name: Validate build pack (contract lock and derived sources)
++        run: python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py
++      - name: Check contract mirror freshness and lock
++        run: bash agent-os/scripts/check-contract-mirror.sh
++
++  quality:
++    name: Rust quality gates
++    runs-on: macos-latest
++    defaults:
++      run:
++        working-directory: agent-os
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install pinned toolchain
++        run: rustup show
++      - name: Format
++        run: cargo fmt --check
++      - name: Clippy
++        run: cargo clippy --workspace --all-targets -- -D warnings
++      - name: Test
++        run: cargo test --workspace
++      - name: Check
++        run: cargo check --workspace
++      - name: "Hygiene grep (N2: no wall-clock sleep in tests)"
++        run: |
++          violations=$(grep -RIlE 'thread::sleep|tokio::time::sleep' crates --include='*.rs' | while read -r file; do
++            case "$file" in
++              */tests/*) echo "$file" ;;
++              *) if grep -q '#\[cfg(test)\]' "$file"; then echo "$file"; fi ;;
++            esac
++          done)
++          if [ -n "$violations" ]; then
++            echo "N2 violation: wall-clock sleep in test code:"
++            echo "$violations"
++            exit 1
++          fi
+diff --git a/agent-os/crates/observability/src/classification.rs b/agent-os/crates/observability/src/classification.rs
+index 6d53c0d..57e1829 100644
+--- a/agent-os/crates/observability/src/classification.rs
++++ b/agent-os/crates/observability/src/classification.rs
+@@ -1,25 +1,41 @@
+ //! Classification levels and redacted wrappers.
+ //!
+ //! `Secret` is the only access path to wrapped content: its `Debug` and
+ //! `Display` render `[REDACTED]` and `expose` is the sole way to read the
+ //! value. `Redacted` hides its content from `Debug` but permits access.
+ 
+ /// Sensitivity of a value, ordered from lowest to highest.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+ pub enum Classification {
+     Public = 0,
++    #[default]
+     Internal = 1,
+     Confidential = 2,
+     Secret = 3,
+ }
+ 
++impl Classification {
++    /// Reports whether this classification is more sensitive than
++    /// `threshold`.
++    pub fn exceeds(self, threshold: Classification) -> bool {
++        self > threshold
++    }
++}
++
++/// Reports whether a payload classified `payload` may be emitted by a sink
++/// whose sensitivity threshold is `sink`. Payloads above the threshold are
++/// redacted or omitted (R18.3).
++pub fn is_visible(payload: Classification, sink: Classification) -> bool {
++    !payload.exceeds(sink)
++}
++
+ /// Reports the [`Classification`] of a value.
+ pub trait Classified {
+     fn classification(&self) -> Classification;
+ }
+ 
+ /// Wrapper that renders `[REDACTED]` through `Debug` while still allowing
+ /// access through [`Redacted::get`] and [`Redacted::into_inner`].
+ pub struct Redacted<T>(T);
+ 
+ impl<T> Redacted<T> {
+diff --git a/agent-os/crates/observability/src/lib.rs b/agent-os/crates/observability/src/lib.rs
+index 11020e3..e6d5cc8 100644
+--- a/agent-os/crates/observability/src/lib.rs
++++ b/agent-os/crates/observability/src/lib.rs
+@@ -1,53 +1,61 @@
+ //! Classification, redaction, and tracing helpers for the daemon.
+ #![forbid(unsafe_code)]
+ 
+ pub mod classification;
+-pub use classification::{Classification, Classified, Redacted, Secret};
++pub use classification::{Classification, Classified, Redacted, Secret, is_visible};
+ 
+-/// Kernel correlation identifiers attached to every signal.
++/// Kernel correlation identifiers and data classification attached to every
++/// signal.
+ #[derive(Clone, Debug, Default)]
+ pub struct KernelFields {
+     pub correlation_id: Option<String>,
+     pub run_id: Option<String>,
+     pub task_id: Option<String>,
+     pub effect_id: Option<String>,
++    /// Sensitivity of the signal; defaults to [`Classification::Internal`].
++    pub classification: Classification,
+ }
+ 
+ /// Installs a `tracing_subscriber` sink, JSON-encoded when `json` is true.
+ pub fn init_tracing(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+     let builder = tracing_subscriber::fmt().with_env_filter(
+         tracing_subscriber::EnvFilter::try_from_default_env()
+             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+     );
+     if json {
+         builder.json().try_init().map_err(std::io::Error::other)?;
+     } else {
+         builder.try_init().map_err(std::io::Error::other)?;
+     }
+     Ok(())
+ }
+ 
+ /// Builds a span carrying the correlation, run, task, and effect ids when
+-/// present.
++/// present, plus the signal's data classification.
+ pub fn kernel_span(fields: &KernelFields) -> tracing::Span {
+     let span = tracing::info_span!(
+         "kernel.span",
+         correlation_id = tracing::field::Empty,
+         run_id = tracing::field::Empty,
+         task_id = tracing::field::Empty,
+         effect_id = tracing::field::Empty,
++        classification = tracing::field::Empty,
+     );
+     if let Some(correlation_id) = fields.correlation_id.as_deref() {
+         span.record("correlation_id", correlation_id);
+     }
+     if let Some(run_id) = fields.run_id.as_deref() {
+         span.record("run_id", run_id);
+     }
+     if let Some(task_id) = fields.task_id.as_deref() {
+         span.record("task_id", task_id);
+     }
+     if let Some(effect_id) = fields.effect_id.as_deref() {
+         span.record("effect_id", effect_id);
+     }
++    span.record(
++        "classification",
++        tracing::field::debug(fields.classification),
++    );
+     span
+ }
+diff --git a/agent-os/crates/observability/tests/redaction.rs b/agent-os/crates/observability/tests/redaction.rs
+index 45aede1..804156f 100644
+--- a/agent-os/crates/observability/tests/redaction.rs
++++ b/agent-os/crates/observability/tests/redaction.rs
+@@ -1,18 +1,18 @@
+ //! R18.1, R18.2, R18.3, N1: secrets never render through Debug or Display,
+ //! classification ordering supports threshold redaction, and the kernel span
+ //! helper attaches correlation identifiers.
+ 
+ use std::io::Write;
+ use std::sync::{Arc, Mutex};
+ 
+-use observability::classification::{Classification, Classified, Redacted, Secret};
++use observability::classification::{Classification, Classified, Redacted, Secret, is_visible};
+ use observability::{KernelFields, init_tracing, kernel_span};
+ 
+ const SECRET_VALUE: &str = "hunter2";
+ 
+ #[test]
+ fn secret_debug_never_renders_the_value() {
+     let rendered = format!("{:?}", Secret::new(SECRET_VALUE));
+     assert!(
+         !rendered.contains(SECRET_VALUE),
+         "Debug leaked the secret: {rendered}"
+@@ -48,33 +48,29 @@ fn redacted_debug_hides_but_access_is_allowed() {
+ fn classification_orders_public_below_secret() {
+     assert!(Classification::Public < Classification::Internal);
+     assert!(Classification::Internal < Classification::Confidential);
+     assert!(Classification::Confidential < Classification::Secret);
+     assert!(Classification::Public < Classification::Secret);
+     assert_eq!(Classification::Public as u8, 0);
+     assert_eq!(Classification::Secret as u8, 3);
+ }
+ 
+ #[test]
+-fn classification_ordering_redacts_at_or_above_sink_threshold() {
+-    fn redacted_at_sink(level: Classification, sink_threshold: Classification) -> bool {
+-        level >= sink_threshold
+-    }
+-
+-    let sink_threshold = Classification::Confidential;
+-    assert!(redacted_at_sink(Classification::Secret, sink_threshold));
+-    assert!(redacted_at_sink(
+-        Classification::Confidential,
+-        sink_threshold
+-    ));
+-    assert!(!redacted_at_sink(Classification::Internal, sink_threshold));
+-    assert!(!redacted_at_sink(Classification::Public, sink_threshold));
++fn classification_ordering_redacts_payloads_above_sink_threshold() {
++    let sink = Classification::Confidential;
++    assert!(Classification::Secret.exceeds(sink));
++    assert!(!Classification::Confidential.exceeds(sink));
++    assert!(!Classification::Internal.exceeds(sink));
++    assert!(!is_visible(Classification::Secret, sink));
++    assert!(is_visible(Classification::Confidential, sink));
++    assert!(is_visible(Classification::Internal, sink));
++    assert!(is_visible(Classification::Public, sink));
+ }
+ 
+ struct ClassifiedThing;
+ 
+ impl Classified for ClassifiedThing {
+     fn classification(&self) -> Classification {
+         Classification::Confidential
+     }
+ }
+ 
+@@ -126,20 +122,21 @@ fn capture_span_output(fields: &KernelFields) -> String {
+         .unwrap_or_default()
+ }
+ 
+ #[test]
+ fn kernel_span_attaches_kernel_field_ids() {
+     let fields = KernelFields {
+         correlation_id: Some("corr-1".to_string()),
+         run_id: Some("run-1".to_string()),
+         task_id: Some("task-1".to_string()),
+         effect_id: Some("eff-1".to_string()),
++        ..KernelFields::default()
+     };
+     let output = capture_span_output(&fields);
+     assert!(
+         output.contains("correlation_id=\"corr-1\""),
+         "missing correlation_id: {output}"
+     );
+     assert!(
+         output.contains("run_id=\"run-1\""),
+         "missing run_id: {output}"
+     );
+@@ -154,15 +151,39 @@ fn kernel_span_attaches_kernel_field_ids() {
+ }
+ 
+ #[test]
+ fn kernel_span_omits_absent_kernel_field_ids() {
+     let output = capture_span_output(&KernelFields::default());
+     for field in ["correlation_id", "run_id", "task_id", "effect_id"] {
+         assert!(!output.contains(field), "unexpected {field}: {output}");
+     }
+ }
+ 
++#[test]
++fn kernel_span_records_the_classification() {
++    let fields = KernelFields {
++        classification: Classification::Secret,
++        ..KernelFields::default()
++    };
++    let output = capture_span_output(&fields);
++    assert!(
++        output.contains("classification=Secret"),
++        "missing classification: {output}"
++    );
++}
++
++#[test]
++fn kernel_span_defaults_classification_to_internal() {
++    let fields = KernelFields::default();
++    assert_eq!(fields.classification, Classification::Internal);
++    let output = capture_span_output(&fields);
++    assert!(
++        output.contains("classification=Internal"),
++        "missing default classification: {output}"
++    );
++}
++
+ #[test]
+ fn init_tracing_installs_a_sink() {
+     let result = init_tracing(true);
+     assert!(result.is_ok(), "init_tracing returned {result:?}");
+ }
+diff --git a/agent-os/scripts/check-contract-mirror.sh b/agent-os/scripts/check-contract-mirror.sh
+new file mode 100755
+index 0000000..8812916
+--- /dev/null
++++ b/agent-os/scripts/check-contract-mirror.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++# Verifies that the implementation contract mirror (agent-os/proto) is
++# byte-identical to the build pack snapshot
++# (agent-os-microkernel-mvp-buildpack/contracts) and that the mirror's
++# contract lock still matches every mirrored file.
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++agent_os_dir=$(dirname "$script_dir")
++repo_root=$(dirname "$agent_os_dir")
++
++pack_contracts="$repo_root/agent-os-microkernel-mvp-buildpack/contracts"
++proto_dir="$agent_os_dir/proto"
++
++failed=0
++
++if ! diff -rq "$pack_contracts" "$proto_dir"; then
++  echo "contract mirror check: snapshot and implementation proto differ" >&2
++  failed=1
++fi
++
++if command -v shasum >/dev/null 2>&1; then
++  (cd "$proto_dir" && shasum -a 256 -c contract-lock.sha256) || failed=1
++elif command -v sha256sum >/dev/null 2>&1; then
++  (cd "$proto_dir" && sha256sum -c contract-lock.sha256) || failed=1
++else
++  echo "contract mirror check: neither shasum nor sha256sum is available" >&2
++  failed=1
++fi
++
++if [ "$failed" -ne 0 ]; then
++  echo "contract mirror check FAILED" >&2
++  exit 1
++fi
++
++echo "contract mirror check OK"
