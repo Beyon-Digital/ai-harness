@@ -35,3 +35,8 @@
 - 2026-09-11T23:02:24Z PST-003A -> review (@agent-pst003a)
 - 2026-09-11T23:10:30Z PST-003A -> done (@agent-pst003a)
 - 2026-09-11T23:10:31Z PST-003A approved after one test-quality fix round; leases amended (txn.rs shared across PST-003B/004/005 with the PST-004->PST-003B edge serializing waves 4-6).
+- 2026-09-11T23:10:57Z PST-003B -> claimed (@agent-pst003b)
+- 2026-09-11T23:10:58Z PST-003B -> in_progress (@agent-pst003b)
+- 2026-09-11T23:26:38Z PST-003B -> review (@agent-pst003b)
+- 2026-09-11T23:36:10Z PST-003B -> done (@agent-pst003b)
+- 2026-09-11T23:36:11Z PST-003B approved after one fix round (lease-exclusivity test + DDL-literal state validation). Ruling: lease CAS stays epoch-only with exclusivity enforced by the partial unique index. 4/7 done.

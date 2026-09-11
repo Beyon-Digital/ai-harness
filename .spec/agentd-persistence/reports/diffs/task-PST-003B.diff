@@ -1,0 +1,3151 @@
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+new file mode 100644
+index 0000000..1ef3278
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+@@ -0,0 +1,226 @@
++//! Adapter repository: registrations, instances, and conformance reports.
++//!
++//! Registrations and conformance reports are immutable rows; the durable
++//! adapter instance is the only mutable record and changes through a state
++//! CAS (R3.2).
++
++use async_trait::async_trait;
++use domain::ids::{AdapterId, AdapterInstanceId};
++use domain::security::{ConformanceState, TrustState};
++use kernel_store::models::{
++    AdapterInstanceStatePatch, AdapterRegistrationRow, ConformanceReportRow, NewAdapterInstance,
++    NewAdapterRegistration, NewConformanceReport,
++};
++use kernel_store::repositories::{AdapterRead, AdapterRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the adapter tables.
++pub(crate) struct SqliteAdapterRepo {
++    conn: SharedConn,
++}
++
++impl SqliteAdapterRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_REGISTRATION: &str = "SELECT adapter_id, version, bundle_digest, manifest_digest, \
++     runtime_type, implemented_ports, capabilities, trust_state, conformance_state, created_at_ms \
++     FROM adapter_registrations";
++
++fn decode_registration(row: &SqliteRow) -> errors::Result<AdapterRegistrationRow> {
++    Ok(AdapterRegistrationRow {
++        adapter_id: mapping::decode_id(
++            "adapter_registrations.adapter_id",
++            &mapping::text(row, "adapter_id")?,
++        )?,
++        version: mapping::text(row, "version")?,
++        bundle_digest: mapping::text(row, "bundle_digest")?,
++        manifest_digest: mapping::text(row, "manifest_digest")?,
++        runtime_type: mapping::text(row, "runtime_type")?,
++        implemented_ports: mapping::blob(row, "implemented_ports")?,
++        capabilities: mapping::blob(row, "capabilities")?,
++        trust_state: mapping::decode_state(
++            "adapter_registrations.trust_state",
++            &mapping::text(row, "trust_state")?,
++            TrustState::from_state_str,
++        )?,
++        conformance_state: mapping::decode_state(
++            "adapter_registrations.conformance_state",
++            &mapping::text(row, "conformance_state")?,
++            ConformanceState::from_state_str,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++fn decode_conformance_report(row: &SqliteRow) -> errors::Result<ConformanceReportRow> {
++    Ok(ConformanceReportRow {
++        adapter_id: mapping::decode_id(
++            "conformance_reports.adapter_id",
++            &mapping::text(row, "adapter_id")?,
++        )?,
++        adapter_version: mapping::text(row, "adapter_version")?,
++        bundle_digest: mapping::text(row, "bundle_digest")?,
++        report_digest: mapping::text(row, "report_digest")?,
++        harness_version: mapping::text(row, "harness_version")?,
++        result: mapping::text(row, "result")?,
++        run_at_ms: mapping::int(row, "run_at_ms")?,
++        details: mapping::opt_blob(row, "details")?,
++    })
++}
++
++#[async_trait]
++impl AdapterRead for SqliteAdapterRepo {
++    async fn get_registration(
++        &mut self,
++        adapter_id: AdapterId,
++        version: &str,
++        bundle_digest: &str,
++    ) -> errors::Result<Option<AdapterRegistrationRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!(
++            "{SELECT_REGISTRATION} WHERE adapter_id = ?1 AND version = ?2 AND bundle_digest = ?3"
++        );
++        let row = sqlx::query(&query)
++            .bind(adapter_id.to_string())
++            .bind(version)
++            .bind(bundle_digest)
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_registration).transpose()
++    }
++
++    async fn get_conformance_report(
++        &mut self,
++        adapter_id: AdapterId,
++        version: &str,
++        bundle_digest: &str,
++    ) -> errors::Result<Option<ConformanceReportRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT adapter_id, adapter_version, bundle_digest, report_digest, harness_version, \
++             result, run_at_ms, details FROM conformance_reports \
++             WHERE adapter_id = ?1 AND adapter_version = ?2 AND bundle_digest = ?3",
++        )
++        .bind(adapter_id.to_string())
++        .bind(version)
++        .bind(bundle_digest)
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_conformance_report).transpose()
++    }
++}
++
++#[async_trait]
++impl AdapterRepo for SqliteAdapterRepo {
++    async fn insert_registration(
++        &mut self,
++        registration: NewAdapterRegistration,
++    ) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO adapter_registrations (adapter_id, version, bundle_digest, \
++             manifest_digest, runtime_type, implemented_ports, capabilities, trust_state, \
++             conformance_state, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
++        )
++        .bind(registration.adapter_id.to_string())
++        .bind(registration.version)
++        .bind(registration.bundle_digest)
++        .bind(registration.manifest_digest)
++        .bind(registration.runtime_type)
++        .bind(registration.implemented_ports)
++        .bind(registration.capabilities)
++        .bind(registration.trust_state.as_str())
++        .bind(registration.conformance_state.as_str())
++        .bind(registration.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO adapter_instances (adapter_instance_id, adapter_id, adapter_version, \
++             bundle_digest, daemon_instance_id, pid, process_start_identity, state, exit_reason, \
++             last_heartbeat_ms, started_at_ms, ended_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
++        )
++        .bind(instance.adapter_instance_id.to_string())
++        .bind(instance.adapter_id.to_string())
++        .bind(instance.adapter_version)
++        .bind(instance.bundle_digest)
++        .bind(instance.daemon_instance_id.to_string())
++        .bind(instance.pid)
++        .bind(instance.process_start_identity)
++        .bind(instance.state)
++        .bind(instance.exit_reason)
++        .bind(instance.last_heartbeat_ms)
++        .bind(instance.started_at_ms)
++        .bind(instance.ended_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_instance_state(
++        &mut self,
++        id: AdapterInstanceId,
++        expect_state: &str,
++        patch: AdapterInstanceStatePatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let result = sqlx::query(
++            "UPDATE adapter_instances SET \
++             state = COALESCE(?1, state), \
++             exit_reason = COALESCE(?2, exit_reason), \
++             last_heartbeat_ms = COALESCE(?3, last_heartbeat_ms), \
++             ended_at_ms = COALESCE(?4, ended_at_ms) \
++             WHERE adapter_instance_id = ?5 AND state = ?6",
++        )
++        .bind(patch.state)
++        .bind(patch.exit_reason)
++        .bind(patch.last_heartbeat_ms)
++        .bind(patch.ended_at_ms)
++        .bind(id.to_string())
++        .bind(expect_state)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++
++    async fn insert_conformance_report(
++        &mut self,
++        report: NewConformanceReport,
++    ) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO conformance_reports (adapter_id, adapter_version, bundle_digest, \
++             report_digest, harness_version, result, run_at_ms, details) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
++        )
++        .bind(report.adapter_id.to_string())
++        .bind(report.adapter_version)
++        .bind(report.bundle_digest)
++        .bind(report.report_digest)
++        .bind(report.harness_version)
++        .bind(report.result)
++        .bind(report.run_at_ms)
++        .bind(report.details)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs b/agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs
+new file mode 100644
+index 0000000..956376f
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs
+@@ -0,0 +1,111 @@
++//! Artifact repository: immutable inserts with id- and URI-based reads.
++
++use async_trait::async_trait;
++use domain::ids::ArtifactId;
++use domain::security::{RetentionClass, SensitivityClass};
++use kernel_store::models::{ArtifactRow, NewArtifact};
++use kernel_store::repositories::{ArtifactRead, ArtifactRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `artifacts` table.
++pub(crate) struct SqliteArtifactRepo {
++    conn: SharedConn,
++}
++
++impl SqliteArtifactRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_ARTIFACT: &str = "SELECT artifact_id, uri, digest, media_type, size_bytes, \
++     origin_run_id, origin_effect_id, sensitivity, retention, locator, created_at_ms FROM artifacts";
++
++fn decode_artifact(row: &SqliteRow) -> errors::Result<ArtifactRow> {
++    Ok(ArtifactRow {
++        artifact_id: mapping::decode_id(
++            "artifacts.artifact_id",
++            &mapping::text(row, "artifact_id")?,
++        )?,
++        uri: mapping::text(row, "uri")?,
++        digest: mapping::text(row, "digest")?,
++        media_type: mapping::text(row, "media_type")?,
++        size_bytes: mapping::int(row, "size_bytes")?,
++        origin_run_id: mapping::decode_id(
++            "artifacts.origin_run_id",
++            &mapping::text(row, "origin_run_id")?,
++        )?,
++        origin_effect_id: mapping::decode_opt_id(
++            "artifacts.origin_effect_id",
++            mapping::opt_text(row, "origin_effect_id")?,
++        )?,
++        sensitivity: mapping::decode_wire(
++            "artifacts.sensitivity",
++            mapping::int(row, "sensitivity")?,
++            SensitivityClass::from_wire,
++        )?,
++        retention: mapping::decode_wire(
++            "artifacts.retention",
++            mapping::int(row, "retention")?,
++            RetentionClass::from_wire,
++        )?,
++        locator: mapping::text(row, "locator")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl ArtifactRead for SqliteArtifactRepo {
++    async fn get_by_id(&mut self, id: ArtifactId) -> errors::Result<Option<ArtifactRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_ARTIFACT} WHERE artifact_id = ?1");
++        let row = sqlx::query(&query)
++            .bind(id.to_string())
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_artifact).transpose()
++    }
++
++    async fn get_by_uri(&mut self, uri: &str) -> errors::Result<Option<ArtifactRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_ARTIFACT} WHERE uri = ?1");
++        let row = sqlx::query(&query)
++            .bind(uri)
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_artifact).transpose()
++    }
++}
++
++#[async_trait]
++impl ArtifactRepo for SqliteArtifactRepo {
++    async fn insert(&mut self, artifact: NewArtifact) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO artifacts (artifact_id, uri, digest, media_type, size_bytes, \
++             origin_run_id, origin_effect_id, sensitivity, retention, locator, created_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
++        )
++        .bind(artifact.artifact_id.to_string())
++        .bind(artifact.uri)
++        .bind(artifact.digest)
++        .bind(artifact.media_type)
++        .bind(artifact.size_bytes)
++        .bind(artifact.origin_run_id.to_string())
++        .bind(artifact.origin_effect_id.map(|id| id.to_string()))
++        .bind(i64::from(artifact.sensitivity.to_wire()))
++        .bind(i64::from(artifact.retention.to_wire()))
++        .bind(artifact.locator)
++        .bind(artifact.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/config.rs b/agent-os/crates/kernel-store-sqlite/src/repos/config.rs
+new file mode 100644
+index 0000000..e430402
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/config.rs
+@@ -0,0 +1,169 @@
++//! Configuration repository: generations and the active-pointer CAS.
++//!
++//! The active pointer is a singleton row. `cas_active` compares the persisted
++//! revision (zero when no pointer exists) and rewrites the pointer at
++//! `expected + 1`; a stale revision reports `false` without mutation (R3.2).
++
++use async_trait::async_trait;
++use domain::ids::ConfigGenerationId;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{ActiveConfigGenerationRow, ConfigGenerationRow, NewConfigGeneration};
++use kernel_store::repositories::{ConfigRead, ConfigRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `config_generations` and `active_config_generation`.
++pub(crate) struct SqliteConfigRepo {
++    conn: SharedConn,
++}
++
++impl SqliteConfigRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_generation(row: &SqliteRow) -> errors::Result<ConfigGenerationRow> {
++    Ok(ConfigGenerationRow {
++        generation_id: mapping::decode_id(
++            "config_generations.generation_id",
++            &mapping::text(row, "generation_id")?,
++        )?,
++        digest: mapping::text(row, "digest")?,
++        document: mapping::blob(row, "document")?,
++        validation_state: mapping::text(row, "validation_state")?,
++        test_state: mapping::text(row, "test_state")?,
++        created_by_actor_id: mapping::decode_id(
++            "config_generations.created_by_actor_id",
++            &mapping::text(row, "created_by_actor_id")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++fn decode_active(row: &SqliteRow) -> errors::Result<ActiveConfigGenerationRow> {
++    Ok(ActiveConfigGenerationRow {
++        generation_id: mapping::decode_id(
++            "active_config_generation.generation_id",
++            &mapping::text(row, "generation_id")?,
++        )?,
++        revision: mapping::decode_u64(
++            "active_config_generation.revision",
++            mapping::int(row, "revision")?,
++        )?,
++        activated_at_ms: mapping::int(row, "activated_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl ConfigRead for SqliteConfigRepo {
++    async fn get_generation(
++        &mut self,
++        id: ConfigGenerationId,
++    ) -> errors::Result<Option<ConfigGenerationRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT generation_id, digest, document, validation_state, test_state, \
++             created_by_actor_id, created_at_ms FROM config_generations WHERE generation_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_generation).transpose()
++    }
++
++    async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT generation_id, revision, activated_at_ms FROM active_config_generation \
++             WHERE singleton = 1",
++        )
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_active).transpose()
++    }
++}
++
++#[async_trait]
++impl ConfigRepo for SqliteConfigRepo {
++    async fn insert_generation(&mut self, generation: NewConfigGeneration) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO config_generations (generation_id, digest, document, validation_state, \
++             test_state, created_by_actor_id, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
++        )
++        .bind(generation.generation_id.to_string())
++        .bind(generation.digest)
++        .bind(generation.document)
++        .bind(generation.validation_state)
++        .bind(generation.test_state)
++        .bind(generation.created_by_actor_id.to_string())
++        .bind(generation.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_active(
++        &mut self,
++        expected_revision: u64,
++        generation: ConfigGenerationId,
++        activated_at_ms: i64,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        let current: Option<i64> =
++            sqlx::query_scalar("SELECT revision FROM active_config_generation WHERE singleton = 1")
++                .fetch_optional(&mut *conn)
++                .await
++                .map_err(mapping::from_sqlx)?;
++        let current = match current {
++            Some(value) => mapping::decode_u64("active_config_generation.revision", value)?,
++            None => 0,
++        };
++        if current != expected_revision {
++            return Ok(false);
++        }
++
++        let exists: Option<i64> =
++            sqlx::query_scalar("SELECT 1 FROM config_generations WHERE generation_id = ?1")
++                .bind(generation.to_string())
++                .fetch_optional(&mut *conn)
++                .await
++                .map_err(mapping::from_sqlx)?;
++        if exists.is_none() {
++            return Err(KernelError::new(
++                ErrorCode::NotFound,
++                RetryClass::Never,
++                "config generation not found",
++            ));
++        }
++
++        let next = mapping::encode_u64(
++            "active_config_generation.revision",
++            expected_revision.saturating_add(1),
++        )?;
++        let result = sqlx::query(
++            "INSERT INTO active_config_generation (singleton, generation_id, revision, \
++             activated_at_ms) VALUES (1, ?1, ?2, ?3) \
++             ON CONFLICT(singleton) DO UPDATE SET \
++               generation_id = excluded.generation_id, \
++               revision = excluded.revision, \
++               activated_at_ms = excluded.activated_at_ms",
++        )
++        .bind(generation.to_string())
++        .bind(next)
++        .bind(activated_at_ms)
++        .execute(&mut *conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/effects.rs b/agent-os/crates/kernel-store-sqlite/src/repos/effects.rs
+new file mode 100644
+index 0000000..dd0a383
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/effects.rs
+@@ -0,0 +1,210 @@
++//! Effect repository: insert, fetch, list, and compare-and-set transitions.
++//!
++//! A transition checks the persisted state and, when present, the executor
++//! fencing token; the patch is applied atomically and a stale expectation
++//! reports `false` without mutation (R3.2).
++
++use async_trait::async_trait;
++use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
++use domain::ids::{EffectId, RunId};
++use kernel_store::models::{EffectPatch, EffectRow, NewEffect};
++use kernel_store::repositories::{EffectRead, EffectRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `effects` table.
++pub(crate) struct SqliteEffectRepo {
++    conn: SharedConn,
++}
++
++impl SqliteEffectRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_EFFECT: &str = "SELECT effect_id, run_id, step_sequence, decision_id, operation, \
++     request_hash, request_payload, effect_class, idempotency_semantics, \
++     reconciliation_semantics, cancellation_semantics, compensation_capability, adapter_id, \
++     adapter_version, adapter_digest, state, executor_id, executor_fencing_token, \
++     daemon_fencing_epoch, lease_expires_ms, provider_operation_ref, result_ref, error_code, \
++     created_at_ms, updated_at_ms FROM effects";
++
++fn decode_effect(row: &SqliteRow) -> errors::Result<EffectRow> {
++    Ok(EffectRow {
++        effect_id: mapping::decode_id("effects.effect_id", &mapping::text(row, "effect_id")?)?,
++        run_id: mapping::decode_id("effects.run_id", &mapping::text(row, "run_id")?)?,
++        step_sequence: mapping::decode_u64(
++            "effects.step_sequence",
++            mapping::int(row, "step_sequence")?,
++        )?,
++        decision_id: mapping::decode_id(
++            "effects.decision_id",
++            &mapping::text(row, "decision_id")?,
++        )?,
++        operation: mapping::text(row, "operation")?,
++        request_hash: mapping::text(row, "request_hash")?,
++        request_payload: mapping::blob(row, "request_payload")?,
++        effect_class: mapping::decode_wire(
++            "effects.effect_class",
++            mapping::int(row, "effect_class")?,
++            EffectClass::from_wire,
++        )?,
++        idempotency_semantics: mapping::decode_wire(
++            "effects.idempotency_semantics",
++            mapping::int(row, "idempotency_semantics")?,
++            IdempotencySemantics::from_wire,
++        )?,
++        reconciliation_semantics: mapping::decode_wire(
++            "effects.reconciliation_semantics",
++            mapping::int(row, "reconciliation_semantics")?,
++            ReconciliationSemantics::from_wire,
++        )?,
++        cancellation_semantics: mapping::text(row, "cancellation_semantics")?,
++        compensation_capability: mapping::opt_text(row, "compensation_capability")?,
++        adapter_id: mapping::decode_id("effects.adapter_id", &mapping::text(row, "adapter_id")?)?,
++        adapter_version: mapping::text(row, "adapter_version")?,
++        adapter_digest: mapping::text(row, "adapter_digest")?,
++        state: mapping::decode_wire(
++            "effects.state",
++            mapping::int(row, "state")?,
++            EffectState::from_wire,
++        )?,
++        executor_id: mapping::opt_text(row, "executor_id")?,
++        executor_fencing_token: mapping::opt_int(row, "executor_fencing_token")?
++            .map(|value| mapping::decode_u64("effects.executor_fencing_token", value))
++            .transpose()?,
++        daemon_fencing_epoch: mapping::opt_int(row, "daemon_fencing_epoch")?
++            .map(|value| mapping::decode_u64("effects.daemon_fencing_epoch", value))
++            .transpose()?,
++        lease_expires_ms: mapping::opt_int(row, "lease_expires_ms")?,
++        provider_operation_ref: mapping::opt_text(row, "provider_operation_ref")?,
++        result_ref: mapping::opt_text(row, "result_ref")?,
++        error_code: mapping::opt_text(row, "error_code")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        updated_at_ms: mapping::int(row, "updated_at_ms")?,
++    })
++}
++
++async fn fetch_effect(
++    conn: &mut sqlx::SqliteConnection,
++    id: EffectId,
++) -> errors::Result<Option<EffectRow>> {
++    let query = format!("{SELECT_EFFECT} WHERE effect_id = ?1");
++    let row = sqlx::query(&query)
++        .bind(id.to_string())
++        .fetch_optional(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++    row.as_ref().map(decode_effect).transpose()
++}
++
++#[async_trait]
++impl EffectRead for SqliteEffectRepo {
++    async fn get(&mut self, id: EffectId) -> errors::Result<Option<EffectRow>> {
++        let mut guard = self.conn.lock().await;
++        fetch_effect(guard.connection()?, id).await
++    }
++
++    async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<EffectRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_EFFECT} WHERE run_id = ?1 ORDER BY step_sequence, effect_id");
++        let rows = sqlx::query(&query)
++            .bind(run.to_string())
++            .fetch_all(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_effect).collect()
++    }
++}
++
++#[async_trait]
++impl EffectRepo for SqliteEffectRepo {
++    async fn insert(&mut self, effect: NewEffect) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO effects (effect_id, run_id, step_sequence, decision_id, operation, \
++             request_hash, request_payload, effect_class, idempotency_semantics, \
++             reconciliation_semantics, cancellation_semantics, compensation_capability, \
++             adapter_id, adapter_version, adapter_digest, state, created_at_ms, updated_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
++             ?17, ?17)",
++        )
++        .bind(effect.effect_id.to_string())
++        .bind(effect.run_id.to_string())
++        .bind(mapping::encode_u64(
++            "effects.step_sequence",
++            effect.step_sequence,
++        )?)
++        .bind(effect.decision_id.to_string())
++        .bind(effect.operation)
++        .bind(effect.request_hash)
++        .bind(effect.request_payload)
++        .bind(i64::from(effect.effect_class.to_wire()))
++        .bind(i64::from(effect.idempotency_semantics.to_wire()))
++        .bind(i64::from(effect.reconciliation_semantics.to_wire()))
++        .bind(effect.cancellation_semantics)
++        .bind(effect.compensation_capability)
++        .bind(effect.adapter_id.to_string())
++        .bind(effect.adapter_version)
++        .bind(effect.adapter_digest)
++        .bind(i64::from(effect.state.to_wire()))
++        .bind(effect.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_transition(
++        &mut self,
++        id: EffectId,
++        expect_state: EffectState,
++        expect_token: Option<u64>,
++        patch: EffectPatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let expected_token = expect_token
++            .map(|value| mapping::encode_u64("effects.executor_fencing_token", value))
++            .transpose()?;
++        let patch_token = patch
++            .executor_fencing_token
++            .map(|value| mapping::encode_u64("effects.executor_fencing_token", value))
++            .transpose()?;
++        let daemon_epoch = patch
++            .daemon_fencing_epoch
++            .map(|value| mapping::encode_u64("effects.daemon_fencing_epoch", value))
++            .transpose()?;
++        let result = sqlx::query(
++            "UPDATE effects SET \
++             state = COALESCE(?1, state), \
++             executor_id = COALESCE(?2, executor_id), \
++             executor_fencing_token = COALESCE(?3, executor_fencing_token), \
++             daemon_fencing_epoch = COALESCE(?4, daemon_fencing_epoch), \
++             lease_expires_ms = COALESCE(?5, lease_expires_ms), \
++             provider_operation_ref = COALESCE(?6, provider_operation_ref), \
++             result_ref = COALESCE(?7, result_ref), \
++             error_code = COALESCE(?8, error_code) \
++             WHERE effect_id = ?9 AND state = ?10 \
++             AND (?11 IS NULL OR executor_fencing_token = ?11)",
++        )
++        .bind(patch.state.map(|state| i64::from(state.to_wire())))
++        .bind(patch.executor_id)
++        .bind(patch_token)
++        .bind(daemon_epoch)
++        .bind(patch.lease_expires_ms)
++        .bind(patch.provider_operation_ref)
++        .bind(patch.result_ref)
++        .bind(patch.error_code)
++        .bind(id.to_string())
++        .bind(i64::from(expect_state.to_wire()))
++        .bind(expected_token)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs b/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs
+new file mode 100644
+index 0000000..ca5ea7d
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs
+@@ -0,0 +1,196 @@
++//! Loop repository: turns, turn-state CAS, and accepted decisions.
++//!
++//! A turn transition checks the persisted state and applies the patch
++//! atomically; a stale expectation reports `false` without mutation (R3.2).
++
++use async_trait::async_trait;
++use domain::ids::{DecisionId, RunId, TurnId};
++use kernel_store::models::{DecisionRow, LoopTurnPatch, LoopTurnRow, NewDecision, NewLoopTurn};
++use kernel_store::repositories::{LoopRead, LoopRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `loop_turns` and `decisions`.
++pub(crate) struct SqliteLoopRepo {
++    conn: SharedConn,
++}
++
++impl SqliteLoopRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_TURN: &str = "SELECT turn_id, run_id, run_revision, loop_epoch, step_sequence, \
++     input_event_cursor, state, issued_at_ms FROM loop_turns";
++
++fn decode_turn(row: &SqliteRow) -> errors::Result<LoopTurnRow> {
++    Ok(LoopTurnRow {
++        turn_id: mapping::decode_id("loop_turns.turn_id", &mapping::text(row, "turn_id")?)?,
++        run_id: mapping::decode_id("loop_turns.run_id", &mapping::text(row, "run_id")?)?,
++        run_revision: mapping::decode_u64(
++            "loop_turns.run_revision",
++            mapping::int(row, "run_revision")?,
++        )?,
++        loop_epoch: mapping::decode_u64("loop_turns.loop_epoch", mapping::int(row, "loop_epoch")?)?,
++        step_sequence: mapping::decode_u64(
++            "loop_turns.step_sequence",
++            mapping::int(row, "step_sequence")?,
++        )?,
++        input_event_cursor: mapping::decode_id(
++            "loop_turns.input_event_cursor",
++            &mapping::text(row, "input_event_cursor")?,
++        )?,
++        state: mapping::text(row, "state")?,
++        issued_at_ms: mapping::int(row, "issued_at_ms")?,
++    })
++}
++
++fn decode_decision(row: &SqliteRow) -> errors::Result<DecisionRow> {
++    Ok(DecisionRow {
++        decision_id: mapping::decode_id(
++            "decisions.decision_id",
++            &mapping::text(row, "decision_id")?,
++        )?,
++        run_id: mapping::decode_id("decisions.run_id", &mapping::text(row, "run_id")?)?,
++        turn_id: mapping::decode_id("decisions.turn_id", &mapping::text(row, "turn_id")?)?,
++        decision_type: mapping::text(row, "decision_type")?,
++        decision_digest: mapping::text(row, "decision_digest")?,
++        decision_bytes: mapping::blob(row, "decision_bytes")?,
++        run_revision: mapping::decode_u64(
++            "decisions.run_revision",
++            mapping::int(row, "run_revision")?,
++        )?,
++        loop_epoch: mapping::decode_u64("decisions.loop_epoch", mapping::int(row, "loop_epoch")?)?,
++        step_sequence: mapping::decode_u64(
++            "decisions.step_sequence",
++            mapping::int(row, "step_sequence")?,
++        )?,
++        input_event_cursor: mapping::decode_id(
++            "decisions.input_event_cursor",
++            &mapping::text(row, "input_event_cursor")?,
++        )?,
++        accepted_at_ms: mapping::int(row, "accepted_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl LoopRead for SqliteLoopRepo {
++    async fn get_turn(&mut self, id: TurnId) -> errors::Result<Option<LoopTurnRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_TURN} WHERE turn_id = ?1");
++        let row = sqlx::query(&query)
++            .bind(id.to_string())
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_turn).transpose()
++    }
++
++    async fn get_decision(
++        &mut self,
++        run: RunId,
++        decision: DecisionId,
++    ) -> errors::Result<Option<DecisionRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT decision_id, run_id, turn_id, decision_type, decision_digest, \
++             decision_bytes, run_revision, loop_epoch, step_sequence, input_event_cursor, \
++             accepted_at_ms FROM decisions WHERE run_id = ?1 AND decision_id = ?2",
++        )
++        .bind(run.to_string())
++        .bind(decision.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_decision).transpose()
++    }
++}
++
++#[async_trait]
++impl LoopRepo for SqliteLoopRepo {
++    async fn insert_turn(&mut self, turn: NewLoopTurn) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO loop_turns (turn_id, run_id, run_revision, loop_epoch, step_sequence, \
++             input_event_cursor, state, issued_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
++        )
++        .bind(turn.turn_id.to_string())
++        .bind(turn.run_id.to_string())
++        .bind(mapping::encode_u64(
++            "loop_turns.run_revision",
++            turn.run_revision,
++        )?)
++        .bind(mapping::encode_u64(
++            "loop_turns.loop_epoch",
++            turn.loop_epoch,
++        )?)
++        .bind(mapping::encode_u64(
++            "loop_turns.step_sequence",
++            turn.step_sequence,
++        )?)
++        .bind(turn.input_event_cursor.to_string())
++        .bind(turn.state)
++        .bind(turn.issued_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_turn(
++        &mut self,
++        id: TurnId,
++        expect_state: &str,
++        patch: LoopTurnPatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let result = sqlx::query(
++            "UPDATE loop_turns SET state = COALESCE(?1, state) \
++             WHERE turn_id = ?2 AND state = ?3",
++        )
++        .bind(patch.state)
++        .bind(id.to_string())
++        .bind(expect_state)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++
++    async fn insert_decision(&mut self, decision: NewDecision) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO decisions (decision_id, run_id, turn_id, decision_type, decision_digest, \
++             decision_bytes, run_revision, loop_epoch, step_sequence, input_event_cursor, \
++             accepted_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
++        )
++        .bind(decision.decision_id.to_string())
++        .bind(decision.run_id.to_string())
++        .bind(decision.turn_id.to_string())
++        .bind(decision.decision_type)
++        .bind(decision.decision_digest)
++        .bind(decision.decision_bytes)
++        .bind(mapping::encode_u64(
++            "decisions.run_revision",
++            decision.run_revision,
++        )?)
++        .bind(mapping::encode_u64(
++            "decisions.loop_epoch",
++            decision.loop_epoch,
++        )?)
++        .bind(mapping::encode_u64(
++            "decisions.step_sequence",
++            decision.step_sequence,
++        )?)
++        .bind(decision.input_event_cursor.to_string())
++        .bind(decision.accepted_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+index 178c5be..72a3bfe 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+@@ -1,32 +1,41 @@
+ //! Repository implementations over a shared SQLite connection.
+ //!
+-//! The groups implemented by the SQLite store are [`runs`], [`tasks`],
+-//! [`sessions`], [`graph`], and [`environments`]; each repository view shares
+-//! the connection owned by its transaction through [`SharedConn`].
++//! The groups implemented by the SQLite store are [`adapters`], [`artifacts`],
++//! [`config`], [`effects`], [`environments`], [`graph`], [`loop_turns`],
++//! [`resources`], [`runs`], [`security`], [`sessions`], [`tasks`], [`timers`],
++//! and [`workspaces`]; each repository view shares the connection owned by its
++//! transaction through [`SharedConn`].
+ //!
+-//! [`UnavailableRepo`] stands in for repository groups whose SQL
+-//! implementations arrive with later persistence tasks. Every operation on it
+-//! fails closed with `FailedPrecondition`/`Never`, so a caller can never
+-//! observe fabricated rows.
++//! [`UnavailableRepo`] stands in for the idempotency and stream groups whose
++//! SQL implementations arrive with PST-005. Every operation on it fails closed
++//! with `FailedPrecondition`/`Never`, so a caller can never observe fabricated
++//! rows.
+ 
++pub(crate) mod adapters;
++pub(crate) mod artifacts;
++pub(crate) mod config;
++pub(crate) mod effects;
+ pub(crate) mod environments;
+ pub(crate) mod graph;
++pub(crate) mod loop_turns;
++pub(crate) mod resources;
+ pub(crate) mod runs;
++pub(crate) mod security;
+ pub(crate) mod sessions;
+ pub(crate) mod tasks;
++pub(crate) mod timers;
++pub(crate) mod workspaces;
+ 
+ use std::sync::Arc;
+ 
+-use domain::effect::EffectState;
+ use domain::ids::*;
+-use domain::resource::{ReservationState, TimerState};
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use sqlx::Sqlite;
+ use sqlx::pool::PoolConnection;
+ use sqlx::sqlite::SqliteConnection;
+ 
+ /// Shared handle to the write connection owned by a write transaction.
+ pub(crate) type WriteConn = Arc<tokio::sync::Mutex<Option<sqlx::Transaction<'static, Sqlite>>>>;
+ 
+ /// Shared handle to the read connection owned by a read transaction.
+@@ -96,181 +105,20 @@ macro_rules! unavailable_repo {
+                         $(let _ = $arg;)*
+                         Err(mapping::unavailable(stringify!($trait_name)))
+                     }
+                 )*
+             }
+         )*
+     };
+ }
+ 
+ unavailable_repo! {
+-    EffectRead {
+-        async fn get(&mut self, id: EffectId) -> errors::Result<Option<EffectRow>>;
+-        async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<EffectRow>>;
+-    }
+-    EffectRepo {
+-        async fn insert(&mut self, effect: NewEffect) -> errors::Result<()>;
+-        async fn cas_transition(
+-            &mut self,
+-            id: EffectId,
+-            expect_state: EffectState,
+-            expect_token: Option<u64>,
+-            patch: EffectPatch,
+-        ) -> errors::Result<bool>;
+-    }
+-    ResourceRead {
+-        async fn get(&mut self, id: ReservationId) -> errors::Result<Option<ReservationRow>>;
+-        async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<ReservationRow>>;
+-    }
+-    ResourceRepo {
+-        async fn insert(&mut self, reservation: NewReservation) -> errors::Result<()>;
+-        async fn cas_transition(
+-            &mut self,
+-            id: ReservationId,
+-            expect_state: ReservationState,
+-            patch: ReservationPatch,
+-        ) -> errors::Result<bool>;
+-    }
+-    TimerRead {
+-        async fn get(&mut self, id: TimerId) -> errors::Result<Option<TimerRow>>;
+-        async fn list_due(&mut self, due_before_ms: i64) -> errors::Result<Vec<TimerRow>>;
+-    }
+-    TimerRepo {
+-        async fn insert(&mut self, timer: NewTimer) -> errors::Result<()>;
+-        async fn cas_transition(
+-            &mut self,
+-            id: TimerId,
+-            expect_state: TimerState,
+-            expect_version: u64,
+-            patch: TimerPatch,
+-        ) -> errors::Result<bool>;
+-    }
+-    SecurityRead {
+-        async fn get_grant(
+-            &mut self,
+-            id: CapabilityGrantId,
+-        ) -> errors::Result<Option<CapabilityGrantRow>>;
+-        async fn list_delegation_hops(
+-            &mut self,
+-            chain: DelegationChainId,
+-        ) -> errors::Result<Vec<DelegationHopRow>>;
+-        async fn get_approval_request(
+-            &mut self,
+-            id: ApprovalRequestId,
+-        ) -> errors::Result<Option<ApprovalRequestRow>>;
+-        async fn list_approval_responses(
+-            &mut self,
+-            request: ApprovalRequestId,
+-        ) -> errors::Result<Vec<ApprovalResponseRow>>;
+-    }
+-    SecurityRepo {
+-        async fn insert_grant(&mut self, grant: NewCapabilityGrant) -> errors::Result<()>;
+-        async fn insert_delegation_hop(&mut self, hop: NewDelegationHop) -> errors::Result<()>;
+-        async fn insert_approval_request(
+-            &mut self,
+-            request: NewApprovalRequest,
+-        ) -> errors::Result<()>;
+-        async fn insert_approval_response(
+-            &mut self,
+-            response: NewApprovalResponse,
+-        ) -> errors::Result<()>;
+-    }
+-    ConfigRead {
+-        async fn get_generation(
+-            &mut self,
+-            id: ConfigGenerationId,
+-        ) -> errors::Result<Option<ConfigGenerationRow>>;
+-        async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>>;
+-    }
+-    ConfigRepo {
+-        async fn insert_generation(
+-            &mut self,
+-            generation: NewConfigGeneration,
+-        ) -> errors::Result<()>;
+-        async fn cas_active(
+-            &mut self,
+-            expected_revision: u64,
+-            generation: ConfigGenerationId,
+-            activated_at_ms: i64,
+-        ) -> errors::Result<bool>;
+-    }
+-    WorkspaceRead {
+-        async fn get_workspace(&mut self, id: WorkspaceId)
+-            -> errors::Result<Option<WorkspaceRow>>;
+-        async fn get_lease(&mut self, id: LeaseId) -> errors::Result<Option<WorkspaceLeaseRow>>;
+-    }
+-    WorkspaceRepo {
+-        async fn insert_workspace(&mut self, workspace: NewWorkspace) -> errors::Result<()>;
+-        async fn insert_lease(&mut self, lease: NewWorkspaceLease) -> errors::Result<()>;
+-        async fn cas_lease(
+-            &mut self,
+-            id: LeaseId,
+-            expect_epoch: u64,
+-            patch: LeasePatch,
+-        ) -> errors::Result<bool>;
+-    }
+-    AdapterRead {
+-        async fn get_registration(
+-            &mut self,
+-            adapter_id: AdapterId,
+-            version: &str,
+-            bundle_digest: &str,
+-        ) -> errors::Result<Option<AdapterRegistrationRow>>;
+-        async fn get_conformance_report(
+-            &mut self,
+-            adapter_id: AdapterId,
+-            version: &str,
+-            bundle_digest: &str,
+-        ) -> errors::Result<Option<ConformanceReportRow>>;
+-    }
+-    AdapterRepo {
+-        async fn insert_registration(
+-            &mut self,
+-            registration: NewAdapterRegistration,
+-        ) -> errors::Result<()>;
+-        async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()>;
+-        async fn cas_instance_state(
+-            &mut self,
+-            id: AdapterInstanceId,
+-            expect_state: &str,
+-            patch: AdapterInstanceStatePatch,
+-        ) -> errors::Result<bool>;
+-        async fn insert_conformance_report(
+-            &mut self,
+-            report: NewConformanceReport,
+-        ) -> errors::Result<()>;
+-    }
+-    ArtifactRead {
+-        async fn get_by_id(&mut self, id: ArtifactId) -> errors::Result<Option<ArtifactRow>>;
+-        async fn get_by_uri(&mut self, uri: &str) -> errors::Result<Option<ArtifactRow>>;
+-    }
+-    ArtifactRepo {
+-        async fn insert(&mut self, artifact: NewArtifact) -> errors::Result<()>;
+-    }
+-    LoopRead {
+-        async fn get_turn(&mut self, id: TurnId) -> errors::Result<Option<LoopTurnRow>>;
+-        async fn get_decision(
+-            &mut self,
+-            run: RunId,
+-            decision: DecisionId,
+-        ) -> errors::Result<Option<DecisionRow>>;
+-    }
+-    LoopRepo {
+-        async fn insert_turn(&mut self, turn: NewLoopTurn) -> errors::Result<()>;
+-        async fn cas_turn(
+-            &mut self,
+-            id: TurnId,
+-            expect_state: &str,
+-            patch: LoopTurnPatch,
+-        ) -> errors::Result<bool>;
+-        async fn insert_decision(&mut self, decision: NewDecision) -> errors::Result<()>;
+-    }
+     IdempotencyRepo {
+         async fn lookup(
+             &mut self,
+             principal: PrincipalId,
+             key: &IdempotencyKey,
+         ) -> errors::Result<Option<IdempotencyRecordRow>>;
+         async fn insert(&mut self, record: NewIdempotencyRecord) -> errors::Result<()>;
+     }
+     StreamRepo {
+         async fn allocate(&mut self, stream_key: EventStreamKey) -> errors::Result<u64>;
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/resources.rs b/agent-os/crates/kernel-store-sqlite/src/repos/resources.rs
+new file mode 100644
+index 0000000..c1794f4
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/resources.rs
+@@ -0,0 +1,138 @@
++//! Resource reservation repository: insert, fetch, list, and state CAS.
++
++use async_trait::async_trait;
++use domain::ids::{ReservationId, RunId};
++use domain::resource::ReservationState;
++use kernel_store::models::{NewReservation, ReservationPatch, ReservationRow};
++use kernel_store::repositories::{ResourceRead, ResourceRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `resource_reservations` table.
++pub(crate) struct SqliteResourceRepo {
++    conn: SharedConn,
++}
++
++impl SqliteResourceRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_RESERVATION: &str = "SELECT reservation_id, run_id, resource_type, state, amount, \
++     unit, fencing_token, parent_reservation_id, created_at_ms, updated_at_ms \
++     FROM resource_reservations";
++
++fn decode_reservation(row: &SqliteRow) -> errors::Result<ReservationRow> {
++    Ok(ReservationRow {
++        reservation_id: mapping::decode_id(
++            "resource_reservations.reservation_id",
++            &mapping::text(row, "reservation_id")?,
++        )?,
++        run_id: mapping::decode_id(
++            "resource_reservations.run_id",
++            &mapping::text(row, "run_id")?,
++        )?,
++        resource_type: mapping::text(row, "resource_type")?,
++        state: mapping::decode_state(
++            "resource_reservations.state",
++            &mapping::text(row, "state")?,
++            ReservationState::from_state_str,
++        )?,
++        amount: mapping::int(row, "amount")?,
++        unit: mapping::text(row, "unit")?,
++        fencing_token: mapping::decode_u64(
++            "resource_reservations.fencing_token",
++            mapping::int(row, "fencing_token")?,
++        )?,
++        parent_reservation_id: mapping::decode_opt_id(
++            "resource_reservations.parent_reservation_id",
++            mapping::opt_text(row, "parent_reservation_id")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        updated_at_ms: mapping::int(row, "updated_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl ResourceRead for SqliteResourceRepo {
++    async fn get(&mut self, id: ReservationId) -> errors::Result<Option<ReservationRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_RESERVATION} WHERE reservation_id = ?1");
++        let row = sqlx::query(&query)
++            .bind(id.to_string())
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_reservation).transpose()
++    }
++
++    async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<ReservationRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_RESERVATION} WHERE run_id = ?1 ORDER BY reservation_id");
++        let rows = sqlx::query(&query)
++            .bind(run.to_string())
++            .fetch_all(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_reservation).collect()
++    }
++}
++
++#[async_trait]
++impl ResourceRepo for SqliteResourceRepo {
++    async fn insert(&mut self, reservation: NewReservation) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO resource_reservations (reservation_id, run_id, resource_type, state, \
++             amount, unit, fencing_token, parent_reservation_id, created_at_ms, updated_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
++        )
++        .bind(reservation.reservation_id.to_string())
++        .bind(reservation.run_id.to_string())
++        .bind(reservation.resource_type)
++        .bind(reservation.state.as_str())
++        .bind(reservation.amount)
++        .bind(reservation.unit)
++        .bind(mapping::encode_u64(
++            "resource_reservations.fencing_token",
++            reservation.fencing_token,
++        )?)
++        .bind(reservation.parent_reservation_id.map(|id| id.to_string()))
++        .bind(reservation.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_transition(
++        &mut self,
++        id: ReservationId,
++        expect_state: ReservationState,
++        patch: ReservationPatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let fencing_token = patch
++            .fencing_token
++            .map(|value| mapping::encode_u64("resource_reservations.fencing_token", value))
++            .transpose()?;
++        let result = sqlx::query(
++            "UPDATE resource_reservations SET \
++             state = COALESCE(?1, state), \
++             fencing_token = COALESCE(?2, fencing_token) \
++             WHERE reservation_id = ?3 AND state = ?4",
++        )
++        .bind(patch.state.map(|state| state.as_str()))
++        .bind(fencing_token)
++        .bind(id.to_string())
++        .bind(expect_state.as_str())
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/security.rs b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+new file mode 100644
+index 0000000..44a4c3e
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+@@ -0,0 +1,302 @@
++//! Security repository: capability grants, delegation hops, and approvals.
++//!
++//! Approval requests and their responses are append-only here; capability
++//! grants and delegation hops are insert-then-read records. No update or
++//! delete operation is exposed.
++
++use async_trait::async_trait;
++use domain::ids::{ApprovalRequestId, CapabilityGrantId, DelegationChainId};
++use domain::security::ApprovalState;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{
++    ApprovalRequestRow, ApprovalResponseRow, CapabilityGrantRow, DelegationHopRow,
++    NewApprovalRequest, NewApprovalResponse, NewCapabilityGrant, NewDelegationHop,
++};
++use kernel_store::repositories::{SecurityRead, SecurityRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the security tables.
++pub(crate) struct SqliteSecurityRepo {
++    conn: SharedConn,
++}
++
++impl SqliteSecurityRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_grant(row: &SqliteRow) -> errors::Result<CapabilityGrantRow> {
++    Ok(CapabilityGrantRow {
++        grant_id: mapping::decode_id(
++            "capability_grants.grant_id",
++            &mapping::text(row, "grant_id")?,
++        )?,
++        principal_id: mapping::decode_id(
++            "capability_grants.principal_id",
++            &mapping::text(row, "principal_id")?,
++        )?,
++        actor_id: mapping::decode_id(
++            "capability_grants.actor_id",
++            &mapping::text(row, "actor_id")?,
++        )?,
++        run_id: mapping::decode_opt_id(
++            "capability_grants.run_id",
++            mapping::opt_text(row, "run_id")?,
++        )?,
++        capability_id: mapping::text(row, "capability_id")?,
++        scope: mapping::blob(row, "scope")?,
++        delegated_from_grant_id: mapping::decode_opt_id(
++            "capability_grants.delegated_from_grant_id",
++            mapping::opt_text(row, "delegated_from_grant_id")?,
++        )?,
++        expires_at_ms: mapping::opt_int(row, "expires_at_ms")?,
++        revoked_at_ms: mapping::opt_int(row, "revoked_at_ms")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++fn decode_hop(row: &SqliteRow) -> errors::Result<DelegationHopRow> {
++    let hop_index = mapping::int(row, "hop_index")?;
++    Ok(DelegationHopRow {
++        chain_id: mapping::decode_id("delegation_hops.chain_id", &mapping::text(row, "chain_id")?)?,
++        hop_index: u32::try_from(hop_index).map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "delegation_hops.hop_index is outside the u32 range",
++            )
++        })?,
++        principal_or_actor_id: mapping::text(row, "principal_or_actor_id")?,
++        run_id: mapping::decode_opt_id(
++            "delegation_hops.run_id",
++            mapping::opt_text(row, "run_id")?,
++        )?,
++        capability_grant_ids: mapping::blob(row, "capability_grant_ids")?,
++    })
++}
++
++fn decode_approval_request(row: &SqliteRow) -> errors::Result<ApprovalRequestRow> {
++    Ok(ApprovalRequestRow {
++        request_id: mapping::decode_id(
++            "approval_requests.request_id",
++            &mapping::text(row, "request_id")?,
++        )?,
++        request_digest: mapping::text(row, "request_digest")?,
++        principal_id: mapping::decode_id(
++            "approval_requests.principal_id",
++            &mapping::text(row, "principal_id")?,
++        )?,
++        actor_id: mapping::decode_id(
++            "approval_requests.actor_id",
++            &mapping::text(row, "actor_id")?,
++        )?,
++        run_id: mapping::decode_opt_id(
++            "approval_requests.run_id",
++            mapping::opt_text(row, "run_id")?,
++        )?,
++        operation: mapping::text(row, "operation")?,
++        target_resource: mapping::opt_text(row, "target_resource")?,
++        capability_ids: mapping::blob(row, "capability_ids")?,
++        extension_bundle_digest: mapping::opt_text(row, "extension_bundle_digest")?,
++        config_generation_digest: mapping::opt_text(row, "config_generation_digest")?,
++        expires_at_ms: mapping::int(row, "expires_at_ms")?,
++        nonce: mapping::text(row, "nonce")?,
++        state: mapping::decode_state(
++            "approval_requests.state",
++            &mapping::text(row, "state")?,
++            ApprovalState::from_state_str,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        resolved_at_ms: mapping::opt_int(row, "resolved_at_ms")?,
++    })
++}
++
++fn decode_approval_response(row: &SqliteRow) -> errors::Result<ApprovalResponseRow> {
++    Ok(ApprovalResponseRow {
++        request_id: mapping::decode_id(
++            "approval_responses.request_id",
++            &mapping::text(row, "request_id")?,
++        )?,
++        request_digest: mapping::text(row, "request_digest")?,
++        decision: mapping::text(row, "decision")?,
++        device_id: mapping::decode_id(
++            "approval_responses.device_id",
++            &mapping::text(row, "device_id")?,
++        )?,
++        responder_principal_id: mapping::decode_id(
++            "approval_responses.responder_principal_id",
++            &mapping::text(row, "responder_principal_id")?,
++        )?,
++        responded_at_ms: mapping::int(row, "responded_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl SecurityRead for SqliteSecurityRepo {
++    async fn get_grant(
++        &mut self,
++        id: CapabilityGrantId,
++    ) -> errors::Result<Option<CapabilityGrantRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT grant_id, principal_id, actor_id, run_id, capability_id, scope, \
++             delegated_from_grant_id, expires_at_ms, revoked_at_ms, created_at_ms \
++             FROM capability_grants WHERE grant_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_grant).transpose()
++    }
++
++    async fn list_delegation_hops(
++        &mut self,
++        chain: DelegationChainId,
++    ) -> errors::Result<Vec<DelegationHopRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT chain_id, hop_index, principal_or_actor_id, run_id, capability_grant_ids \
++             FROM delegation_hops WHERE chain_id = ?1 ORDER BY hop_index",
++        )
++        .bind(chain.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_hop).collect()
++    }
++
++    async fn get_approval_request(
++        &mut self,
++        id: ApprovalRequestId,
++    ) -> errors::Result<Option<ApprovalRequestRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT request_id, request_digest, principal_id, actor_id, run_id, operation, \
++             target_resource, capability_ids, extension_bundle_digest, config_generation_digest, \
++             expires_at_ms, nonce, state, created_at_ms, resolved_at_ms \
++             FROM approval_requests WHERE request_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_approval_request).transpose()
++    }
++
++    async fn list_approval_responses(
++        &mut self,
++        request: ApprovalRequestId,
++    ) -> errors::Result<Vec<ApprovalResponseRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT request_id, request_digest, decision, device_id, responder_principal_id, \
++             responded_at_ms FROM approval_responses WHERE request_id = ?1 \
++             ORDER BY responded_at_ms",
++        )
++        .bind(request.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_approval_response).collect()
++    }
++}
++
++#[async_trait]
++impl SecurityRepo for SqliteSecurityRepo {
++    async fn insert_grant(&mut self, grant: NewCapabilityGrant) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO capability_grants (grant_id, principal_id, actor_id, run_id, \
++             capability_id, scope, delegated_from_grant_id, expires_at_ms, revoked_at_ms, \
++             created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
++        )
++        .bind(grant.grant_id.to_string())
++        .bind(grant.principal_id.to_string())
++        .bind(grant.actor_id.to_string())
++        .bind(grant.run_id.map(|id| id.to_string()))
++        .bind(grant.capability_id)
++        .bind(grant.scope)
++        .bind(grant.delegated_from_grant_id.map(|id| id.to_string()))
++        .bind(grant.expires_at_ms)
++        .bind(grant.revoked_at_ms)
++        .bind(grant.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_delegation_hop(&mut self, hop: NewDelegationHop) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO delegation_hops (chain_id, hop_index, principal_or_actor_id, run_id, \
++             capability_grant_ids) VALUES (?1, ?2, ?3, ?4, ?5)",
++        )
++        .bind(hop.chain_id.to_string())
++        .bind(i64::from(hop.hop_index))
++        .bind(hop.principal_or_actor_id)
++        .bind(hop.run_id.map(|id| id.to_string()))
++        .bind(hop.capability_grant_ids)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_approval_request(&mut self, request: NewApprovalRequest) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO approval_requests (request_id, request_digest, principal_id, actor_id, \
++             run_id, operation, target_resource, capability_ids, extension_bundle_digest, \
++             config_generation_digest, expires_at_ms, nonce, state, created_at_ms, resolved_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
++        )
++        .bind(request.request_id.to_string())
++        .bind(request.request_digest)
++        .bind(request.principal_id.to_string())
++        .bind(request.actor_id.to_string())
++        .bind(request.run_id.map(|id| id.to_string()))
++        .bind(request.operation)
++        .bind(request.target_resource)
++        .bind(request.capability_ids)
++        .bind(request.extension_bundle_digest)
++        .bind(request.config_generation_digest)
++        .bind(request.expires_at_ms)
++        .bind(request.nonce)
++        .bind(request.state.as_str())
++        .bind(request.created_at_ms)
++        .bind(request.resolved_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_approval_response(
++        &mut self,
++        response: NewApprovalResponse,
++    ) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO approval_responses (request_id, request_digest, decision, device_id, \
++             responder_principal_id, responded_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
++        )
++        .bind(response.request_id.to_string())
++        .bind(response.request_digest)
++        .bind(response.decision)
++        .bind(response.device_id.to_string())
++        .bind(response.responder_principal_id.to_string())
++        .bind(response.responded_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/timers.rs b/agent-os/crates/kernel-store-sqlite/src/repos/timers.rs
+new file mode 100644
+index 0000000..f830b54
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/timers.rs
+@@ -0,0 +1,143 @@
++//! Timer repository: insert, fetch, due listing, and state/version CAS.
++//!
++//! A transition checks `(state, version)` and advances `version` on success,
++//! so a stale claim observes `false` without mutation (R3.2).
++
++use async_trait::async_trait;
++use domain::ids::TimerId;
++use domain::resource::TimerState;
++use kernel_store::models::{NewTimer, TimerPatch, TimerRow};
++use kernel_store::repositories::{TimerRead, TimerRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `timers` table.
++pub(crate) struct SqliteTimerRepo {
++    conn: SharedConn,
++}
++
++impl SqliteTimerRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++const SELECT_TIMER: &str = "SELECT timer_id, run_id, timer_kind, payload, due_at_ms, state, \
++     version, claim_owner, claim_fencing_token, claim_daemon_epoch, created_at_ms, updated_at_ms \
++     FROM timers";
++
++fn decode_timer(row: &SqliteRow) -> errors::Result<TimerRow> {
++    Ok(TimerRow {
++        timer_id: mapping::decode_id("timers.timer_id", &mapping::text(row, "timer_id")?)?,
++        run_id: mapping::decode_opt_id("timers.run_id", mapping::opt_text(row, "run_id")?)?,
++        timer_kind: mapping::text(row, "timer_kind")?,
++        payload: mapping::blob(row, "payload")?,
++        due_at_ms: mapping::int(row, "due_at_ms")?,
++        state: mapping::decode_state(
++            "timers.state",
++            &mapping::text(row, "state")?,
++            TimerState::from_state_str,
++        )?,
++        version: mapping::decode_u64("timers.version", mapping::int(row, "version")?)?,
++        claim_owner: mapping::opt_text(row, "claim_owner")?,
++        claim_fencing_token: mapping::opt_int(row, "claim_fencing_token")?
++            .map(|value| mapping::decode_u64("timers.claim_fencing_token", value))
++            .transpose()?,
++        claim_daemon_epoch: mapping::opt_int(row, "claim_daemon_epoch")?
++            .map(|value| mapping::decode_u64("timers.claim_daemon_epoch", value))
++            .transpose()?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        updated_at_ms: mapping::int(row, "updated_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl TimerRead for SqliteTimerRepo {
++    async fn get(&mut self, id: TimerId) -> errors::Result<Option<TimerRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_TIMER} WHERE timer_id = ?1");
++        let row = sqlx::query(&query)
++            .bind(id.to_string())
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_timer).transpose()
++    }
++
++    async fn list_due(&mut self, due_before_ms: i64) -> errors::Result<Vec<TimerRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_TIMER} WHERE due_at_ms <= ?1 ORDER BY due_at_ms, timer_id");
++        let rows = sqlx::query(&query)
++            .bind(due_before_ms)
++            .fetch_all(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_timer).collect()
++    }
++}
++
++#[async_trait]
++impl TimerRepo for SqliteTimerRepo {
++    async fn insert(&mut self, timer: NewTimer) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO timers (timer_id, run_id, timer_kind, payload, due_at_ms, state, version, \
++             created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
++        )
++        .bind(timer.timer_id.to_string())
++        .bind(timer.run_id.map(|id| id.to_string()))
++        .bind(timer.timer_kind)
++        .bind(timer.payload)
++        .bind(timer.due_at_ms)
++        .bind(timer.state.as_str())
++        .bind(mapping::encode_u64("timers.version", timer.version)?)
++        .bind(timer.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_transition(
++        &mut self,
++        id: TimerId,
++        expect_state: TimerState,
++        expect_version: u64,
++        patch: TimerPatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let claim_token = patch
++            .claim_fencing_token
++            .map(|value| mapping::encode_u64("timers.claim_fencing_token", value))
++            .transpose()?;
++        let claim_epoch = patch
++            .claim_daemon_epoch
++            .map(|value| mapping::encode_u64("timers.claim_daemon_epoch", value))
++            .transpose()?;
++        let result = sqlx::query(
++            "UPDATE timers SET \
++             state = COALESCE(?1, state), \
++             claim_owner = COALESCE(?2, claim_owner), \
++             claim_fencing_token = COALESCE(?3, claim_fencing_token), \
++             claim_daemon_epoch = COALESCE(?4, claim_daemon_epoch), \
++             due_at_ms = COALESCE(?5, due_at_ms), \
++             version = version + 1 \
++             WHERE timer_id = ?6 AND state = ?7 AND version = ?8",
++        )
++        .bind(patch.state.map(|state| state.as_str()))
++        .bind(patch.claim_owner)
++        .bind(claim_token)
++        .bind(claim_epoch)
++        .bind(patch.due_at_ms)
++        .bind(id.to_string())
++        .bind(expect_state.as_str())
++        .bind(mapping::encode_u64("timers.version", expect_version)?)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs b/agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs
+new file mode 100644
+index 0000000..34add7d
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs
+@@ -0,0 +1,184 @@
++//! Workspace repository: workspaces and epoch-guarded lease transitions.
++//!
++//! `cas_lease` checks the persisted lease epoch and applies the patch
++//! atomically; a stale epoch reports `false` without mutation (R3.2). The
++//! schema's partial unique index still rejects a second active exclusive
++//! lease with `Conflict`.
++
++use async_trait::async_trait;
++use domain::ids::{LeaseId, WorkspaceId};
++use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
++use kernel_store::models::{
++    LeasePatch, NewWorkspace, NewWorkspaceLease, WorkspaceLeaseRow, WorkspaceRow,
++};
++use kernel_store::repositories::{WorkspaceRead, WorkspaceRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `workspaces` and `workspace_leases`.
++pub(crate) struct SqliteWorkspaceRepo {
++    conn: SharedConn,
++}
++
++impl SqliteWorkspaceRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_workspace(row: &SqliteRow) -> errors::Result<WorkspaceRow> {
++    Ok(WorkspaceRow {
++        workspace_id: mapping::decode_id(
++            "workspaces.workspace_id",
++            &mapping::text(row, "workspace_id")?,
++        )?,
++        kind: mapping::text(row, "kind")?,
++        base_revision: mapping::opt_text(row, "base_revision")?,
++        parent_workspace_id: mapping::decode_opt_id(
++            "workspaces.parent_workspace_id",
++            mapping::opt_text(row, "parent_workspace_id")?,
++        )?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++const SELECT_LEASE: &str = "SELECT lease_id, workspace_id, owner_run_id, mode, lease_epoch, \
++     enforcement_state, delegated_from, created_at_ms, updated_at_ms FROM workspace_leases";
++
++fn decode_lease(row: &SqliteRow) -> errors::Result<WorkspaceLeaseRow> {
++    Ok(WorkspaceLeaseRow {
++        lease_id: mapping::decode_id(
++            "workspace_leases.lease_id",
++            &mapping::text(row, "lease_id")?,
++        )?,
++        workspace_id: mapping::decode_id(
++            "workspace_leases.workspace_id",
++            &mapping::text(row, "workspace_id")?,
++        )?,
++        owner_run_id: mapping::decode_id(
++            "workspace_leases.owner_run_id",
++            &mapping::text(row, "owner_run_id")?,
++        )?,
++        mode: mapping::decode_wire(
++            "workspace_leases.mode",
++            mapping::int(row, "mode")?,
++            WorkspaceAccessMode::from_wire,
++        )?,
++        lease_epoch: mapping::decode_u64(
++            "workspace_leases.lease_epoch",
++            mapping::int(row, "lease_epoch")?,
++        )?,
++        enforcement_state: mapping::decode_state(
++            "workspace_leases.enforcement_state",
++            &mapping::text(row, "enforcement_state")?,
++            LeaseEnforcementState::from_state_str,
++        )?,
++        delegated_from: mapping::blob(row, "delegated_from")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++        updated_at_ms: mapping::int(row, "updated_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl WorkspaceRead for SqliteWorkspaceRepo {
++    async fn get_workspace(&mut self, id: WorkspaceId) -> errors::Result<Option<WorkspaceRow>> {
++        let mut guard = self.conn.lock().await;
++        let row = sqlx::query(
++            "SELECT workspace_id, kind, base_revision, parent_workspace_id, created_at_ms \
++             FROM workspaces WHERE workspace_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_workspace).transpose()
++    }
++
++    async fn get_lease(&mut self, id: LeaseId) -> errors::Result<Option<WorkspaceLeaseRow>> {
++        let mut guard = self.conn.lock().await;
++        let query = format!("{SELECT_LEASE} WHERE lease_id = ?1");
++        let row = sqlx::query(&query)
++            .bind(id.to_string())
++            .fetch_optional(guard.connection()?)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_lease).transpose()
++    }
++}
++
++#[async_trait]
++impl WorkspaceRepo for SqliteWorkspaceRepo {
++    async fn insert_workspace(&mut self, workspace: NewWorkspace) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO workspaces (workspace_id, kind, base_revision, parent_workspace_id, \
++             created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
++        )
++        .bind(workspace.workspace_id.to_string())
++        .bind(workspace.kind)
++        .bind(workspace.base_revision)
++        .bind(workspace.parent_workspace_id.map(|id| id.to_string()))
++        .bind(workspace.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn insert_lease(&mut self, lease: NewWorkspaceLease) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        sqlx::query(
++            "INSERT INTO workspace_leases (lease_id, workspace_id, owner_run_id, mode, \
++             lease_epoch, enforcement_state, delegated_from, created_at_ms, updated_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
++        )
++        .bind(lease.lease_id.to_string())
++        .bind(lease.workspace_id.to_string())
++        .bind(lease.owner_run_id.to_string())
++        .bind(i64::from(lease.mode.to_wire()))
++        .bind(mapping::encode_u64(
++            "workspace_leases.lease_epoch",
++            lease.lease_epoch,
++        )?)
++        .bind(lease.enforcement_state.as_str())
++        .bind(lease.delegated_from)
++        .bind(lease.created_at_ms)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn cas_lease(
++        &mut self,
++        id: LeaseId,
++        expect_epoch: u64,
++        patch: LeasePatch,
++    ) -> errors::Result<bool> {
++        let mut guard = self.conn.lock().await;
++        let result = sqlx::query(
++            "UPDATE workspace_leases SET \
++             enforcement_state = COALESCE(?1, enforcement_state), \
++             owner_run_id = COALESCE(?2, owner_run_id), \
++             mode = COALESCE(?3, mode), \
++             delegated_from = COALESCE(?4, delegated_from) \
++             WHERE lease_id = ?5 AND lease_epoch = ?6",
++        )
++        .bind(patch.enforcement_state.map(|state| state.as_str()))
++        .bind(patch.owner_run_id.map(|id| id.to_string()))
++        .bind(patch.mode.map(|mode| i64::from(mode.to_wire())))
++        .bind(patch.delegated_from)
++        .bind(id.to_string())
++        .bind(mapping::encode_u64(
++            "workspace_leases.lease_epoch",
++            expect_epoch,
++        )?)
++        .execute(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(result.rows_affected() == 1)
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/txn.rs b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+index cea2e61..780e5c2 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/txn.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+@@ -17,49 +17,70 @@ use domain::ids::DaemonInstanceId;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ use sqlx::Sqlite;
+ 
+ use crate::SqliteKernelStore;
+ use crate::mapping;
+ use crate::repos::{
+-    ReadConn, SharedConn, UnavailableRepo, WriteConn, environments::SqliteEnvironmentRepo,
+-    graph::SqliteGraphRepo, runs::SqliteRunRepo, sessions::SqliteSessionRepo,
+-    tasks::SqliteTaskRepo,
++    ReadConn, SharedConn, UnavailableRepo, WriteConn, adapters::SqliteAdapterRepo,
++    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
++    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo, loop_turns::SqliteLoopRepo,
++    resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
++    sessions::SqliteSessionRepo, tasks::SqliteTaskRepo, timers::SqliteTimerRepo,
++    workspaces::SqliteWorkspaceRepo,
+ };
+ 
+ /// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
+ pub(crate) struct SqliteWriteTxn {
+     ctx: TxContext,
+     conn: WriteConn,
+     runs: SqliteRunRepo,
+     tasks: SqliteTaskRepo,
+     sessions: SqliteSessionRepo,
+     graph: SqliteGraphRepo,
+     environments: SqliteEnvironmentRepo,
++    effects: SqliteEffectRepo,
++    resources: SqliteResourceRepo,
++    timers: SqliteTimerRepo,
++    security: SqliteSecurityRepo,
++    config: SqliteConfigRepo,
++    workspaces: SqliteWorkspaceRepo,
++    adapters: SqliteAdapterRepo,
++    artifacts: SqliteArtifactRepo,
++    loop_turns: SqliteLoopRepo,
+     unavailable: UnavailableRepo,
+ }
+ 
+ impl SqliteWriteTxn {
+     fn new(ctx: TxContext, txn: sqlx::Transaction<'static, Sqlite>) -> Self {
+         let conn: WriteConn = Arc::new(tokio::sync::Mutex::new(Some(txn)));
+         let shared = SharedConn::Write(conn.clone());
+         Self {
+             ctx,
+             conn,
+             runs: SqliteRunRepo::new(shared.clone()),
+             tasks: SqliteTaskRepo::new(shared.clone()),
+             sessions: SqliteSessionRepo::new(shared.clone()),
+             graph: SqliteGraphRepo::new(shared.clone()),
+-            environments: SqliteEnvironmentRepo::new(shared),
++            environments: SqliteEnvironmentRepo::new(shared.clone()),
++            effects: SqliteEffectRepo::new(shared.clone()),
++            resources: SqliteResourceRepo::new(shared.clone()),
++            timers: SqliteTimerRepo::new(shared.clone()),
++            security: SqliteSecurityRepo::new(shared.clone()),
++            config: SqliteConfigRepo::new(shared.clone()),
++            workspaces: SqliteWorkspaceRepo::new(shared.clone()),
++            adapters: SqliteAdapterRepo::new(shared.clone()),
++            artifacts: SqliteArtifactRepo::new(shared.clone()),
++            loop_turns: SqliteLoopRepo::new(shared),
+             unavailable: UnavailableRepo,
+         }
+     }
+ 
+     async fn take(&self) -> errors::Result<sqlx::Transaction<'static, Sqlite>> {
+         let mut guard = self.conn.lock().await;
+         guard.take().ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::FailedPrecondition,
+                 RetryClass::Never,
+@@ -89,53 +110,53 @@ impl KernelTxn for SqliteWriteTxn {
+ 
+     fn graph(&mut self) -> &mut dyn GraphRepo {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRepo {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRepo {
+-        &mut self.unavailable
++        &mut self.effects
+     }
+ 
+     fn resources(&mut self) -> &mut dyn ResourceRepo {
+-        &mut self.unavailable
++        &mut self.resources
+     }
+ 
+     fn timers(&mut self) -> &mut dyn TimerRepo {
+-        &mut self.unavailable
++        &mut self.timers
+     }
+ 
+     fn security(&mut self) -> &mut dyn SecurityRepo {
+-        &mut self.unavailable
++        &mut self.security
+     }
+ 
+     fn config(&mut self) -> &mut dyn ConfigRepo {
+-        &mut self.unavailable
++        &mut self.config
+     }
+ 
+     fn workspaces(&mut self) -> &mut dyn WorkspaceRepo {
+-        &mut self.unavailable
++        &mut self.workspaces
+     }
+ 
+     fn adapters(&mut self) -> &mut dyn AdapterRepo {
+-        &mut self.unavailable
++        &mut self.adapters
+     }
+ 
+     fn artifacts(&mut self) -> &mut dyn ArtifactRepo {
+-        &mut self.unavailable
++        &mut self.artifacts
+     }
+ 
+     fn loop_turns(&mut self) -> &mut dyn LoopRepo {
+-        &mut self.unavailable
++        &mut self.loop_turns
+     }
+ 
+     fn idempotency(&mut self) -> &mut dyn IdempotencyRepo {
+         &mut self.unavailable
+     }
+ 
+     fn streams(&mut self) -> &mut dyn StreamRepo {
+         &mut self.unavailable
+     }
+ 
+@@ -150,33 +171,49 @@ impl KernelTxn for SqliteWriteTxn {
+     }
+ }
+ 
+ /// Read transaction guard owning a plain pooled connection.
+ pub(crate) struct SqliteReadTxn {
+     runs: SqliteRunRepo,
+     tasks: SqliteTaskRepo,
+     sessions: SqliteSessionRepo,
+     graph: SqliteGraphRepo,
+     environments: SqliteEnvironmentRepo,
+-    unavailable: UnavailableRepo,
++    effects: SqliteEffectRepo,
++    resources: SqliteResourceRepo,
++    timers: SqliteTimerRepo,
++    security: SqliteSecurityRepo,
++    config: SqliteConfigRepo,
++    workspaces: SqliteWorkspaceRepo,
++    adapters: SqliteAdapterRepo,
++    artifacts: SqliteArtifactRepo,
++    loop_turns: SqliteLoopRepo,
+ }
+ 
+ impl SqliteReadTxn {
+     fn new(conn: ReadConn) -> Self {
+         let shared = SharedConn::Read(conn);
+         Self {
+             runs: SqliteRunRepo::new(shared.clone()),
+             tasks: SqliteTaskRepo::new(shared.clone()),
+             sessions: SqliteSessionRepo::new(shared.clone()),
+             graph: SqliteGraphRepo::new(shared.clone()),
+-            environments: SqliteEnvironmentRepo::new(shared),
+-            unavailable: UnavailableRepo,
++            environments: SqliteEnvironmentRepo::new(shared.clone()),
++            effects: SqliteEffectRepo::new(shared.clone()),
++            resources: SqliteResourceRepo::new(shared.clone()),
++            timers: SqliteTimerRepo::new(shared.clone()),
++            security: SqliteSecurityRepo::new(shared.clone()),
++            config: SqliteConfigRepo::new(shared.clone()),
++            workspaces: SqliteWorkspaceRepo::new(shared.clone()),
++            adapters: SqliteAdapterRepo::new(shared.clone()),
++            artifacts: SqliteArtifactRepo::new(shared.clone()),
++            loop_turns: SqliteLoopRepo::new(shared),
+         }
+     }
+ }
+ 
+ #[async_trait]
+ impl KernelReadTxn for SqliteReadTxn {
+     fn runs(&mut self) -> &mut dyn RunRead {
+         &mut self.runs
+     }
+ 
+@@ -190,53 +227,53 @@ impl KernelReadTxn for SqliteReadTxn {
+ 
+     fn graph(&mut self) -> &mut dyn GraphRead {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRead {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRead {
+-        &mut self.unavailable
++        &mut self.effects
+     }
+ 
+     fn resources(&mut self) -> &mut dyn ResourceRead {
+-        &mut self.unavailable
++        &mut self.resources
+     }
+ 
+     fn timers(&mut self) -> &mut dyn TimerRead {
+-        &mut self.unavailable
++        &mut self.timers
+     }
+ 
+     fn security(&mut self) -> &mut dyn SecurityRead {
+-        &mut self.unavailable
++        &mut self.security
+     }
+ 
+     fn config(&mut self) -> &mut dyn ConfigRead {
+-        &mut self.unavailable
++        &mut self.config
+     }
+ 
+     fn workspaces(&mut self) -> &mut dyn WorkspaceRead {
+-        &mut self.unavailable
++        &mut self.workspaces
+     }
+ 
+     fn adapters(&mut self) -> &mut dyn AdapterRead {
+-        &mut self.unavailable
++        &mut self.adapters
+     }
+ 
+     fn artifacts(&mut self) -> &mut dyn ArtifactRead {
+-        &mut self.unavailable
++        &mut self.artifacts
+     }
+ 
+     fn loop_turns(&mut self) -> &mut dyn LoopRead {
+-        &mut self.unavailable
++        &mut self.loop_turns
+     }
+ }
+ 
+ #[async_trait]
+ impl KernelStore for SqliteKernelStore {
+     async fn begin_write(&self, ctx: TxContext) -> errors::Result<Box<dyn KernelTxn + '_>> {
+         let mut txn = self
+             .pool()
+             .begin_with("BEGIN IMMEDIATE")
+             .await
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+new file mode 100644
+index 0000000..9c4739f
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+@@ -0,0 +1,917 @@
++//! CRUD and CAS coverage for the nine remaining repository groups.
++//!
++//! One test per group inserts, reads, and exercises one compare-and-set
++//! conflict; a final test proves unknown persisted values fail decoding with
++//! `Internal`/`Never`. Every test uses its own temporary database.
++
++use std::path::Path;
++
++use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
++use domain::ids::{
++    ActorId, AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
++    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, EffectId,
++    EventCursor, EventStreamKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId, TaskId,
++    TimerId, TurnId, WorkspaceId,
++};
++use domain::resource::{LeaseEnforcementState, ReservationState, TimerState, WorkspaceAccessMode};
++use domain::run::{RecoveryDisposition, RunState};
++use domain::security::{
++    ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState,
++};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{
++    AdapterInstanceStatePatch, EffectPatch, LeasePatch, LoopTurnPatch, NewAdapterInstance,
++    NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse, NewArtifact,
++    NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
++    NewEffect, NewLoopTurn, NewReservation, NewRun, NewSession, NewTask, NewTimer, NewWorkspace,
++    NewWorkspaceLease, ReservationPatch, TimerPatch,
++};
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::ids::DeterministicIds;
++
++const DB_FILE: &str = "kernel.db";
++
++fn config(db_path: &Path) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections: 8,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE)))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn cursor(run: RunId) -> EventCursor {
++    EventCursor::new(EventStreamKey::new(format!("run/{run}")).unwrap(), 0)
++}
++
++struct Seeded {
++    run: RunId,
++}
++
++async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch: u64) -> Seeded {
++    let session = SessionId::new(provider);
++    let task = TaskId::new(provider);
++    let run = RunId::new(provider);
++    let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++    txn.tasks()
++        .insert(NewTask {
++            task_id: task,
++            session_id: Some(session),
++            created_by_actor_id: ActorId::new(provider),
++            task_kind: "test".to_owned(),
++            payload: vec![1, 2, 3],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.runs()
++        .insert(NewRun {
++            run_id: run,
++            task_id: task,
++            session_id: Some(session),
++            parent_run_id: None,
++            state: RunState::Created,
++            recovery: RecoveryDisposition::Normal,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(run),
++            cancellation_epoch: 0,
++            resolved_environment_id: None,
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    Seeded { run }
++}
++
++fn new_effect(provider: &DeterministicIds, effect: EffectId, run: RunId) -> NewEffect {
++    NewEffect {
++        effect_id: effect,
++        run_id: run,
++        step_sequence: 1,
++        decision_id: DecisionId::new(provider),
++        operation: "test.operation".to_owned(),
++        request_hash: "hash-1".to_owned(),
++        request_payload: vec![9, 9],
++        effect_class: EffectClass::ExternalMutation,
++        idempotency_semantics: IdempotencySemantics::IdempotencyKeySupported,
++        reconciliation_semantics: ReconciliationSemantics::StatusLookup,
++        cancellation_semantics: "best_effort".to_owned(),
++        compensation_capability: None,
++        adapter_id: AdapterId::new(provider),
++        adapter_version: "1.0.0".to_owned(),
++        adapter_digest: "digest-1".to_owned(),
++        state: EffectState::Prepared,
++        created_at_ms: 20,
++    }
++}
++
++#[tokio::test]
++async fn effect_repo_crud_and_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let effect = EffectId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.effects()
++        .insert(new_effect(&provider, effect, seeded.run))
++        .await
++        .unwrap();
++    let applied = txn
++        .effects()
++        .cas_transition(
++            effect,
++            EffectState::Prepared,
++            None,
++            EffectPatch {
++                state: Some(EffectState::Claimed),
++                executor_id: Some("executor-1".to_owned()),
++                executor_fencing_token: Some(7),
++                daemon_fencing_epoch: Some(epoch),
++                lease_expires_ms: Some(1_800_000_000_000),
++                ..EffectPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(
++        applied,
++        "effect transition with a matching state must apply"
++    );
++    let stale_state = txn
++        .effects()
++        .cas_transition(
++            effect,
++            EffectState::Prepared,
++            None,
++            EffectPatch {
++                state: Some(EffectState::Committed),
++                ..EffectPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale_state, "stale effect state must not apply");
++    let stale_token = txn
++        .effects()
++        .cas_transition(
++            effect,
++            EffectState::Claimed,
++            Some(8),
++            EffectPatch {
++                state: Some(EffectState::Committed),
++                ..EffectPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale_token, "stale executor token must not apply");
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let row = read.effects().get(effect).await.unwrap().unwrap();
++    assert_eq!(row.state, EffectState::Claimed);
++    assert_eq!(row.executor_id.as_deref(), Some("executor-1"));
++    assert_eq!(row.executor_fencing_token, Some(7));
++    assert_eq!(row.daemon_fencing_epoch, Some(epoch));
++    assert_eq!(row.lease_expires_ms, Some(1_800_000_000_000));
++    let listed = read.effects().list_by_run(seeded.run).await.unwrap();
++    assert_eq!(listed.len(), 1);
++    assert_eq!(listed[0].effect_id, effect);
++    assert!(
++        read.effects()
++            .get(EffectId::new(&provider))
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn resource_repo_crud_and_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let reservation = ReservationId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.resources()
++        .insert(NewReservation {
++            reservation_id: reservation,
++            run_id: seeded.run,
++            resource_type: "cpu".to_owned(),
++            state: ReservationState::Reserved,
++            amount: 2,
++            unit: "cores".to_owned(),
++            fencing_token: 1,
++            parent_reservation_id: None,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    let applied = txn
++        .resources()
++        .cas_transition(
++            reservation,
++            ReservationState::Reserved,
++            ReservationPatch {
++                state: Some(ReservationState::Allocated),
++                fencing_token: Some(9),
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "reservation transition must apply");
++    let stale = txn
++        .resources()
++        .cas_transition(
++            reservation,
++            ReservationState::Reserved,
++            ReservationPatch {
++                state: Some(ReservationState::Released),
++                fencing_token: None,
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale, "stale reservation state must not apply");
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let row = read.resources().get(reservation).await.unwrap().unwrap();
++    assert_eq!(row.state, ReservationState::Allocated);
++    assert_eq!(row.fencing_token, 9);
++    let listed = read.resources().list_by_run(seeded.run).await.unwrap();
++    assert_eq!(listed.len(), 1);
++    assert!(
++        read.resources()
++            .get(ReservationId::new(&provider))
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn timer_repo_crud_and_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let timer = TimerId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.timers()
++        .insert(NewTimer {
++            timer_id: timer,
++            run_id: Some(seeded.run),
++            timer_kind: "deadline".to_owned(),
++            payload: vec![4, 5],
++            due_at_ms: 100,
++            state: TimerState::Scheduled,
++            version: 0,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    let applied = txn
++        .timers()
++        .cas_transition(
++            timer,
++            TimerState::Scheduled,
++            0,
++            TimerPatch {
++                state: Some(TimerState::Claimed),
++                claim_owner: Some("scheduler-1".to_owned()),
++                claim_fencing_token: Some(3),
++                claim_daemon_epoch: Some(epoch),
++                due_at_ms: None,
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "timer claim must apply");
++    let stale = txn
++        .timers()
++        .cas_transition(
++            timer,
++            TimerState::Scheduled,
++            0,
++            TimerPatch {
++                state: Some(TimerState::Fired),
++                ..TimerPatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale, "stale timer version must not apply");
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let row = read.timers().get(timer).await.unwrap().unwrap();
++    assert_eq!(row.state, TimerState::Claimed);
++    assert_eq!(row.version, 1, "a successful CAS advances the version");
++    assert_eq!(row.claim_owner.as_deref(), Some("scheduler-1"));
++    let due = read.timers().list_due(100).await.unwrap();
++    assert_eq!(due.len(), 1);
++    assert_eq!(due[0].timer_id, timer);
++    assert!(read.timers().list_due(99).await.unwrap().is_empty());
++    assert!(
++        read.timers()
++            .get(TimerId::new(&provider))
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn security_repo_crud() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let grant = CapabilityGrantId::new(&provider);
++    let chain = DelegationChainId::new(&provider);
++    let request = ApprovalRequestId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.security()
++        .insert_grant(NewCapabilityGrant {
++            grant_id: grant,
++            principal_id: PrincipalId::new(&provider),
++            actor_id: ActorId::new(&provider),
++            run_id: Some(seeded.run),
++            capability_id: "filesystem.write".to_owned(),
++            scope: vec![1, 2],
++            delegated_from_grant_id: None,
++            expires_at_ms: Some(1_900_000_000_000),
++            revoked_at_ms: None,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    for (index, actor) in ["principal-a", "principal-b"].iter().enumerate() {
++        txn.security()
++            .insert_delegation_hop(NewDelegationHop {
++                chain_id: chain,
++                hop_index: u32::try_from(index).unwrap(),
++                principal_or_actor_id: (*actor).to_owned(),
++                run_id: Some(seeded.run),
++                capability_grant_ids: vec![1],
++            })
++            .await
++            .unwrap();
++    }
++    txn.security()
++        .insert_approval_request(NewApprovalRequest {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            principal_id: PrincipalId::new(&provider),
++            actor_id: ActorId::new(&provider),
++            run_id: Some(seeded.run),
++            operation: "write-file".to_owned(),
++            target_resource: Some("file:///tmp/x".to_owned()),
++            capability_ids: vec![1],
++            extension_bundle_digest: None,
++            config_generation_digest: None,
++            expires_at_ms: 1_900_000_000_000,
++            nonce: "nonce-1".to_owned(),
++            state: ApprovalState::Pending,
++            created_at_ms: 20,
++            resolved_at_ms: None,
++        })
++        .await
++        .unwrap();
++    txn.security()
++        .insert_approval_response(NewApprovalResponse {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            decision: "approve".to_owned(),
++            device_id: domain::ids::DeviceId::new(&provider),
++            responder_principal_id: PrincipalId::new(&provider),
++            responded_at_ms: 30,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let grant_row = read.security().get_grant(grant).await.unwrap().unwrap();
++    assert_eq!(grant_row.capability_id, "filesystem.write");
++    assert_eq!(grant_row.expires_at_ms, Some(1_900_000_000_000));
++    let hops = read.security().list_delegation_hops(chain).await.unwrap();
++    assert_eq!(hops.len(), 2);
++    assert_eq!(hops[0].hop_index, 0);
++    assert_eq!(hops[1].principal_or_actor_id, "principal-b");
++    let request_row = read
++        .security()
++        .get_approval_request(request)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(request_row.state, ApprovalState::Pending);
++    let responses = read
++        .security()
++        .list_approval_responses(request)
++        .await
++        .unwrap();
++    assert_eq!(responses.len(), 1);
++    assert_eq!(responses[0].decision, "approve");
++}
++
++#[tokio::test]
++async fn config_repo_crud_and_cas_active() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let first = ConfigGenerationId::new(&provider);
++    let second = ConfigGenerationId::new(&provider);
++    let missing = ConfigGenerationId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    for (id, digest, created_at_ms) in [(first, "digest-1", 20), (second, "digest-2", 21)] {
++        txn.config()
++            .insert_generation(NewConfigGeneration {
++                generation_id: id,
++                digest: digest.to_owned(),
++                document: vec![7],
++                validation_state: "validated".to_owned(),
++                test_state: "passed".to_owned(),
++                created_by_actor_id: ActorId::new(&provider),
++                created_at_ms,
++            })
++            .await
++            .unwrap();
++    }
++    assert!(
++        txn.config().get_active().await.unwrap().is_none(),
++        "no active pointer before the first CAS"
++    );
++    assert!(
++        txn.config().cas_active(0, first, 30).await.unwrap(),
++        "activating from revision zero must apply"
++    );
++    assert!(
++        !txn.config().cas_active(0, second, 31).await.unwrap(),
++        "stale active revision must not apply"
++    );
++    assert!(
++        txn.config().cas_active(1, second, 32).await.unwrap(),
++        "matching revision must apply"
++    );
++    let missing_error = txn.config().cas_active(2, missing, 33).await.unwrap_err();
++    assert_eq!(missing_error.code(), ErrorCode::NotFound);
++    assert_eq!(missing_error.retry_class(), RetryClass::Never);
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let generation = read.config().get_generation(first).await.unwrap().unwrap();
++    assert_eq!(generation.digest, "digest-1");
++    assert_eq!(generation.validation_state, "validated");
++    let active = read.config().get_active().await.unwrap().unwrap();
++    assert_eq!(active.generation_id, second);
++    assert_eq!(active.revision, 2);
++    assert_eq!(active.activated_at_ms, 32);
++}
++
++#[tokio::test]
++async fn workspace_repo_crud_and_cas_lease() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let workspace = WorkspaceId::new(&provider);
++    let lease = LeaseId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.workspaces()
++        .insert_workspace(NewWorkspace {
++            workspace_id: workspace,
++            kind: "git".to_owned(),
++            base_revision: Some("abc123".to_owned()),
++            parent_workspace_id: None,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.workspaces()
++        .insert_lease(NewWorkspaceLease {
++            lease_id: lease,
++            workspace_id: workspace,
++            owner_run_id: seeded.run,
++            mode: WorkspaceAccessMode::ExclusiveWrite,
++            lease_epoch: 1,
++            enforcement_state: LeaseEnforcementState::Active,
++            delegated_from: vec![],
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    let applied = txn
++        .workspaces()
++        .cas_lease(
++            lease,
++            1,
++            LeasePatch {
++                enforcement_state: Some(LeaseEnforcementState::Revoked),
++                ..LeasePatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "lease revocation at the current epoch must apply");
++    let stale = txn
++        .workspaces()
++        .cas_lease(
++            lease,
++            0,
++            LeasePatch {
++                enforcement_state: Some(LeaseEnforcementState::Active),
++                ..LeasePatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale, "stale lease epoch must not apply");
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let workspace_row = read
++        .workspaces()
++        .get_workspace(workspace)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(workspace_row.kind, "git");
++    assert_eq!(workspace_row.base_revision.as_deref(), Some("abc123"));
++    let lease_row = read.workspaces().get_lease(lease).await.unwrap().unwrap();
++    assert_eq!(lease_row.mode, WorkspaceAccessMode::ExclusiveWrite);
++    assert_eq!(lease_row.lease_epoch, 1);
++    assert_eq!(
++        lease_row.enforcement_state,
++        LeaseEnforcementState::Revoked,
++        "only the matching CAS may mutate"
++    );
++}
++
++#[tokio::test]
++async fn adapter_repo_crud_and_cas_instance_state() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let adapter = AdapterId::new(&provider);
++    let instance = AdapterInstanceId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.adapters()
++        .insert_registration(NewAdapterRegistration {
++            adapter_id: adapter,
++            version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            manifest_digest: "manifest-1".to_owned(),
++            runtime_type: "process".to_owned(),
++            implemented_ports: vec![1, 2],
++            capabilities: vec![3],
++            trust_state: TrustState::Trusted,
++            conformance_state: ConformanceState::Untested,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.adapters()
++        .insert_instance(NewAdapterInstance {
++            adapter_instance_id: instance,
++            adapter_id: adapter,
++            adapter_version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            daemon_instance_id: DaemonInstanceId::new(&provider),
++            pid: Some(4242),
++            process_start_identity: Some("start-1".to_owned()),
++            state: "starting".to_owned(),
++            exit_reason: None,
++            last_heartbeat_ms: None,
++            started_at_ms: 21,
++            ended_at_ms: None,
++        })
++        .await
++        .unwrap();
++    let applied = txn
++        .adapters()
++        .cas_instance_state(
++            instance,
++            "starting",
++            AdapterInstanceStatePatch {
++                state: Some("ready".to_owned()),
++                last_heartbeat_ms: Some(22),
++                ..AdapterInstanceStatePatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "instance promotion must apply");
++    let stale = txn
++        .adapters()
++        .cas_instance_state(
++            instance,
++            "starting",
++            AdapterInstanceStatePatch {
++                state: Some("failed".to_owned()),
++                exit_reason: Some("late".to_owned()),
++                ..AdapterInstanceStatePatch::default()
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale, "stale instance state must not apply");
++    txn.adapters()
++        .insert_conformance_report(NewConformanceReport {
++            adapter_id: adapter,
++            adapter_version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            report_digest: "report-1".to_owned(),
++            harness_version: "0.1.0".to_owned(),
++            result: "pass".to_owned(),
++            run_at_ms: 23,
++            details: Some(vec![9]),
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let registration = read
++        .adapters()
++        .get_registration(adapter, "1.0.0", "bundle-1")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(registration.trust_state, TrustState::Trusted);
++    assert_eq!(registration.runtime_type, "process");
++    let report = read
++        .adapters()
++        .get_conformance_report(adapter, "1.0.0", "bundle-1")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(report.result, "pass");
++    assert_eq!(report.details, Some(vec![9]));
++    assert!(
++        read.adapters()
++            .get_registration(adapter, "9.9.9", "bundle-1")
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn artifact_repo_crud() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let artifact = ArtifactId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.artifacts()
++        .insert(NewArtifact {
++            artifact_id: artifact,
++            uri: "artifact://report-1".to_owned(),
++            digest: "digest-1".to_owned(),
++            media_type: "application/octet-stream".to_owned(),
++            size_bytes: 128,
++            origin_run_id: seeded.run,
++            origin_effect_id: None,
++            sensitivity: SensitivityClass::Internal,
++            retention: RetentionClass::Session,
++            locator: "file:///var/artifacts/1".to_owned(),
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    let duplicate = txn
++        .artifacts()
++        .insert(NewArtifact {
++            artifact_id: ArtifactId::new(&provider),
++            uri: "artifact://report-1".to_owned(),
++            digest: "digest-2".to_owned(),
++            media_type: "text/plain".to_owned(),
++            size_bytes: 1,
++            origin_run_id: seeded.run,
++            origin_effect_id: None,
++            sensitivity: SensitivityClass::Public,
++            retention: RetentionClass::Audit,
++            locator: "file:///var/artifacts/2".to_owned(),
++            created_at_ms: 21,
++        })
++        .await
++        .unwrap_err();
++    assert_eq!(duplicate.code(), ErrorCode::Conflict);
++    assert_eq!(duplicate.retry_class(), RetryClass::Never);
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let by_id = read.artifacts().get_by_id(artifact).await.unwrap().unwrap();
++    assert_eq!(by_id.uri, "artifact://report-1");
++    assert_eq!(by_id.sensitivity, SensitivityClass::Internal);
++    let by_uri = read
++        .artifacts()
++        .get_by_uri("artifact://report-1")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(by_uri.artifact_id, artifact);
++    assert!(
++        read.artifacts()
++            .get_by_uri("artifact://missing")
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn loop_turn_repo_crud_and_cas() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let turn = TurnId::new(&provider);
++    let decision = DecisionId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.loop_turns()
++        .insert_turn(NewLoopTurn {
++            turn_id: turn,
++            run_id: seeded.run,
++            run_revision: 0,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(seeded.run),
++            state: "issued".to_owned(),
++            issued_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    let applied = txn
++        .loop_turns()
++        .cas_turn(
++            turn,
++            "issued",
++            LoopTurnPatch {
++                state: Some("accepted".to_owned()),
++            },
++        )
++        .await
++        .unwrap();
++    assert!(applied, "turn acceptance must apply");
++    let stale = txn
++        .loop_turns()
++        .cas_turn(
++            turn,
++            "issued",
++            LoopTurnPatch {
++                state: Some("stale".to_owned()),
++            },
++        )
++        .await
++        .unwrap();
++    assert!(!stale, "stale turn state must not apply");
++    txn.loop_turns()
++        .insert_decision(NewDecision {
++            decision_id: decision,
++            run_id: seeded.run,
++            turn_id: turn,
++            decision_type: "InvokeEffect".to_owned(),
++            decision_digest: "decision-digest".to_owned(),
++            decision_bytes: vec![1, 0, 1],
++            run_revision: 0,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(seeded.run),
++            accepted_at_ms: 21,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let turn_row = read.loop_turns().get_turn(turn).await.unwrap().unwrap();
++    assert_eq!(
++        turn_row.state, "accepted",
++        "only the matching CAS may mutate"
++    );
++    assert_eq!(turn_row.issued_at_ms, 20);
++    let decision_row = read
++        .loop_turns()
++        .get_decision(seeded.run, decision)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(decision_row.decision_type, "InvokeEffect");
++    assert_eq!(decision_row.decision_bytes, vec![1, 0, 1]);
++    assert!(
++        read.loop_turns()
++            .get_turn(TurnId::new(&provider))
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn unknown_persisted_values_fail_closed() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join(DB_FILE);
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let effect = EffectId::new(&provider);
++    let timer = TimerId::new(&provider);
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.effects()
++        .insert(new_effect(&provider, effect, seeded.run))
++        .await
++        .unwrap();
++    txn.timers()
++        .insert(NewTimer {
++            timer_id: timer,
++            run_id: Some(seeded.run),
++            timer_kind: "deadline".to_owned(),
++            payload: vec![4, 5],
++            due_at_ms: 100,
++            state: TimerState::Scheduled,
++            version: 0,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    drop(store);
++
++    let options = sqlx::sqlite::SqliteConnectOptions::new()
++        .filename(&db_path)
++        .create_if_missing(false);
++    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
++    let mut conn = pool.acquire().await.unwrap();
++    sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    sqlx::query("UPDATE effects SET state = 99 WHERE effect_id = ?")
++        .bind(effect.to_string())
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    sqlx::query("UPDATE timers SET state = 'bogus' WHERE timer_id = ?")
++        .bind(timer.to_string())
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    drop(conn);
++    drop(pool);
++
++    let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
++    let mut read = store.begin_read().await.unwrap();
++    let effect_error = read.effects().get(effect).await.unwrap_err();
++    assert_eq!(effect_error.code(), ErrorCode::Internal);
++    assert_eq!(effect_error.retry_class(), RetryClass::Never);
++    let timer_error = read.timers().get(timer).await.unwrap_err();
++    assert_eq!(timer_error.code(), ErrorCode::Internal);
++    assert_eq!(timer_error.retry_class(), RetryClass::Never);
++}

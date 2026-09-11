@@ -1,0 +1,650 @@
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+index 1ef3278..a54da7a 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+@@ -1,18 +1,19 @@
+ //! Adapter repository: registrations, instances, and conformance reports.
+ //!
+ //! Registrations and conformance reports are immutable rows; the durable
+ //! adapter instance is the only mutable record and changes through a state
+ //! CAS (R3.2).
+ 
+ use async_trait::async_trait;
+ use domain::ids::{AdapterId, AdapterInstanceId};
++use domain::run::UnknownStateValue;
+ use domain::security::{ConformanceState, TrustState};
+ use kernel_store::models::{
+     AdapterInstanceStatePatch, AdapterRegistrationRow, ConformanceReportRow, NewAdapterInstance,
+     NewAdapterRegistration, NewConformanceReport,
+ };
+ use kernel_store::repositories::{AdapterRead, AdapterRepo};
+ use sqlx::sqlite::SqliteRow;
+ 
+ use crate::mapping;
+ use crate::repos::SharedConn;
+@@ -22,20 +23,31 @@ pub(crate) struct SqliteAdapterRepo {
+     conn: SharedConn,
+ }
+ 
+ impl SqliteAdapterRepo {
+     /// Creates a repository view over a transaction connection.
+     pub(crate) fn new(conn: SharedConn) -> Self {
+         Self { conn }
+     }
+ }
+ 
++/// Parses the exact `adapter_instances.state` CHECK literal set.
++fn instance_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "starting" | "ready" | "exited" | "failed" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "AdapterInstanceState",
++        }),
++    }
++}
++
+ const SELECT_REGISTRATION: &str = "SELECT adapter_id, version, bundle_digest, manifest_digest, \
+      runtime_type, implemented_ports, capabilities, trust_state, conformance_state, created_at_ms \
+      FROM adapter_registrations";
+ 
+ fn decode_registration(row: &SqliteRow) -> errors::Result<AdapterRegistrationRow> {
+     Ok(AdapterRegistrationRow {
+         adapter_id: mapping::decode_id(
+             "adapter_registrations.adapter_id",
+             &mapping::text(row, "adapter_id")?,
+         )?,
+@@ -173,35 +185,55 @@ impl AdapterRepo for SqliteAdapterRepo {
+         Ok(())
+     }
+ 
+     async fn cas_instance_state(
+         &mut self,
+         id: AdapterInstanceId,
+         expect_state: &str,
+         patch: AdapterInstanceStatePatch,
+     ) -> errors::Result<bool> {
+         let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++
++        // Validate the persisted literal before mutating; an unknown value
++        // fails closed instead of being compared as an opaque string.
++        let persisted: Option<String> = sqlx::query_scalar(
++            "SELECT state FROM adapter_instances WHERE adapter_instance_id = ?1",
++        )
++        .bind(id.to_string())
++        .fetch_optional(&mut *conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        let Some(persisted) = persisted else {
++            return Ok(false);
++        };
++        mapping::decode_state(
++            "adapter_instances.state",
++            &persisted,
++            instance_state_from_state,
++        )?;
++
+         let result = sqlx::query(
+             "UPDATE adapter_instances SET \
+              state = COALESCE(?1, state), \
+              exit_reason = COALESCE(?2, exit_reason), \
+              last_heartbeat_ms = COALESCE(?3, last_heartbeat_ms), \
+              ended_at_ms = COALESCE(?4, ended_at_ms) \
+              WHERE adapter_instance_id = ?5 AND state = ?6",
+         )
+         .bind(patch.state)
+         .bind(patch.exit_reason)
+         .bind(patch.last_heartbeat_ms)
+         .bind(patch.ended_at_ms)
+         .bind(id.to_string())
+         .bind(expect_state)
+-        .execute(guard.connection()?)
++        .execute(conn)
+         .await
+         .map_err(mapping::from_sqlx)?;
+         Ok(result.rows_affected() == 1)
+     }
+ 
+     async fn insert_conformance_report(
+         &mut self,
+         report: NewConformanceReport,
+     ) -> errors::Result<()> {
+         let mut guard = self.conn.lock().await;
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/config.rs b/agent-os/crates/kernel-store-sqlite/src/repos/config.rs
+index e430402..39eeea3 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/config.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/config.rs
+@@ -1,18 +1,19 @@
+ //! Configuration repository: generations and the active-pointer CAS.
+ //!
+ //! The active pointer is a singleton row. `cas_active` compares the persisted
+ //! revision (zero when no pointer exists) and rewrites the pointer at
+ //! `expected + 1`; a stale revision reports `false` without mutation (R3.2).
+ 
+ use async_trait::async_trait;
+ use domain::ids::ConfigGenerationId;
++use domain::run::UnknownStateValue;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::{ActiveConfigGenerationRow, ConfigGenerationRow, NewConfigGeneration};
+ use kernel_store::repositories::{ConfigRead, ConfigRepo};
+ use sqlx::sqlite::SqliteRow;
+ 
+ use crate::mapping;
+ use crate::repos::SharedConn;
+ 
+ /// SQLite view over `config_generations` and `active_config_generation`.
+@@ -20,30 +21,60 @@ pub(crate) struct SqliteConfigRepo {
+     conn: SharedConn,
+ }
+ 
+ impl SqliteConfigRepo {
+     /// Creates a repository view over a transaction connection.
+     pub(crate) fn new(conn: SharedConn) -> Self {
+         Self { conn }
+     }
+ }
+ 
++/// Parses the exact `config_generations.validation_state` CHECK literal set.
++fn validation_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "proposed" | "validated" | "rejected" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "ConfigValidationState",
++        }),
++    }
++}
++
++/// Parses the exact `config_generations.test_state` CHECK literal set.
++fn test_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "untested" | "passed" | "failed" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "ConfigTestState",
++        }),
++    }
++}
++
+ fn decode_generation(row: &SqliteRow) -> errors::Result<ConfigGenerationRow> {
+     Ok(ConfigGenerationRow {
+         generation_id: mapping::decode_id(
+             "config_generations.generation_id",
+             &mapping::text(row, "generation_id")?,
+         )?,
+         digest: mapping::text(row, "digest")?,
+         document: mapping::blob(row, "document")?,
+-        validation_state: mapping::text(row, "validation_state")?,
+-        test_state: mapping::text(row, "test_state")?,
++        validation_state: mapping::decode_state(
++            "config_generations.validation_state",
++            &mapping::text(row, "validation_state")?,
++            validation_state_from_state,
++        )?,
++        test_state: mapping::decode_state(
++            "config_generations.test_state",
++            &mapping::text(row, "test_state")?,
++            test_state_from_state,
++        )?,
+         created_by_actor_id: mapping::decode_id(
+             "config_generations.created_by_actor_id",
+             &mapping::text(row, "created_by_actor_id")?,
+         )?,
+         created_at_ms: mapping::int(row, "created_at_ms")?,
+     })
+ }
+ 
+ fn decode_active(row: &SqliteRow) -> errors::Result<ActiveConfigGenerationRow> {
+     Ok(ActiveConfigGenerationRow {
+@@ -110,20 +141,23 @@ impl ConfigRepo for SqliteConfigRepo {
+         .map_err(mapping::from_sqlx)?;
+         Ok(())
+     }
+ 
+     async fn cas_active(
+         &mut self,
+         expected_revision: u64,
+         generation: ConfigGenerationId,
+         activated_at_ms: i64,
+     ) -> errors::Result<bool> {
++        // Read-then-upsert is race-free only because every writer holds
++        // `BEGIN IMMEDIATE` on this connection; the revision cannot change
++        // between the read below and the upsert.
+         let mut guard = self.conn.lock().await;
+         let conn = guard.connection()?;
+         let current: Option<i64> =
+             sqlx::query_scalar("SELECT revision FROM active_config_generation WHERE singleton = 1")
+                 .fetch_optional(&mut *conn)
+                 .await
+                 .map_err(mapping::from_sqlx)?;
+         let current = match current {
+             Some(value) => mapping::decode_u64("active_config_generation.revision", value)?,
+             None => 0,
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs b/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs
+index ca5ea7d..2c88a18 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs
+@@ -1,70 +1,103 @@
+ //! Loop repository: turns, turn-state CAS, and accepted decisions.
+ //!
+ //! A turn transition checks the persisted state and applies the patch
+ //! atomically; a stale expectation reports `false` without mutation (R3.2).
+ 
+ use async_trait::async_trait;
+ use domain::ids::{DecisionId, RunId, TurnId};
++use domain::run::UnknownStateValue;
+ use kernel_store::models::{DecisionRow, LoopTurnPatch, LoopTurnRow, NewDecision, NewLoopTurn};
+ use kernel_store::repositories::{LoopRead, LoopRepo};
+ use sqlx::sqlite::SqliteRow;
+ 
+ use crate::mapping;
+ use crate::repos::SharedConn;
+ 
+ /// SQLite view over `loop_turns` and `decisions`.
+ pub(crate) struct SqliteLoopRepo {
+     conn: SharedConn,
+ }
+ 
+ impl SqliteLoopRepo {
+     /// Creates a repository view over a transaction connection.
+     pub(crate) fn new(conn: SharedConn) -> Self {
+         Self { conn }
+     }
+ }
+ 
++/// Parses the exact `loop_turns.state` CHECK literal set.
++fn turn_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "issued" | "accepted" | "stale" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "LoopTurnState",
++        }),
++    }
++}
++
++/// Parses the exact `decisions.decision_type` CHECK literal set.
++fn decision_type_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "Complete" | "Fail" | "Wait" | "SpawnAgent" | "InvokeEffect" | "RequestApproval" => {
++            Ok(value.to_owned())
++        }
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "DecisionType",
++        }),
++    }
++}
++
+ const SELECT_TURN: &str = "SELECT turn_id, run_id, run_revision, loop_epoch, step_sequence, \
+      input_event_cursor, state, issued_at_ms FROM loop_turns";
+ 
+ fn decode_turn(row: &SqliteRow) -> errors::Result<LoopTurnRow> {
+     Ok(LoopTurnRow {
+         turn_id: mapping::decode_id("loop_turns.turn_id", &mapping::text(row, "turn_id")?)?,
+         run_id: mapping::decode_id("loop_turns.run_id", &mapping::text(row, "run_id")?)?,
+         run_revision: mapping::decode_u64(
+             "loop_turns.run_revision",
+             mapping::int(row, "run_revision")?,
+         )?,
+         loop_epoch: mapping::decode_u64("loop_turns.loop_epoch", mapping::int(row, "loop_epoch")?)?,
+         step_sequence: mapping::decode_u64(
+             "loop_turns.step_sequence",
+             mapping::int(row, "step_sequence")?,
+         )?,
+         input_event_cursor: mapping::decode_id(
+             "loop_turns.input_event_cursor",
+             &mapping::text(row, "input_event_cursor")?,
+         )?,
+-        state: mapping::text(row, "state")?,
++        state: mapping::decode_state(
++            "loop_turns.state",
++            &mapping::text(row, "state")?,
++            turn_state_from_state,
++        )?,
+         issued_at_ms: mapping::int(row, "issued_at_ms")?,
+     })
+ }
+ 
+ fn decode_decision(row: &SqliteRow) -> errors::Result<DecisionRow> {
+     Ok(DecisionRow {
+         decision_id: mapping::decode_id(
+             "decisions.decision_id",
+             &mapping::text(row, "decision_id")?,
+         )?,
+         run_id: mapping::decode_id("decisions.run_id", &mapping::text(row, "run_id")?)?,
+         turn_id: mapping::decode_id("decisions.turn_id", &mapping::text(row, "turn_id")?)?,
+-        decision_type: mapping::text(row, "decision_type")?,
++        decision_type: mapping::decode_state(
++            "decisions.decision_type",
++            &mapping::text(row, "decision_type")?,
++            decision_type_from_state,
++        )?,
+         decision_digest: mapping::text(row, "decision_digest")?,
+         decision_bytes: mapping::blob(row, "decision_bytes")?,
+         run_revision: mapping::decode_u64(
+             "decisions.run_revision",
+             mapping::int(row, "run_revision")?,
+         )?,
+         loop_epoch: mapping::decode_u64("decisions.loop_epoch", mapping::int(row, "loop_epoch")?)?,
+         step_sequence: mapping::decode_u64(
+             "decisions.step_sequence",
+             mapping::int(row, "step_sequence")?,
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+index 9c4739f..87860f7 100644
+--- a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
++++ b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+@@ -108,20 +108,38 @@ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch:
+             cancellation_epoch: 0,
+             resolved_environment_id: None,
+             created_at_ms: 10,
+         })
+         .await
+         .unwrap();
+     txn.commit().await.unwrap();
+     Seeded { run }
+ }
+ 
++fn new_exclusive_lease(
++    lease: LeaseId,
++    workspace: WorkspaceId,
++    owner_run: RunId,
++    enforcement_state: LeaseEnforcementState,
++) -> NewWorkspaceLease {
++    NewWorkspaceLease {
++        lease_id: lease,
++        workspace_id: workspace,
++        owner_run_id: owner_run,
++        mode: WorkspaceAccessMode::ExclusiveWrite,
++        lease_epoch: 1,
++        enforcement_state,
++        delegated_from: vec![],
++        created_at_ms: 20,
++    }
++}
++
+ fn new_effect(provider: &DeterministicIds, effect: EffectId, run: RunId) -> NewEffect {
+     NewEffect {
+         effect_id: effect,
+         run_id: run,
+         step_sequence: 1,
+         decision_id: DecisionId::new(provider),
+         operation: "test.operation".to_owned(),
+         request_hash: "hash-1".to_owned(),
+         request_payload: vec![9, 9],
+         effect_class: EffectClass::ExternalMutation,
+@@ -582,20 +600,95 @@ async fn workspace_repo_crud_and_cas_lease() {
+     let lease_row = read.workspaces().get_lease(lease).await.unwrap().unwrap();
+     assert_eq!(lease_row.mode, WorkspaceAccessMode::ExclusiveWrite);
+     assert_eq!(lease_row.lease_epoch, 1);
+     assert_eq!(
+         lease_row.enforcement_state,
+         LeaseEnforcementState::Revoked,
+         "only the matching CAS may mutate"
+     );
+ }
+ 
++#[tokio::test]
++async fn exclusive_lease_index_rejects_second_active_lease() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let workspace = WorkspaceId::new(&provider);
++    let first = LeaseId::new(&provider);
++    let second = LeaseId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.workspaces()
++        .insert_workspace(NewWorkspace {
++            workspace_id: workspace,
++            kind: "git".to_owned(),
++            base_revision: None,
++            parent_workspace_id: None,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.workspaces()
++        .insert_lease(new_exclusive_lease(
++            first,
++            workspace,
++            seeded.run,
++            LeaseEnforcementState::Active,
++        ))
++        .await
++        .unwrap();
++    let conflict = txn
++        .workspaces()
++        .insert_lease(new_exclusive_lease(
++            second,
++            workspace,
++            seeded.run,
++            LeaseEnforcementState::Active,
++        ))
++        .await
++        .unwrap_err();
++    assert_eq!(conflict.code(), ErrorCode::Conflict);
++    assert_eq!(conflict.retry_class(), RetryClass::Never);
++
++    assert!(
++        txn.workspaces()
++            .cas_lease(
++                first,
++                1,
++                LeasePatch {
++                    enforcement_state: Some(LeaseEnforcementState::Revoked),
++                    ..LeasePatch::default()
++                },
++            )
++            .await
++            .unwrap(),
++        "the rejected insert must not disturb the active lease"
++    );
++    txn.workspaces()
++        .insert_lease(new_exclusive_lease(
++            second,
++            workspace,
++            seeded.run,
++            LeaseEnforcementState::Active,
++        ))
++        .await
++        .expect("a revoked exclusive lease releases the workspace");
++    txn.commit().await.unwrap();
++
++    let mut read = store.begin_read().await.unwrap();
++    let first_row = read.workspaces().get_lease(first).await.unwrap().unwrap();
++    assert_eq!(first_row.enforcement_state, LeaseEnforcementState::Revoked);
++    let second_row = read.workspaces().get_lease(second).await.unwrap().unwrap();
++    assert_eq!(second_row.enforcement_state, LeaseEnforcementState::Active);
++}
++
+ #[tokio::test]
+ async fn adapter_repo_crud_and_cas_instance_state() {
+     let dir = tempfile::tempdir().unwrap();
+     let (store, epoch) = open_store(dir.path()).await;
+     let provider = DeterministicIds::new(1_700_000_000_000);
+     let adapter = AdapterId::new(&provider);
+     let instance = AdapterInstanceId::new(&provider);
+ 
+     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+     txn.adapters()
+@@ -908,10 +1001,176 @@ async fn unknown_persisted_values_fail_closed() {
+ 
+     let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
+     let mut read = store.begin_read().await.unwrap();
+     let effect_error = read.effects().get(effect).await.unwrap_err();
+     assert_eq!(effect_error.code(), ErrorCode::Internal);
+     assert_eq!(effect_error.retry_class(), RetryClass::Never);
+     let timer_error = read.timers().get(timer).await.unwrap_err();
+     assert_eq!(timer_error.code(), ErrorCode::Internal);
+     assert_eq!(timer_error.retry_class(), RetryClass::Never);
+ }
++
++#[tokio::test]
++async fn unknown_text_literals_fail_closed() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join(DB_FILE);
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let turn = TurnId::new(&provider);
++    let decision = DecisionId::new(&provider);
++    let adapter = AdapterId::new(&provider);
++    let instance = AdapterInstanceId::new(&provider);
++    let valid = ConfigGenerationId::new(&provider);
++    let bad_test_state = ConfigGenerationId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.loop_turns()
++        .insert_turn(NewLoopTurn {
++            turn_id: turn,
++            run_id: seeded.run,
++            run_revision: 0,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(seeded.run),
++            state: "issued".to_owned(),
++            issued_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.loop_turns()
++        .insert_decision(NewDecision {
++            decision_id: decision,
++            run_id: seeded.run,
++            turn_id: turn,
++            decision_type: "InvokeEffect".to_owned(),
++            decision_digest: "decision-digest".to_owned(),
++            decision_bytes: vec![1],
++            run_revision: 0,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(seeded.run),
++            accepted_at_ms: 21,
++        })
++        .await
++        .unwrap();
++    txn.adapters()
++        .insert_registration(NewAdapterRegistration {
++            adapter_id: adapter,
++            version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            manifest_digest: "manifest-1".to_owned(),
++            runtime_type: "process".to_owned(),
++            implemented_ports: vec![],
++            capabilities: vec![],
++            trust_state: TrustState::Trusted,
++            conformance_state: ConformanceState::Untested,
++            created_at_ms: 20,
++        })
++        .await
++        .unwrap();
++    txn.adapters()
++        .insert_instance(NewAdapterInstance {
++            adapter_instance_id: instance,
++            adapter_id: adapter,
++            adapter_version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            daemon_instance_id: DaemonInstanceId::new(&provider),
++            pid: None,
++            process_start_identity: None,
++            state: "starting".to_owned(),
++            exit_reason: None,
++            last_heartbeat_ms: None,
++            started_at_ms: 21,
++            ended_at_ms: None,
++        })
++        .await
++        .unwrap();
++    txn.config()
++        .insert_generation(NewConfigGeneration {
++            generation_id: valid,
++            digest: "digest-valid".to_owned(),
++            document: vec![7],
++            validation_state: "validated".to_owned(),
++            test_state: "passed".to_owned(),
++            created_by_actor_id: ActorId::new(&provider),
++            created_at_ms: 22,
++        })
++        .await
++        .unwrap();
++    txn.config()
++        .insert_generation(NewConfigGeneration {
++            generation_id: bad_test_state,
++            digest: "digest-bad-test-state".to_owned(),
++            document: vec![8],
++            validation_state: "proposed".to_owned(),
++            test_state: "untested".to_owned(),
++            created_by_actor_id: ActorId::new(&provider),
++            created_at_ms: 23,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    drop(store);
++
++    let options = sqlx::sqlite::SqliteConnectOptions::new()
++        .filename(&db_path)
++        .create_if_missing(false);
++    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
++    let mut conn = pool.acquire().await.unwrap();
++    sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
++        .execute(&mut *conn)
++        .await
++        .unwrap();
++    for statement in [
++        "UPDATE loop_turns SET state = 'bogus'",
++        "UPDATE decisions SET decision_type = 'Bogus'",
++        "UPDATE adapter_instances SET state = 'bogus'",
++        "UPDATE config_generations SET validation_state = 'bogus' WHERE digest = 'digest-valid'",
++        "UPDATE config_generations SET test_state = 'bogus' \
++         WHERE digest = 'digest-bad-test-state'",
++    ] {
++        sqlx::query(statement).execute(&mut *conn).await.unwrap();
++    }
++    drop(conn);
++    drop(pool);
++
++    let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
++    let mut read = store.begin_read().await.unwrap();
++    let turn_error = read.loop_turns().get_turn(turn).await.unwrap_err();
++    assert_eq!(turn_error.code(), ErrorCode::Internal);
++    assert_eq!(turn_error.retry_class(), RetryClass::Never);
++    let decision_error = read
++        .loop_turns()
++        .get_decision(seeded.run, decision)
++        .await
++        .unwrap_err();
++    assert_eq!(decision_error.code(), ErrorCode::Internal);
++    assert_eq!(decision_error.retry_class(), RetryClass::Never);
++    let validation_error = read.config().get_generation(valid).await.unwrap_err();
++    assert_eq!(validation_error.code(), ErrorCode::Internal);
++    assert_eq!(validation_error.retry_class(), RetryClass::Never);
++    let test_state_error = read
++        .config()
++        .get_generation(bad_test_state)
++        .await
++        .unwrap_err();
++    assert_eq!(test_state_error.code(), ErrorCode::Internal);
++    assert_eq!(test_state_error.retry_class(), RetryClass::Never);
++    drop(read);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let instance_error = txn
++        .adapters()
++        .cas_instance_state(
++            instance,
++            "starting",
++            AdapterInstanceStatePatch {
++                state: Some("ready".to_owned()),
++                ..AdapterInstanceStatePatch::default()
++            },
++        )
++        .await
++        .unwrap_err();
++    assert_eq!(instance_error.code(), ErrorCode::Internal);
++    assert_eq!(instance_error.retry_class(), RetryClass::Never);
++}

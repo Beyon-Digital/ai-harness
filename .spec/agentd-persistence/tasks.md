@@ -220,8 +220,8 @@
 
 ### Task PST-003B: Remaining entity repositories
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst003b
 - depends_on: PST-003A
 - files: `agent-os/crates/kernel-store-sqlite/src/repos/effects.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/resources.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/timers.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/security.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/config.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/workspaces.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/artifacts.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/loop_turns.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4
