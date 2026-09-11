@@ -13,7 +13,7 @@ non-terminal effect. Each `(run state, effect state)` pair maps to exactly one
 Notation:
 
 - Effect state `NONE` means no `effects` row references the run. The settled states
-  `COMMITTED`, `FAILED`, and `CANCELLED` are equivalent to `NONE` for recovery: a settled
+  `COMMITTED`, `EFFECT_STATE_FAILED`, and `EFFECT_STATE_CANCELLED` are equivalent to `NONE` for recovery: a settled
   effect adds no ambiguity, so the run-state row applies.
 - `PREPARED`, `CLAIMED`, `DISPATCHED`, `ACKNOWLEDGED`, and `UNKNOWN` are the in-flight
   effect states.

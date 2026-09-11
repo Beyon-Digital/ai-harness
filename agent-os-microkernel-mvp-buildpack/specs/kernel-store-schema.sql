@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS effects (
   operation TEXT NOT NULL,
   request_hash TEXT NOT NULL,
   request_payload BLOB NOT NULL,
-  -- EffectClass (contracts/domain/effects.proto): 1=READ_ONLY, 2=LOCAL_MUTATION,
+  -- EffectClass (contracts/domain/effects.proto): 1=EFFECT_CLASS_READ_ONLY, 2=LOCAL_MUTATION,
   -- 3=EXTERNAL_MUTATION, 4=OPAQUE. 0=EFFECT_CLASS_UNSPECIFIED is never persisted.
   effect_class INTEGER NOT NULL CHECK (effect_class BETWEEN 1 AND 4),
   -- IdempotencySemantics (contracts/domain/effects.proto): 1=NATURALLY_IDEMPOTENT,
@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS effects (
   adapter_version TEXT NOT NULL,
   adapter_digest TEXT NOT NULL,
   -- EffectState (contracts/domain/effects.proto): 1=PREPARED, 2=CLAIMED, 3=DISPATCHED,
-  -- 4=ACKNOWLEDGED, 5=COMMITTED, 6=FAILED, 7=CANCELLED, 8=UNKNOWN.
+  -- 4=ACKNOWLEDGED, 5=COMMITTED, 6=EFFECT_STATE_FAILED, 7=EFFECT_STATE_CANCELLED, 8=UNKNOWN.
   -- 0=EFFECT_STATE_UNSPECIFIED is never persisted.
   state INTEGER NOT NULL CHECK (state BETWEEN 1 AND 8),
   executor_id TEXT,

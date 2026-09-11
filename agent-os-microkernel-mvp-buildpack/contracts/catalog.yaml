@@ -53,7 +53,7 @@ ports:
     scope: run-scoped
     extension_policy: external-allowed
 effect_classes:
-- READ_ONLY
+- EFFECT_CLASS_READ_ONLY
 - LOCAL_MUTATION
 - EXTERNAL_MUTATION
 - OPAQUE

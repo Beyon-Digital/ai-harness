@@ -8,7 +8,7 @@
 Effect semantics use independent axes:
 
 ```text
-EffectClass: ReadOnly | LocalMutation | ExternalMutation | Opaque
+EffectClass: EffectClassReadOnly | LocalMutation | ExternalMutation | Opaque
 Idempotency: NaturallyIdempotent | IdempotencyKeySupported | NotIdempotent | Unknown
 Reconciliation: StatusLookup | ResultLookup | DeterministicInspection | Impossible | Unknown
 Cancellation: BeforeDispatch | Cooperative | ProviderSpecific | Unsupported
