@@ -162,6 +162,7 @@ Advances cancellation epoch and transitions/cancels reachable nonterminal descen
 - Payload message: `agentos.spec.v1.SubmitLoopDecision`
 - Idempotency: duplicate detection by `decision_id`; the same `decision_id` with the same bytes returns the stored acceptance, a different payload for the same `decision_id` is a conflict, and a stale fencing tuple is rejected with no mutation.
 - Emits: `LoopDecisionAccepted`, `LoopDecisionRejectedStale`, `RunWaitingTool`, `RunWaitingChild`, `RunWaitingHuman`, `RunCompleted`, `RunFailed`, `EffectPrepared`, `ApprovalRequested`, `RunStateChanged`
+- The `Emits:` list includes transitively emitted events (events emitted by the commands and worker transitions this command invokes), so it may name events whose `produced_by` is another transition.
 
 ```text
 LoopDecision
@@ -293,6 +294,7 @@ expected_version
 - Payload message: `agentos.spec.v1.ResolveBlockedRun`
 - Idempotency: requires `runs.recovery_disposition = BLOCKED_MISSING_RESOURCE` (any other disposition is `FAILED_PRECONDITION`); an identical `(principal_id, idempotency_key)` replay returns the stored outcome.
 - Emits: `RunRecoveryDispositionChanged`, `RunCancelled`, `RunStateChanged`
+- The `Emits:` list includes transitively emitted events (events emitted by the commands and worker transitions this command invokes), so it may name events whose `produced_by` is another transition.
 - `resume` re-validates the same frozen resource references without substituting anything (frozen `ResolvedRunEnvironment` stays immutable); `cancel` terminalizes the run through the cancellation path.
 
 ```text

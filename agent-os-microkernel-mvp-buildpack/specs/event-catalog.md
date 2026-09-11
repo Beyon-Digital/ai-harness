@@ -22,7 +22,7 @@ values are `ephemeral` (liveness telemetry only), `standard` (routine durable hi
 
 Applied policy:
 
-- `no` security, config, approval, or secret event is classified below `confidential`;
+- no security, approval, or secret event is classified below `confidential`;
 - externally mutating effect outcomes, workspace authority changes, cancellation epoch
   advances, recovery dispositions, daemon fencing, and resource-unknown records are `audit`;
 - only adapter health telemetry is `ephemeral`.
