@@ -1,7 +1,10 @@
 //! SQLite schema, repositories, and transactions implementing the kernel store port.
 #![forbid(unsafe_code)]
 
+pub mod mapping;
+pub mod repos;
 pub mod schema;
+pub mod txn;
 
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -84,6 +87,11 @@ impl SqliteKernelStore {
     /// Returns the path of the `kernel.db` file this store opened.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Borrows the pooled connections backing this store.
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 }
 
