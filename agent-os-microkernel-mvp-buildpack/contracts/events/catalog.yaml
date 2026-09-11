@@ -1,10 +1,431 @@
 version: 1
-runtime: [TaskCreated, RunCreated, RunReady, RunStarted, RunPaused, RunResumed, RunCompleted, RunFailed, RunCancelled]
-graph: [ChildRunCreated, DependencyAdded, RunClaimed, CancellationEpochAdvanced]
-loop: [LoopTurnIssued, LoopDecisionAccepted, LoopDecisionRejectedStale]
-effect: [EffectPrepared, EffectClaimed, EffectDispatched, EffectAcknowledged, EffectCommitted, EffectFailed, EffectCancelled, EffectUnknown, EffectReconciled]
-workspace: [WorkspaceLeaseGranted, WorkspaceLeaseTransferred, WorkspaceForked, WorkspaceMerged]
-security: [CapabilityRequested, CapabilityGranted, CapabilityDenied, ApprovalRequested, ApprovalResolved, SecretActionPerformed]
-adapter: [AdapterRegistered, AdapterStarted, AdapterHealthy, AdapterUnhealthy, AdapterStopped]
-config: [ConfigProposed, ConfigTested, ConfigActivated, ConfigRolledBack]
-recovery: [RecoveryStarted, RunRecoveryDispositionChanged, DaemonFenceAcquired, DaemonFenceLost]
+sensitivity_values: [public, internal, confidential, secret]
+retention_values: [ephemeral, standard, audit]
+events:
+  - id: SessionCreated
+    version: 1
+    category: session
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: session/<session-id>
+    produced_by: CreateSession
+  - id: AgentSpecRevisionStored
+    version: 1
+    category: session
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: PutAgentSpecRevision
+  - id: TaskCreated
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: task/<task-id>
+    produced_by: CreateTaskRun
+  - id: RunCreated
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: CreateTaskRun
+  - id: RunReady
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: BindRun
+  - id: RunBound
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: BindRun
+  - id: RunStarted
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: ClaimReadyRun
+  - id: RunWaitingTool
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: RunWaitingChild
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: RunWaitingHuman
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: RunStateChanged
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: RunStateTransition
+  - id: RunCompleted
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: RunFailed
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: RunCancelled
+    version: 1
+    category: runtime
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: CancelRun
+  - id: ChildRunCreated
+    version: 1
+    category: graph
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<parent-run-id>
+    produced_by: CreateTaskRun
+  - id: DependencyAdded
+    version: 1
+    category: graph
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: task/<task-id>
+    produced_by: AddRunDependency
+  - id: RunClaimed
+    version: 1
+    category: graph
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: ClaimReadyRun
+  - id: CancellationEpochAdvanced
+    version: 1
+    category: graph
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: CancelRun
+  - id: LoopTurnIssued
+    version: 1
+    category: loop
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: LoopTurnIssue
+  - id: LoopDecisionAccepted
+    version: 1
+    category: loop
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: LoopDecisionRejectedStale
+    version: 1
+    category: loop
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: SubmitLoopDecision
+  - id: EffectPrepared
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: effect/<effect-id>
+    produced_by: prepare_effect
+  - id: EffectClaimed
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: effect/<effect-id>
+    produced_by: "Prepared -> Claimed"
+  - id: EffectDispatched
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: effect/<effect-id>
+    produced_by: "Claimed -> Dispatched"
+  - id: EffectAcknowledged
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: effect/<effect-id>
+    produced_by: "Dispatched -> Acknowledged"
+  - id: EffectCommitted
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: effect/<effect-id>
+    produced_by: "Acknowledged -> Committed"
+  - id: EffectFailed
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: effect/<effect-id>
+    produced_by: "Dispatched|Acknowledged -> Failed"
+  - id: EffectCancelled
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: effect/<effect-id>
+    produced_by: "Dispatched -> Cancelled"
+  - id: EffectUnknown
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: effect/<effect-id>
+    produced_by: "Dispatched -> Unknown"
+  - id: EffectReconciled
+    version: 1
+    category: effect
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: effect/<effect-id>
+    produced_by: ResolveUnknownEffect
+  - id: TimerScheduled
+    version: 1
+    category: timer
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: ScheduleTimer
+  - id: TimerClaimed
+    version: 1
+    category: timer
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "Scheduled -> Claimed"
+  - id: TimerFired
+    version: 1
+    category: timer
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "Claimed -> Fired"
+  - id: TimerCancelled
+    version: 1
+    category: timer
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "Scheduled -> Cancelled"
+  - id: ResourceReserved
+    version: 1
+    category: resource
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "none -> reserved"
+  - id: ResourceAllocated
+    version: 1
+    category: resource
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "reserved -> allocated"
+  - id: ResourceReleased
+    version: 1
+    category: resource
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: "allocated -> released"
+  - id: ResourceUnknown
+    version: 1
+    category: resource
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: "allocated|reserved -> unknown"
+  - id: WorkspaceLeaseGranted
+    version: 1
+    category: workspace
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: WorkspaceLeaseGrant
+  - id: WorkspaceLeaseTransferred
+    version: 1
+    category: workspace
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: WorkspaceLeaseTransfer
+  - id: WorkspaceForked
+    version: 1
+    category: workspace
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: WorkspaceFork
+  - id: WorkspaceMerged
+    version: 1
+    category: workspace
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: WorkspaceMerge
+  - id: CapabilityRequested
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: PermissionEvaluation
+  - id: CapabilityGranted
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: Allow
+  - id: CapabilityDenied
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: Deny
+  - id: ApprovalRequested
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: CreateApprovalRequest
+  - id: ApprovalResolved
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: RespondApproval
+  - id: SecretActionPerformed
+    version: 1
+    category: security
+    default_sensitivity: confidential
+    default_retention: audit
+    stream_key: security/principal/<principal-id>
+    produced_by: sign_or_act
+  - id: AdapterRegistered
+    version: 1
+    category: adapter
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: adapter/<adapter-id>/<version>/<digest>
+    produced_by: AdapterRegistration
+  - id: AdapterStarted
+    version: 1
+    category: adapter
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: adapter/<adapter-id>/<version>/<digest>
+    produced_by: AdapterInstanceStart
+  - id: AdapterHealthy
+    version: 1
+    category: adapter
+    default_sensitivity: internal
+    default_retention: ephemeral
+    stream_key: adapter/<adapter-id>/<version>/<digest>
+    produced_by: AdapterHealthPing
+  - id: AdapterUnhealthy
+    version: 1
+    category: adapter
+    default_sensitivity: internal
+    default_retention: ephemeral
+    stream_key: adapter/<adapter-id>/<version>/<digest>
+    produced_by: AdapterHealthMiss
+  - id: AdapterStopped
+    version: 1
+    category: adapter
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: adapter/<adapter-id>/<version>/<digest>
+    produced_by: AdapterInstanceStop
+  - id: ConfigProposed
+    version: 1
+    category: config
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: ProposeConfigGeneration
+  - id: ConfigTested
+    version: 1
+    category: config
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: MarkConfigTested
+  - id: ConfigActivated
+    version: 1
+    category: config
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: ActivateConfigGeneration
+  - id: ConfigRolledBack
+    version: 1
+    category: config
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: RollbackConfigGeneration
+  - id: RecoveryStarted
+    version: 1
+    category: recovery
+    default_sensitivity: internal
+    default_retention: standard
+    stream_key: run/<run-id>
+    produced_by: RecoveryReconciliation
+  - id: RunRecoveryDispositionChanged
+    version: 1
+    category: recovery
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: run/<run-id>
+    produced_by: RecoveryReconciliation
+  - id: DaemonFenceAcquired
+    version: 1
+    category: recovery
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: acquire_daemon_fence
+  - id: DaemonFenceLost
+    version: 1
+    category: recovery
+    default_sensitivity: internal
+    default_retention: audit
+    stream_key: config/global
+    produced_by: DaemonAuthorityRelease

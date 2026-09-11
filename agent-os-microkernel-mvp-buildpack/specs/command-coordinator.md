@@ -41,12 +41,13 @@ CommandEnvelope<C> {
 
 ## MVP command set
 
+`specs/command-catalog.md` is the single list; this section mirrors it exactly (18 commands):
+
 - `CreateSession`
 - `PutAgentSpecRevision`
 - `CreateTaskRun`
+- `BindRun`
 - `ClaimReadyRun`
-- `TransitionRun`
-- `SpawnChildRun`
 - `AddRunDependency`
 - `CancelRun`
 - `SubmitLoopDecision`
@@ -54,8 +55,22 @@ CommandEnvelope<C> {
 - `CreateApprovalRequest`
 - `RespondApproval`
 - `ProposeConfigGeneration`
+- `MarkConfigTested`
 - `ActivateConfigGeneration`
+- `RollbackConfigGeneration`
 - `ScheduleTimer`
 - `CancelTimer`
+- `ResolveBlockedRun`
 
-Worker actions such as effect claim or timer claim use the same transactional primitives and fencing checks even if they are internal rather than public commands.
+Rules that keep the set unambiguous:
+
+- `TransitionRun` is not a command; a run state transition happens inside the command that
+  causes it (`BindRun`, `ClaimReadyRun`, `SubmitLoopDecision`, `CancelRun`, `ResolveBlockedRun`).
+- `SpawnChildRun` is not a command. `CreateTaskRun` with `parent_run_id` is the one
+  authoritative child-creation path; loop `SpawnAgent` decisions route through `CreateTaskRun`.
+- Worker actions such as effect claim or timer claim use the same transactional primitives and
+  fencing checks even if they are internal rather than public commands. They are named as
+  `produced_by` transitions in `contracts/events/catalog.yaml` and add no command surface.
+- Every state-changing `MvpControlApi` method maps to exactly one catalogued command: the
+  `SubmitCommand` RPC dispatches on `command_type` (the fully-qualified payload message name),
+  and `RespondApproval` maps one-to-one to the `RespondApproval` command.
