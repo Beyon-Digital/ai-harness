@@ -1,6 +1,7 @@
 //! SQLite schema, repositories, and transactions implementing the kernel store port.
 #![forbid(unsafe_code)]
 
+pub mod fence;
 pub mod mapping;
 pub mod repos;
 pub mod schema;

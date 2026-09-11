@@ -17,7 +17,7 @@ use domain::ids::DaemonInstanceId;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::repositories::*;
-use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+use kernel_store::types::{DaemonFence, TxContext};
 use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
 use sqlx::Sqlite;
 
@@ -278,19 +278,7 @@ impl KernelStore for SqliteKernelStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(mapping::from_sqlx)?;
-        let persisted: Option<i64> =
-            sqlx::query_scalar("SELECT fencing_epoch FROM daemon_fence WHERE singleton = 1")
-                .fetch_optional(&mut *txn)
-                .await
-                .map_err(mapping::from_sqlx)?;
-        let expected = i64::try_from(ctx.daemon_epoch).ok();
-        if persisted.is_none() || persisted != expected {
-            return Err(KernelError::new(
-                ErrorCode::FailedPrecondition,
-                RetryClass::Never,
-                "write transaction rejected: daemon epoch is absent or stale",
-            ));
-        }
+        crate::fence::assert_epoch(&mut txn, ctx.daemon_epoch).await?;
         Ok(Box::new(SqliteWriteTxn::new(ctx, txn)))
     }
 
@@ -304,50 +292,10 @@ impl KernelStore for SqliteKernelStore {
         &self,
         instance: DaemonInstanceId,
     ) -> errors::Result<DaemonFence> {
-        let mut txn = self
-            .pool()
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(mapping::from_sqlx)?;
-        let epoch: i64 = sqlx::query_scalar(
-            "INSERT INTO daemon_fence (singleton, instance_id, fencing_epoch, lease_expires_ms, \
-             updated_at_ms) VALUES (1, ?1, 1, ?2, ?3) \
-             ON CONFLICT(singleton) DO UPDATE SET \
-               instance_id = excluded.instance_id, \
-               fencing_epoch = fencing_epoch + 1, \
-               lease_expires_ms = excluded.lease_expires_ms, \
-               updated_at_ms = excluded.updated_at_ms \
-             RETURNING fencing_epoch",
-        )
-        .bind(instance.to_string())
-        .bind(i64::MAX)
-        .bind(mapping::unix_ms_now()?)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(mapping::from_sqlx)?;
-        txn.commit().await.map_err(mapping::from_sqlx)?;
-        Ok(DaemonFence {
-            instance_id: instance,
-            epoch: DaemonEpoch(mapping::decode_u64("daemon_fence.fencing_epoch", epoch)?),
-            lease_expires_unix_ms: i64::MAX,
-        })
+        crate::fence::claim(self.pool(), instance, crate::fence::FENCE_LEASE_MS).await
     }
 
     async fn current_fence(&self) -> errors::Result<Option<DaemonFence>> {
-        let row: Option<(String, i64, i64)> = sqlx::query_as(
-            "SELECT instance_id, fencing_epoch, lease_expires_ms FROM daemon_fence \
-             WHERE singleton = 1",
-        )
-        .fetch_optional(self.pool())
-        .await
-        .map_err(mapping::from_sqlx)?;
-        row.map(|(instance, epoch, lease_expires_unix_ms)| {
-            Ok(DaemonFence {
-                instance_id: mapping::decode_id("daemon_fence.instance_id", &instance)?,
-                epoch: DaemonEpoch(mapping::decode_u64("daemon_fence.fencing_epoch", epoch)?),
-                lease_expires_unix_ms,
-            })
-        })
-        .transpose()
+        crate::fence::current(self.pool()).await
     }
 }
