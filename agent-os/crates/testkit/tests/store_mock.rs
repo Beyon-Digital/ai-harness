@@ -2,13 +2,13 @@
 //!
 //! The mock is the second implementation of the port. These tests prove the
 //! contract is implementable: atomic visibility on commit, no residue on drop,
-//! CAS conditions that reject stale expectations, idempotency replay, and
-//! contiguous stream allocation.
+//! CAS conditions that reject stale expectations, idempotency replay,
+//! contiguous stream allocation, and the daemon-epoch assertion at write begin.
 
 use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
 use domain::ids::{
-    ActorId, AdapterId, CommandId, DecisionId, EffectId, EventCursor, EventId, EventStreamKey,
-    IdempotencyKey, PrincipalId, RunId, SessionId, TaskId,
+    ActorId, AdapterId, CommandId, DaemonInstanceId, DecisionId, EffectId, EventCursor, EventId,
+    EventStreamKey, IdempotencyKey, PrincipalId, RunId, SessionId, TaskId,
 };
 use domain::run::{RecoveryDisposition, RunState};
 use domain::security::{RetentionClass, SensitivityClass};
@@ -55,6 +55,10 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let ids = DeterministicIds::new(SEED_MS);
+    let store = MockStore::new();
+    store
+        .set_daemon_epoch(1)
+        .expect("seed the persisted daemon epoch");
     Fixture {
         session_id: SessionId::new(&ids),
         task_id: TaskId::new(&ids),
@@ -62,7 +66,7 @@ fn fixture() -> Fixture {
         effect_id: EffectId::new(&ids),
         event_id: EventId::new(&ids),
         principal_id: PrincipalId::new(&ids),
-        store: MockStore::new(),
+        store,
         ids,
     }
 }
@@ -518,4 +522,53 @@ async fn stream_allocation_is_contiguous_across_transactions() {
     assert_eq!(txn.streams().allocate(run_stream).await.expect("d"), 3);
     assert_eq!(txn.streams().allocate(config_stream).await.expect("e"), 2);
     txn.commit().await.expect("commit");
+}
+
+#[tokio::test]
+async fn begin_write_asserts_the_persisted_daemon_epoch() {
+    let ids = DeterministicIds::new(SEED_MS);
+    let store = MockStore::new();
+    let context_with_epoch = |epoch: u64| TxContext {
+        daemon_epoch: epoch,
+        principal_id: PrincipalId::new(&ids),
+        command_id: CommandId::new(&ids),
+        correlation_id: None,
+    };
+
+    let error = match store.begin_write(context_with_epoch(1)).await {
+        Ok(_) => panic!("epoch 1 must be refused while no fence is recorded"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+    let error = match store.begin_write(context_with_epoch(0)).await {
+        Ok(_) => panic!("epoch 0 is the absent epoch and must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+
+    store
+        .set_daemon_epoch(2)
+        .expect("simulate a persisted fence epoch");
+    let error = match store.begin_write(context_with_epoch(1)).await {
+        Ok(_) => panic!("stale epoch 1 must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+
+    let txn = store
+        .begin_write(context_with_epoch(2))
+        .await
+        .expect("matching epoch must open a write transaction");
+    txn.rollback().await.expect("rollback");
+
+    let fence = store
+        .acquire_daemon_fence(DaemonInstanceId::new(&ids))
+        .await
+        .expect("acquire fence");
+    assert_eq!(fence.epoch.0, 3);
+    let txn = store
+        .begin_write(context_with_epoch(3))
+        .await
+        .expect("epoch recorded by acquire must open a write transaction");
+    txn.rollback().await.expect("rollback");
 }

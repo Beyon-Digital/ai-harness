@@ -80,8 +80,17 @@ pub trait GraphRead: Send + Sync {
 
 #[async_trait]
 pub trait GraphRepo: GraphRead {
+    /// Returns the task's graph head, creating it at revision `0` when absent.
     async fn ensure_head(&mut self, task: TaskId) -> Result<RunGraphHeadRow>;
+    /// Advances `graph_revision` from `expected` to `expected + 1` when the
+    /// persisted revision equals `expected`. Returns `false`, leaving the head
+    /// unchanged, when no head row exists or the revision differs.
     async fn cas_head_revision(&mut self, task: TaskId, expected: u64) -> Result<bool>;
+    /// Requires an existing head whose `graph_revision` equals
+    /// `expected_revision` (`NotFound` when the head is absent, `Conflict` on
+    /// revision mismatch), inserts the dependency with
+    /// `created_graph_revision = expected_revision`, and advances the head to
+    /// `expected_revision + 1` in the same operation.
     async fn insert_dependency(
         &mut self,
         new: NewRunDependency,
@@ -286,6 +295,9 @@ pub trait LoopRepo: LoopRead {
     async fn insert_decision(&mut self, decision: NewDecision) -> Result<()>;
 }
 
+/// Write-only in the port surface: [`crate::txn::KernelReadTxn`] does not
+/// expose this group because replay lookups happen inside write transactions,
+/// so there is no read trait to extend.
 #[async_trait]
 pub trait IdempotencyRepo: Send + Sync {
     async fn lookup(
@@ -296,6 +308,9 @@ pub trait IdempotencyRepo: Send + Sync {
     async fn insert(&mut self, record: NewIdempotencyRecord) -> Result<()>;
 }
 
+/// Write-only in the port surface: [`crate::txn::KernelReadTxn`] does not
+/// expose this group because stream allocation and outbox staging happen
+/// inside write transactions, so there is no read trait to extend.
 #[async_trait]
 pub trait StreamRepo: Send + Sync {
     /// Allocates and returns the next contiguous sequence for `stream_key`.

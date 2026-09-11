@@ -4,7 +4,15 @@
 //! SQL: write transactions mutate a private snapshot, commit publishes the
 //! snapshot atomically, drop or rollback discards it, CAS operations check the
 //! expected revision/state/token, idempotency keys are unique, and stream
-//! allocation hands out contiguous sequences per stream key.
+//! allocation hands out contiguous sequences per stream key. Write
+//! transactions assert the persisted daemon epoch at begin, like the storage
+//! layer (R4.3, D6).
+//!
+//! Two behaviours are intentionally coarser than SQLite and are documented on
+//! [`MockStore`]: the epoch assertion rejects absent or stale epochs instead
+//! of comparing a live fence lease, and commit is guarded by a single
+//! whole-store revision, so any overlapping writer conflicts rather than
+//! receiving the row-level serialization `BEGIN IMMEDIATE` would provide.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,6 +36,7 @@ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
 struct MockState {
     revision: u64,
     logical_now_ms: i64,
+    daemon_epoch: u64,
     daemon_fence: Option<DaemonFence>,
     sessions: HashMap<SessionId, SessionRow>,
     tasks: HashMap<TaskId, TaskRow>,
@@ -61,15 +70,39 @@ struct MockState {
 }
 
 /// In-memory `KernelStore` double.
+///
+/// The persisted daemon epoch starts at `0`, meaning no daemon fence has been
+/// recorded. Use [`MockStore::set_daemon_epoch`] or
+/// [`KernelStore::acquire_daemon_fence`] before opening a write transaction:
+/// `begin_write` rejects an absent (`0`) or mismatched context epoch with
+/// `FailedPrecondition`, mirroring the storage-layer epoch assertion (R4.3,
+/// D6).
+///
+/// Concurrency limitation: commits are guarded by one whole-store revision.
+/// Any overlapping write transaction started from an older revision fails
+/// with `Conflict`/`Safe` even when CAS expectations match and the rows
+/// touched are disjoint. The SQLite store serializes writers with
+/// `BEGIN IMMEDIATE` and would permit disjoint or non-conflicting commits, so
+/// mock-based concurrency tests must stay conservative and must not assume
+/// that two overlapping writers both succeed.
 #[derive(Clone, Default)]
 pub struct MockStore {
     state: Arc<Mutex<MockState>>,
 }
 
 impl MockStore {
-    /// Creates an empty store.
+    /// Creates an empty store with persisted daemon epoch `0` (no fence).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the persisted daemon epoch, simulating an epoch recorded by
+    /// [`KernelStore::acquire_daemon_fence`]. The initial value is `0`; a
+    /// write transaction presenting epoch `0` or a non-matching epoch is
+    /// rejected with `FailedPrecondition`.
+    pub fn set_daemon_epoch(&self, epoch: u64) -> errors::Result<()> {
+        lock(&self.state)?.daemon_epoch = epoch;
+        Ok(())
     }
 }
 
@@ -246,6 +279,11 @@ impl KernelStore for MockStore {
     async fn begin_write(&self, ctx: TxContext) -> errors::Result<Box<dyn KernelTxn + '_>> {
         let snapshot = {
             let state = lock(&self.state)?;
+            if ctx.daemon_epoch == 0 || ctx.daemon_epoch != state.daemon_epoch {
+                return Err(failed_precondition(
+                    "write transaction rejected: daemon epoch is absent or stale",
+                ));
+            }
             state.clone()
         };
         let base_revision = snapshot.revision;
@@ -271,15 +309,13 @@ impl KernelStore for MockStore {
         instance: domain::ids::DaemonInstanceId,
     ) -> errors::Result<DaemonFence> {
         let mut state = lock(&self.state)?;
-        let epoch = match &state.daemon_fence {
-            Some(fence) => fence.epoch.0.saturating_add(1),
-            None => 1,
-        };
+        let epoch = state.daemon_epoch.saturating_add(1);
         let fence = DaemonFence {
             instance_id: instance,
             epoch: DaemonEpoch(epoch),
             lease_expires_unix_ms: i64::MAX,
         };
+        state.daemon_epoch = epoch;
         state.daemon_fence = Some(fence.clone());
         Ok(fence)
     }
