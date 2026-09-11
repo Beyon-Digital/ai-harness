@@ -1,9 +1,9 @@
-//! Atomicity of SQLite write transactions: rejection at admission, faulted
-//! transactions, explicit rollback, and drop without commit leave zero rows.
+//! Atomicity of SQLite write transactions: rejection at admission, failed
+//! multi-statement transactions, explicit rollback, and drop without commit
+//! leave zero rows.
 
 use std::path::Path;
 
-use domain::faults::FaultInjector;
 use domain::ids::{
     ActorId, CommandId, DaemonInstanceId, EventCursor, EventStreamKey, PrincipalId, RunId,
     SessionId, TaskId,
@@ -13,7 +13,6 @@ use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::{NewRun, NewSession, NewTask};
 use kernel_store::{KernelStore, KernelTxn, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
-use testkit::faults::ArmedFaults;
 use testkit::ids::DeterministicIds;
 
 const DB_FILE: &str = "kernel.db";
@@ -145,21 +144,75 @@ async fn missing_or_stale_epoch_rejects_transaction() {
 }
 
 #[tokio::test]
-async fn fault_after_successful_write_leaves_zero_rows() {
+async fn absent_fence_rejects_write_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join(DB_FILE);
+    let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
+    let provider = DeterministicIds::new(1_700_000_000_000);
+
+    for daemon_epoch in [0, 1] {
+        let error = rejected_write(&store, context(&provider, daemon_epoch)).await;
+        assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+        assert_eq!(error.retry_class(), RetryClass::Never);
+        assert!(
+            error.message().contains("absent"),
+            "a missing fence must be reported as absent: {}",
+            error.message()
+        );
+    }
+
+    let fence = store
+        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
+        .await
+        .unwrap();
+    assert_eq!(fence.epoch.0, 1);
+    let txn = store
+        .begin_write(context(&provider, fence.epoch.0))
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn constraint_failure_after_two_writes_rolls_back_everything() {
     let dir = tempfile::tempdir().unwrap();
     let (store, epoch) = open_store(dir.path()).await;
     let provider = DeterministicIds::new(1_700_000_000_000);
-    let faults = ArmedFaults::new();
     let session = SessionId::new(&provider);
+    let task = TaskId::new(&provider);
 
     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
     insert_session(&mut txn, &provider, session).await;
-    faults.arm("store.write.aborted");
-    faults.trigger("store.write.aborted");
-    faults.assert_triggered("store.write.aborted");
+    insert_task(&mut txn, &provider, task, session).await;
+    let conflict = txn
+        .sessions()
+        .insert(NewSession {
+            session_id: session,
+            principal_id: PrincipalId::new(&provider),
+            created_at_ms: 11,
+            metadata: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code(), ErrorCode::Conflict);
+    assert_eq!(conflict.retry_class(), RetryClass::Never);
     drop(txn);
 
-    assert!(session_is_absent(&store, session).await);
+    let mut read = store.begin_read().await.unwrap();
+    assert!(
+        read.sessions().get(session).await.unwrap().is_none(),
+        "the first successful write must be rolled back"
+    );
+    assert!(
+        read.tasks().get(task).await.unwrap().is_none(),
+        "the second successful write must be rolled back"
+    );
+    drop(read);
+
+    let mut next = store.begin_write(context(&provider, epoch)).await.unwrap();
+    insert_session(&mut next, &provider, session).await;
+    next.commit().await.unwrap();
+    assert!(!session_is_absent(&store, session).await);
 }
 
 #[tokio::test]
