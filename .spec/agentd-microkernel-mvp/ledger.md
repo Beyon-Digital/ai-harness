@@ -85,3 +85,8 @@
 - 2026-09-11T05:11:57Z FND-002 -> done (@agent-fnd002)
 - 2026-09-11T05:11:58Z GC-7 -> done (@agent-gc7)
 - 2026-09-11T05:12:00Z Wave 3 done: FND-002 and GC-7 approved; fmt repair on FND-004 verified; validator BUILD PACK OK, lock+manifest regenerated. 12/14 tasks done.
+- 2026-09-11T05:12:37Z FND-003 -> claimed (@agent-fnd003)
+- 2026-09-11T05:12:38Z FND-003 -> in_progress (@agent-fnd003)
+- 2026-09-11T05:29:10Z FND-003 -> review (@agent-fnd003)
+- 2026-09-11T05:45:22Z FND-003 -> done (@agent-fnd003)
+- 2026-09-11T05:45:23Z FND-003 fix re-reviewed clean; 13/14 done; FND-005 dispatched as final task.

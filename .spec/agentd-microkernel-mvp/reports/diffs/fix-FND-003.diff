@@ -1,0 +1,783 @@
+diff --git a/agent-os/crates/domain/src/ids.rs b/agent-os/crates/domain/src/ids.rs
+index 45753c3..cdcfd28 100644
+--- a/agent-os/crates/domain/src/ids.rs
++++ b/agent-os/crates/domain/src/ids.rs
+@@ -479,21 +479,24 @@ mod tests {
+     fn parsed<T>(text: &str) -> T
+     where
+         T: FromStr<Err = InvalidId>,
+     {
+         match text.parse() {
+             Ok(value) => value,
+             Err(error) => panic!("{text:?} failed to parse: {error}"),
+         }
+     }
+ 
+-    fn accepted<T>(result: Result<T, InvalidId>) -> T {
++    fn accepted<T, E>(result: Result<T, E>) -> T
++    where
++        E: std::fmt::Display,
++    {
+         match result {
+             Ok(value) => value,
+             Err(error) => panic!("expected an accepted value: {error}"),
+         }
+     }
+ 
+     #[test]
+     fn uuid_v7_parses_and_formats_canonically() {
+         let value: UuidV7 = parsed(SAMPLE);
+         assert_eq!(value.to_hyphenated(), SAMPLE);
+@@ -602,11 +605,225 @@ mod tests {
+         let good: StrDeserializer<'_, ValueError> = SAMPLE.into_deserializer();
+         let run_id = match <RunId as serde::Deserialize>::deserialize(good) {
+             Ok(value) => value,
+             Err(error) => panic!("sample identifier failed to deserialize: {error}"),
+         };
+         assert_eq!(run_id.to_string(), SAMPLE);
+ 
+         let bad: StrDeserializer<'_, ValueError> = "not-a-uuid".into_deserializer();
+         assert!(<RunId as serde::Deserialize>::deserialize(bad).is_err());
+     }
++
++    #[derive(Debug)]
++    struct Unsupported;
++
++    impl std::fmt::Display for Unsupported {
++        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++            f.write_str("unsupported serialization type")
++        }
++    }
++
++    impl std::error::Error for Unsupported {}
++
++    impl serde::ser::Error for Unsupported {
++        fn custom<T: std::fmt::Display>(_message: T) -> Self {
++            Unsupported
++        }
++    }
++
++    struct StringSerializer;
++
++    impl serde::Serializer for StringSerializer {
++        type Ok = String;
++        type Error = Unsupported;
++        type SerializeSeq = serde::ser::Impossible<String, Unsupported>;
++        type SerializeTuple = serde::ser::Impossible<String, Unsupported>;
++        type SerializeTupleStruct = serde::ser::Impossible<String, Unsupported>;
++        type SerializeTupleVariant = serde::ser::Impossible<String, Unsupported>;
++        type SerializeMap = serde::ser::Impossible<String, Unsupported>;
++        type SerializeStruct = serde::ser::Impossible<String, Unsupported>;
++        type SerializeStructVariant = serde::ser::Impossible<String, Unsupported>;
++
++        fn serialize_bool(self, _value: bool) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_i8(self, _value: i8) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_i16(self, _value: i16) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_i32(self, _value: i32) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_i64(self, _value: i64) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_i128(self, _value: i128) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_u8(self, _value: u8) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_u16(self, _value: u16) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_u32(self, _value: u32) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_u64(self, _value: u64) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_u128(self, _value: u128) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_char(self, _value: char) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
++            Ok(format!("\"{value}\""))
++        }
++
++        fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_some<T>(self, _value: &T) -> Result<Self::Ok, Self::Error>
++        where
++            T: ?Sized + serde::Serialize,
++        {
++            Err(Unsupported)
++        }
++
++        fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_unit_variant(
++            self,
++            _name: &'static str,
++            _variant_index: u32,
++            _variant: &'static str,
++        ) -> Result<Self::Ok, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_newtype_struct<T>(
++            self,
++            _name: &'static str,
++            _value: &T,
++        ) -> Result<Self::Ok, Self::Error>
++        where
++            T: ?Sized + serde::Serialize,
++        {
++            Err(Unsupported)
++        }
++
++        fn serialize_newtype_variant<T>(
++            self,
++            _name: &'static str,
++            _variant_index: u32,
++            _variant: &'static str,
++            _value: &T,
++        ) -> Result<Self::Ok, Self::Error>
++        where
++            T: ?Sized + serde::Serialize,
++        {
++            Err(Unsupported)
++        }
++
++        fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_tuple_struct(
++            self,
++            _name: &'static str,
++            _len: usize,
++        ) -> Result<Self::SerializeTupleStruct, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_tuple_variant(
++            self,
++            _name: &'static str,
++            _variant_index: u32,
++            _variant: &'static str,
++            _len: usize,
++        ) -> Result<Self::SerializeTupleVariant, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_struct(
++            self,
++            _name: &'static str,
++            _len: usize,
++        ) -> Result<Self::SerializeStruct, Self::Error> {
++            Err(Unsupported)
++        }
++
++        fn serialize_struct_variant(
++            self,
++            _name: &'static str,
++            _variant_index: u32,
++            _variant: &'static str,
++            _len: usize,
++        ) -> Result<Self::SerializeStructVariant, Self::Error> {
++            Err(Unsupported)
++        }
++    }
++
++    #[test]
++    fn serialization_emits_canonical_string_forms() {
++        let id: RunId = parsed(SAMPLE);
++        let serialized = accepted(serde::Serialize::serialize(&id, StringSerializer));
++        assert_eq!(serialized, format!("\"{SAMPLE}\""));
++        assert_eq!(serialized, serialized.to_lowercase());
++        assert!(serialized.contains('-'));
++
++        let idempotency = parsed::<IdempotencyKey>("key-1");
++        assert_eq!(
++            accepted(serde::Serialize::serialize(&idempotency, StringSerializer)),
++            "\"key-1\""
++        );
++
++        let cursor = EventCursor::new(accepted(EventStreamKey::new(format!("run/{SAMPLE}"))), 42);
++        let serialized = accepted(serde::Serialize::serialize(&cursor, StringSerializer));
++        assert_eq!(serialized, format!("\"v1:run/{SAMPLE}:42\""));
++    }
+ }
+diff --git a/agent-os/crates/domain/src/resource.rs b/agent-os/crates/domain/src/resource.rs
+index 2433c4b..dcd586f 100644
+--- a/agent-os/crates/domain/src/resource.rs
++++ b/agent-os/crates/domain/src/resource.rs
+@@ -1,56 +1,53 @@
+ //! Resource mirror enums and immutable value types.
+ 
+-pub use crate::run::UnknownEnumValue;
++pub use crate::run::{UnknownEnumValue, UnknownStateValue};
+ 
+-use crate::run::mirror_enum;
++use crate::run::{mirror_enum, state_enum};
+ 
+ mirror_enum! {
+     /// Workspace access mode held by a lease, mirroring `contract::WorkspaceAccessMode`.
+     WorkspaceAccessMode, "WorkspaceAccessMode", {
+         Unspecified = 0,
+         ReadOnly = 1,
+         ExclusiveWrite = 2,
+         IsolatedFork = 3,
+         SharedCoordinatedWrite = 4,
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// Enforcement lifecycle of a workspace lease.
+     LeaseEnforcementState, "LeaseEnforcementState", {
+-        Unspecified = 0,
+-        Active = 1,
+-        Revoked = 2,
++        Active = 1 => "active",
++        Revoked = 2 => "revoked",
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// Lifecycle state of a scheduled timer.
+     TimerState, "TimerState", {
+-        Unspecified = 0,
+-        Scheduled = 1,
+-        Claimed = 2,
+-        Fired = 3,
+-        Cancelled = 4,
++        Scheduled = 1 => "scheduled",
++        Claimed = 2 => "claimed",
++        Fired = 3 => "fired",
++        Cancelled = 4 => "cancelled",
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// Lifecycle state of a resource reservation.
+     ReservationState, "ReservationState", {
+-        Unspecified = 0,
+-        Reserved = 1,
+-        Allocated = 2,
+-        Released = 3,
+-        Expired = 4,
+-        Unknown = 5,
++        Reserved = 1 => "reserved",
++        Allocated = 2 => "allocated",
++        Released = 3 => "released",
++        Expired = 4 => "expired",
++        Unknown = 5 => "unknown",
+     }
+ }
+ 
+ mirror_enum! {
+     /// Condition under which a run dependency is satisfied, mirroring `contract::DependencyCondition`.
+     DependencyCondition, "DependencyCondition", {
+         Unspecified = 0,
+         CompletedSuccessfully = 1,
+         AnyTerminal = 2,
+         CompletedOrCancelled = 3,
+@@ -69,16 +66,35 @@ mod tests {
+         assert_eq!(WorkspaceAccessMode::ExclusiveWrite.to_wire(), 2);
+         assert_eq!(LeaseEnforcementState::Revoked.to_wire(), 2);
+         assert_eq!(TimerState::Fired.to_wire(), 3);
+         assert_eq!(ReservationState::Unknown.to_wire(), 5);
+         assert_eq!(DependencyCondition::CompletedOrCancelled.to_wire(), 3);
+     }
+ 
+     #[test]
+     fn unknown_values_are_not_guessed() {
+         assert!(WorkspaceAccessMode::from_wire(5).is_err());
++        assert!(LeaseEnforcementState::from_wire(0).is_err());
+         assert!(LeaseEnforcementState::from_wire(3).is_err());
++        assert!(TimerState::from_wire(0).is_err());
+         assert!(TimerState::from_wire(5).is_err());
+         assert!(ReservationState::from_wire(6).is_err());
+         assert!(DependencyCondition::from_wire(4).is_err());
+     }
++
++    #[test]
++    fn persisted_state_strings_round_trip() {
++        assert_eq!(LeaseEnforcementState::Active.as_str(), "active");
++        assert_eq!(
++            LeaseEnforcementState::from_state_str("revoked"),
++            Ok(LeaseEnforcementState::Revoked)
++        );
++        assert_eq!(TimerState::Scheduled.as_str(), "scheduled");
++        assert_eq!(TimerState::from_state_str("fired"), Ok(TimerState::Fired));
++        assert_eq!(
++            ReservationState::from_state_str("allocated"),
++            Ok(ReservationState::Allocated)
++        );
++        assert!(TimerState::from_state_str("Scheduled").is_err());
++        assert!(ReservationState::from_state_str("reserved ").is_err());
++    }
+ }
+diff --git a/agent-os/crates/domain/src/run.rs b/agent-os/crates/domain/src/run.rs
+index 0e3c2eb..68ad8ef 100644
+--- a/agent-os/crates/domain/src/run.rs
++++ b/agent-os/crates/domain/src/run.rs
+@@ -10,20 +10,35 @@ pub struct UnknownEnumValue {
+ }
+ 
+ impl fmt::Display for UnknownEnumValue {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         write!(f, "unknown {} wire value {}", self.enum_name, self.value)
+     }
+ }
+ 
+ impl std::error::Error for UnknownEnumValue {}
+ 
++/// Error returned when a persisted state string has no matching variant.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct UnknownStateValue {
++    pub value: String,
++    pub enum_name: &'static str,
++}
++
++impl fmt::Display for UnknownStateValue {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "unknown {} state {:?}", self.enum_name, self.value)
++    }
++}
++
++impl std::error::Error for UnknownStateValue {}
++
+ macro_rules! mirror_enum {
+     (
+         $(#[$meta:meta])*
+         $name:ident, $enum_name:literal, {
+             $( $(#[$variant_meta:meta])* $variant:ident = $wire:literal ),+ $(,)?
+         }
+     ) => {
+         $(#[$meta])*
+         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+         pub enum $name {
+@@ -47,20 +62,79 @@ macro_rules! mirror_enum {
+                 match self {
+                     $( Self::$variant => $wire, )+
+                 }
+             }
+         }
+     };
+ }
+ 
+ pub(crate) use mirror_enum;
+ 
++macro_rules! state_enum {
++    (
++        $(#[$meta:meta])*
++        $name:ident, $enum_name:literal, {
++            $( $(#[$variant_meta:meta])* $variant:ident = $wire:literal => $text:literal ),+ $(,)?
++        }
++    ) => {
++        $(#[$meta])*
++        #[doc = ""]
++        #[doc = "The integer mapping (`from_wire`/`to_wire`) is **provisional** and must not be"]
++        #[doc = "used for persistence: the backing column is `TEXT` with a `CHECK` domain."]
++        #[doc = "Use [`as_str`](Self::as_str) and [`from_state_str`](Self::from_state_str) for"]
++        #[doc = "stored state; [`from_wire`](Self::from_wire) never guesses an unknown integer."]
++        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++        pub enum $name {
++            $( $(#[$variant_meta])* $variant, )+
++        }
++
++        impl $name {
++            /// Converts a provisional wire integer into the matching variant.
++            ///
++            /// A value that has no variant in this enum is rejected with
++            /// [`UnknownEnumValue`]; it is never mapped to a default.
++            pub fn from_wire(value: i32) -> Result<Self, UnknownEnumValue> {
++                match value {
++                    $( $wire => Ok(Self::$variant), )+
++                    _ => Err(UnknownEnumValue { value, enum_name: $enum_name }),
++                }
++            }
++
++            /// Returns the provisional wire integer for this variant.
++            ///
++            /// Not for persistence; use [`as_str`](Self::as_str) for the stored form.
++            pub fn to_wire(self) -> i32 {
++                match self {
++                    $( Self::$variant => $wire, )+
++                }
++            }
++
++            /// Returns the exact persisted state string (the schema `CHECK` literal).
++            pub fn as_str(&self) -> &'static str {
++                match self {
++                    $( Self::$variant => $text, )+
++                }
++            }
++
++            /// Parses an exact persisted state string (the schema `CHECK` literal).
++            pub fn from_state_str(value: &str) -> Result<Self, UnknownStateValue> {
++                match value {
++                    $( $text => Ok(Self::$variant), )+
++                    _ => Err(UnknownStateValue { value: value.to_owned(), enum_name: $enum_name }),
++                }
++            }
++        }
++    };
++}
++
++pub(crate) use state_enum;
++
+ mirror_enum! {
+     /// Lifecycle state of an agent run, mirroring `contract::RunState`.
+     RunState, "RunState", {
+         Unspecified = 0,
+         Created = 1,
+         Ready = 2,
+         Running = 3,
+         WaitingTool = 4,
+         WaitingChild = 5,
+         WaitingHuman = 6,
+diff --git a/agent-os/crates/domain/src/security.rs b/agent-os/crates/domain/src/security.rs
+index 9732b8c..e2c2670 100644
+--- a/agent-os/crates/domain/src/security.rs
++++ b/agent-os/crates/domain/src/security.rs
+@@ -1,15 +1,15 @@
+ //! Security mirror enums and immutable value types.
+ 
+-pub use crate::run::UnknownEnumValue;
++pub use crate::run::{UnknownEnumValue, UnknownStateValue};
+ 
+-use crate::run::mirror_enum;
++use crate::run::{mirror_enum, state_enum};
+ 
+ mirror_enum! {
+     /// Sensitivity of an event, mirroring `contract::Sensitivity`.
+     SensitivityClass, "SensitivityClass", {
+         Unspecified = 0,
+         Public = 1,
+         Internal = 2,
+         Private = 3,
+         Secret = 4,
+     }
+@@ -19,60 +19,75 @@ mirror_enum! {
+     /// Retention class of an event, mirroring `contract::RetentionClass`.
+     RetentionClass, "RetentionClass", {
+         Unspecified = 0,
+         Ephemeral = 1,
+         Session = 2,
+         Audit = 3,
+         Durable = 4,
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// Trust state of a registered adapter.
+     TrustState, "TrustState", {
+-        Unspecified = 0,
+-        Trusted = 1,
+-        Untrusted = 2,
++        Trusted = 1 => "trusted",
++        Untrusted = 2 => "untrusted",
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// Conformance state of a registered adapter.
+     ConformanceState, "ConformanceState", {
+-        Unspecified = 0,
+-        Untested = 1,
+-        Passed = 2,
+-        Failed = 3,
++        Untested = 1 => "untested",
++        Passed = 2 => "passed",
++        Failed = 3 => "failed",
+     }
+ }
+ 
+-mirror_enum! {
++state_enum! {
+     /// State of an approval request.
+     ApprovalState, "ApprovalState", {
+-        Unspecified = 0,
+-        Pending = 1,
+-        Approved = 2,
+-        Denied = 3,
+-        Expired = 4,
++        Pending = 1 => "pending",
++        Approved = 2 => "approved",
++        Denied = 3 => "denied",
++        Expired = 4 => "expired",
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::{ApprovalState, ConformanceState, SensitivityClass, TrustState};
+ 
+     #[test]
+     fn wire_mapping_matches_the_persisted_state_order() {
+         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
+         assert_eq!(TrustState::Untrusted.to_wire(), 2);
+         assert_eq!(ConformanceState::Passed.to_wire(), 2);
+         assert_eq!(ApprovalState::Expired.to_wire(), 4);
+     }
+ 
+     #[test]
+     fn unknown_values_are_not_guessed() {
+         assert!(SensitivityClass::from_wire(5).is_err());
++        assert!(TrustState::from_wire(0).is_err());
+         assert!(TrustState::from_wire(3).is_err());
+         assert!(ConformanceState::from_wire(4).is_err());
++        assert!(ApprovalState::from_wire(0).is_err());
+         assert!(ApprovalState::from_wire(5).is_err());
+     }
++
++    #[test]
++    fn persisted_state_strings_round_trip() {
++        assert_eq!(TrustState::Trusted.as_str(), "trusted");
++        assert_eq!(
++            TrustState::from_state_str("untrusted"),
++            Ok(TrustState::Untrusted)
++        );
++        assert_eq!(ConformanceState::Failed.as_str(), "failed");
++        assert_eq!(
++            ApprovalState::from_state_str("pending"),
++            Ok(ApprovalState::Pending)
++        );
++        assert!(TrustState::from_state_str("trusted ").is_err());
++        assert!(ApprovalState::from_state_str("superseded").is_err());
++    }
+ }
+diff --git a/agent-os/crates/domain/tests/prop_enums.rs b/agent-os/crates/domain/tests/prop_enums.rs
+index 3334168..b3f488e 100644
+--- a/agent-os/crates/domain/tests/prop_enums.rs
++++ b/agent-os/crates/domain/tests/prop_enums.rs
+@@ -7,20 +7,123 @@ use domain::resource::{
+ };
+ use domain::run::{RecoveryDisposition, RunState};
+ use domain::security::{
+     ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState,
+ };
+ use proptest::prelude::*;
+ 
+ mod prop_enums {
+     use super::*;
+ 
++    fn schema_check_literals(schema: &str, marker: &str) -> Vec<String> {
++        let start = schema
++            .find(marker)
++            .expect("schema CHECK marker must be present");
++        let rest = &schema[start..];
++        let open = rest.find('(').expect("CHECK clause must open a set");
++        let close = rest[open..]
++            .find("))")
++            .expect("CHECK clause must close a set");
++        rest[open + 1..open + close]
++            .split(',')
++            .map(|literal| literal.trim().trim_matches('\'').to_owned())
++            .collect()
++    }
++
++    macro_rules! assert_state_domain {
++        ($schema:expr, $ty:ty, $marker:literal, [$($variant:expr),+ $(,)?]) => {{
++            let expected = schema_check_literals($schema, $marker);
++            let variants = [$($variant),+];
++            let actual: Vec<&str> = variants.iter().map(|variant| variant.as_str()).collect();
++            assert_eq!(
++                actual, expected,
++                "{} strings must equal the schema CHECK set exactly",
++                stringify!($ty)
++            );
++            for (variant, text) in variants.iter().zip(expected.iter()) {
++                assert_eq!(&<$ty>::from_state_str(text).unwrap(), variant);
++            }
++            let error = <$ty>::from_state_str("__not_a_state__").unwrap_err();
++            assert_eq!(error.value, "__not_a_state__");
++            assert_eq!(error.enum_name, stringify!($ty));
++        }};
++    }
++
++    #[test]
++    fn state_strings_equal_the_schema_check_domains() {
++        let schema = std::fs::read_to_string(concat!(
++            env!("CARGO_MANIFEST_DIR"),
++            "/../../schema/kernel_store.sql"
++        ))
++        .expect("kernel store schema mirror must be readable");
++
++        assert_state_domain!(
++            &schema,
++            TrustState,
++            "trust_state IN (",
++            [TrustState::Trusted, TrustState::Untrusted]
++        );
++        assert_state_domain!(
++            &schema,
++            ConformanceState,
++            "conformance_state IN (",
++            [
++                ConformanceState::Untested,
++                ConformanceState::Passed,
++                ConformanceState::Failed
++            ]
++        );
++        assert_state_domain!(
++            &schema,
++            ApprovalState,
++            "state IN ('pending'",
++            [
++                ApprovalState::Pending,
++                ApprovalState::Approved,
++                ApprovalState::Denied,
++                ApprovalState::Expired
++            ]
++        );
++        assert_state_domain!(
++            &schema,
++            LeaseEnforcementState,
++            "enforcement_state IN (",
++            [
++                LeaseEnforcementState::Active,
++                LeaseEnforcementState::Revoked
++            ]
++        );
++        assert_state_domain!(
++            &schema,
++            TimerState,
++            "state IN ('scheduled'",
++            [
++                TimerState::Scheduled,
++                TimerState::Claimed,
++                TimerState::Fired,
++                TimerState::Cancelled
++            ]
++        );
++        assert_state_domain!(
++            &schema,
++            ReservationState,
++            "state IN ('reserved'",
++            [
++                ReservationState::Reserved,
++                ReservationState::Allocated,
++                ReservationState::Released,
++                ReservationState::Expired,
++                ReservationState::Unknown
++            ]
++        );
++    }
++
+     macro_rules! wire_round_trip_prop {
+         ($fn_name:ident, $mirror:ty) => {
+             proptest! {
+                 #[test]
+                 fn $fn_name(value in any::<i32>()) {
+                     match <$mirror>::from_wire(value) {
+                         Ok(variant) => prop_assert_eq!(variant.to_wire(), value),
+                         Err(error) => prop_assert_eq!(error.value, value),
+                     }
+                 }
+@@ -119,52 +222,46 @@ mod prop_enums {
+         assert_eq!(SensitivityClass::Internal.to_wire(), 2);
+         assert_eq!(SensitivityClass::Private.to_wire(), 3);
+         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
+ 
+         assert_eq!(RetentionClass::Unspecified.to_wire(), 0);
+         assert_eq!(RetentionClass::Ephemeral.to_wire(), 1);
+         assert_eq!(RetentionClass::Session.to_wire(), 2);
+         assert_eq!(RetentionClass::Audit.to_wire(), 3);
+         assert_eq!(RetentionClass::Durable.to_wire(), 4);
+ 
+-        assert_eq!(TrustState::Unspecified.to_wire(), 0);
+         assert_eq!(TrustState::Trusted.to_wire(), 1);
+         assert_eq!(TrustState::Untrusted.to_wire(), 2);
+ 
+-        assert_eq!(ConformanceState::Unspecified.to_wire(), 0);
+         assert_eq!(ConformanceState::Untested.to_wire(), 1);
+         assert_eq!(ConformanceState::Passed.to_wire(), 2);
+         assert_eq!(ConformanceState::Failed.to_wire(), 3);
+ 
+-        assert_eq!(ApprovalState::Unspecified.to_wire(), 0);
+         assert_eq!(ApprovalState::Pending.to_wire(), 1);
+         assert_eq!(ApprovalState::Approved.to_wire(), 2);
+         assert_eq!(ApprovalState::Denied.to_wire(), 3);
+         assert_eq!(ApprovalState::Expired.to_wire(), 4);
+ 
+         assert_eq!(WorkspaceAccessMode::Unspecified.to_wire(), 0);
+         assert_eq!(WorkspaceAccessMode::ReadOnly.to_wire(), 1);
+         assert_eq!(WorkspaceAccessMode::ExclusiveWrite.to_wire(), 2);
+         assert_eq!(WorkspaceAccessMode::IsolatedFork.to_wire(), 3);
+         assert_eq!(WorkspaceAccessMode::SharedCoordinatedWrite.to_wire(), 4);
+ 
+-        assert_eq!(LeaseEnforcementState::Unspecified.to_wire(), 0);
+         assert_eq!(LeaseEnforcementState::Active.to_wire(), 1);
+         assert_eq!(LeaseEnforcementState::Revoked.to_wire(), 2);
+ 
+-        assert_eq!(TimerState::Unspecified.to_wire(), 0);
+         assert_eq!(TimerState::Scheduled.to_wire(), 1);
+         assert_eq!(TimerState::Claimed.to_wire(), 2);
+         assert_eq!(TimerState::Fired.to_wire(), 3);
+         assert_eq!(TimerState::Cancelled.to_wire(), 4);
+ 
+-        assert_eq!(ReservationState::Unspecified.to_wire(), 0);
+         assert_eq!(ReservationState::Reserved.to_wire(), 1);
+         assert_eq!(ReservationState::Allocated.to_wire(), 2);
+         assert_eq!(ReservationState::Released.to_wire(), 3);
+         assert_eq!(ReservationState::Expired.to_wire(), 4);
+         assert_eq!(ReservationState::Unknown.to_wire(), 5);
+ 
+         assert_eq!(DependencyCondition::Unspecified.to_wire(), 0);
+         assert_eq!(DependencyCondition::CompletedSuccessfully.to_wire(), 1);
+         assert_eq!(DependencyCondition::AnyTerminal.to_wire(), 2);
+         assert_eq!(DependencyCondition::CompletedOrCancelled.to_wire(), 3);

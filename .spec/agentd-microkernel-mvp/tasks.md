@@ -506,8 +506,8 @@
 
 ### Task FND-003: Implement domain IDs, mirror enums, and value types
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-fnd003
 - depends_on: FND-002
 - files: `agent-os/crates/domain/src/ids.rs`, `agent-os/crates/domain/src/provider.rs`, `agent-os/crates/domain/src/time.rs`, `agent-os/crates/domain/src/faults.rs`, `agent-os/crates/domain/src/run.rs`, `agent-os/crates/domain/src/effect.rs`, `agent-os/crates/domain/src/security.rs`, `agent-os/crates/domain/src/resource.rs`, `agent-os/crates/domain/tests/prop_enums.rs`
 - requirements: R4.2, R15.1, R15.2, R15.3, P1
