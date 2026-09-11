@@ -20,7 +20,33 @@ Notation:
 - `lease` is `effects.lease_expires_ms`; `epoch` is the daemon fencing epoch acquired at
   startup (lifecycle step 4), which is always newer than any epoch owned by a prior daemon.
 
+## Precedence
+
+A pair can match rows in more than one matrix. Exactly one disposition wins; apply this
+global order and take the first matching class:
+
+**B (unknown effects) > A (reconciliation) > C (terminal owner) > D (missing resource)**
+
+- **B — unknown effects.** Any row or condition selecting `BLOCKED_UNKNOWN_EFFECT` (effect
+  state `UNKNOWN`, or `DISPATCHED` with neither reconciliation nor safe idempotency). An
+  unknown effect is never ignorable, even when another matrix also matches.
+- **A — reconciliation.** The `DISPATCHED` rows selecting `NEEDS_RECONCILIATION`. An
+  in-flight external effect is reconciled before infrastructure blocking.
+- **C — terminal owner.** The Matrix C rows. A terminal owning run does not block, so it
+  never yields to Matrix D.
+- **D — missing resource.** The Matrix D rows, applied last: blocking is selected only when
+  no B, A, or C row matches.
+
+The letters name rule classes, not section numbers: B and A are the `UNKNOWN` /
+unsafe-`DISPATCHED` and `DISPATCHED` reconciliation rows of Matrix B, C is Matrix C, and D
+is Matrix D. The ordinary recovery rows — Matrix A and the Matrix B rows for `PREPARED`,
+`CLAIMED`, and `ACKNOWLEDGED` — describe recovery that assumes the run's frozen references
+resolve; when a frozen reference cannot be loaded or validated, the ordinary row does not
+match and the pair resolves through D instead.
+
 ## Matrix A — runs with no in-flight effect
+
+Ordinary rows (see Precedence): they match only when the run's frozen references resolve.
 
 | Run state | Condition | Disposition | Recovery action |
 |---|---|---|---|
@@ -37,6 +63,9 @@ Notation:
 | `COMPLETED`, `FAILED`, `CANCELLED` | — | `NORMAL` | Terminal run; no recovery action. |
 
 ## Matrix B — runs with an in-flight effect
+
+Class B and A rows are `UNKNOWN` / unsafe `DISPATCHED` and `DISPATCHED` reconciliation;
+`PREPARED`, `CLAIMED`, and `ACKNOWLEDGED` rows are ordinary (see Precedence).
 
 | Run state | Effect state | Condition | Disposition | Recovery action |
 |---|---|---|---|---|
@@ -59,10 +88,10 @@ Notation:
 ## Matrix C — effect with a terminal owning run
 
 Effects can outlive the run that owned them (for example, a crash during cancellation).
-Terminal run states do not change here; the effect is cleaned up or reconciled. Matrix C
-takes precedence over Matrix D: a terminal owning run has no disposition to block, and an
-orphaned `PREPARED` or `CLAIMED` effect is cancelled or fenced locally without resolving the
-frozen adapter.
+Terminal run states do not change here; the effect is cleaned up or reconciled. Under
+Precedence, class C beats Matrix D: a terminal owning run does not block, and an orphaned
+`PREPARED` or `CLAIMED` effect is cancelled or fenced locally without resolving the frozen
+adapter. A terminal run whose effect is `UNKNOWN` is class B and wins over class C.
 
 | Run state | Effect state | Condition | Disposition | Recovery action |
 |---|---|---|---|---|
@@ -76,13 +105,15 @@ frozen adapter.
 
 A missing resource is a durable reference that cannot be resolved, not an ambiguous external
 effect. It never selects a replacement binding (the frozen `ResolvedRunEnvironment` is
-immutable).
+immutable). Class D is applied last (see Precedence) and assigns a disposition only to a
+`(run state, effect state)` pair that a Matrix A, B, or C row covers; a pair no such row
+covers stays unmapped and fails closed, even when a frozen reference is also unavailable.
 
 | Run state | Condition | Disposition | Recovery action |
 |---|---|---|---|
 | any non-terminal run | the frozen `ResolvedRunEnvironment`, a binding's adapter id/version/digest, the workspace URI, or the referenced config generation cannot be loaded or validated | `BLOCKED_MISSING_RESOURCE` | Do not substitute a replacement; exit through `ResolveBlockedRun` (`resume` retries the same frozen references, `cancel` terminalizes the run). |
-| any non-terminal run | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
-| any run | the same conditions as above and the effect state is `UNKNOWN` | `BLOCKED_UNKNOWN_EFFECT` | `BLOCKED_UNKNOWN_EFFECT` takes precedence because external side effects may already exist; resolve it first. |
+| `RUNNING` / `WAITING_TOOL` / `CANCELLING` / `SUSPENDED` | effect `PREPARED` or `CLAIMED` whose frozen adapter id/version/digest is unavailable | `BLOCKED_MISSING_RESOURCE` | Do not silently resolve a replacement adapter; exit through `ResolveBlockedRun`. |
+| `RUNNING` / `WAITING_TOOL` / `CANCELLING` / `SUSPENDED` | effect state is `UNKNOWN` | `BLOCKED_UNKNOWN_EFFECT` | Class B: an unknown effect is never ignorable; a recorded `ResolveUnknownEffect` decision is required. |
 
 ## Unmapped combinations fail closed
 
@@ -90,7 +121,8 @@ If startup encounters a `(run state, effect state)` pair that no matrix row assi
 daemon MUST fail closed (design D7): it selects no default disposition, marks itself
 unhealthy, dispatches no effect, reports the offending `(run_id, run_state, effect_id,
 effect_state)`, and exits. `REQUIRES_HUMAN_DECISION` is a disposition a row assigns, never a
-fallback.
+fallback. Matrix D assigns no pair listed below; a pair is covered only when a Matrix A, B,
+or C row names its run state and effect state.
 
 Combinations that no row assigns are unmapped, including:
 
