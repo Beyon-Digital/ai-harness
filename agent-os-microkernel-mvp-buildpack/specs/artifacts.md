@@ -16,3 +16,7 @@ Operations:
 Artifact metadata stores content digest, media type, size, originating run/effect, sensitivity, retention class, and physical locator known only to the adapter.
 
 Agent/runtime code never persists absolute artifact paths in domain records.
+
+## Durable record
+
+Artifact metadata maps to the `artifacts` table in `kernel-store-schema.sql`: `artifact_id` (identity), `uri` (`artifact://id`, UNIQUE), `digest`, `media_type`, `size_bytes`, `origin_run_id`/`origin_effect_id` (FKs to `runs`/`effects`), `sensitivity` and `retention` (integer `Sensitivity`/`RetentionClass` from `contracts/events/event.proto`), `locator` (adapter-private physical location), and `created_at_ms`. Content bytes are immutable; the row is deleted only when retention/policy allows.

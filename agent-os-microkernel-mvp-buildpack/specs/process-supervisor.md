@@ -3,6 +3,10 @@
 
 # Process Supervisor
 
+## Durable adapter-instance record
+
+Every spawned process has an `adapter_instances` row in `kernel-store-schema.sql`: `adapter_instance_id`, exact `(adapter_id, adapter_version, bundle_digest)` (FK to `adapter_registrations`), `daemon_instance_id`, `pid`, `process_start_identity`, `state` (`starting`/`ready`/`exited`/`failed`), `exit_reason`, `last_heartbeat_ms`, `started_at_ms`, and `ended_at_ms`. A restart creates a new row and never mutates the prior instance; old in-flight protocol sessions are invalid.
+
 ## Spawn contract
 
 Input includes:

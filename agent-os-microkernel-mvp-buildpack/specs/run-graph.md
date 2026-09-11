@@ -16,6 +16,10 @@ Dependency conditions in MVP:
 
 Do not add arbitrary expression DSLs in the MVP.
 
+## Head-row creation (D16)
+
+The `run_graph_heads` row for a task is inserted in the same transaction that creates the task; it is never created on demand by the first child spawn. Edge mutation for that task increments `graph_revision` on its head row inside the same `BEGIN IMMEDIATE` transaction.
+
 ## Edge mutation rules
 
 Dependency edges may target only runs in `Created` or unclaimed `Ready`. Once a run is claimed/running, dependency topology for that run is frozen.

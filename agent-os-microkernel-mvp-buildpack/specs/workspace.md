@@ -3,6 +3,10 @@
 
 # Workspace Coordinator
 
+## Durable record
+
+Workspace identity is the `workspaces` row in `kernel-store-schema.sql`: `workspace_id`, `kind` (`git-worktree` or copy-on-create fork), `base_revision` (the exact revision the workspace was created from), `parent_workspace_id` for fork lineage (self-FK), and `created_at_ms`. `workspace_leases.workspace_id` references this identity; lease epochs and the transfer rules below are unchanged.
+
 ## Access modes
 
 - `READ_ONLY`.

@@ -20,6 +20,29 @@ pub trait KernelStore: Send + Sync {
 
 `KernelTxn` exposes typed repository operations for runs/graph/effects/resources/events/idempotency/config/security. It exposes `commit(self)` and `rollback(self)`; it does **not** expose arbitrary SQL to callers outside the SQLite implementation.
 
+## Inception schema and version rule
+
+`specs/kernel-store-schema.sql` is the only authority that creates tables. It is executed verbatim when `kernel.db` is created and seeds `kernel_meta(schema_version) = '1'`; startup rejects any other schema version. Repositories never auto-create runtime tables. The schema also carries the normative PRAGMAs, all CHECK constraints, and the immutability triggers.
+
+Table inventory:
+
+| Group | Tables |
+|---|---|
+| Daemon/meta | `kernel_meta`, `daemon_fence` |
+| Task/session/graph | `tasks`, `sessions`, `runs`, `run_graph_heads`, `run_dependencies` |
+| Environment/bindings | `resolved_run_environments`, `resolved_bindings` |
+| Agent specs | `agent_specs` |
+| Workspace | `workspaces`, `workspace_leases` |
+| Effects/resources/timers | `effects`, `resource_reservations`, `timers` |
+| Loop/decisions | `loop_turns`, `decisions` |
+| Security/approvals | `capability_grants`, `delegation_hops`, `approval_requests`, `approval_responses` |
+| Adapters | `adapter_registrations`, `adapter_instances`, `conformance_reports` |
+| Artifacts | `artifacts` |
+| Config | `config_generations`, `active_config_generation` |
+| Idempotency/events | `idempotency_records`, `event_stream_heads`, `outbox_events` |
+
+The durable Event Journal is a separate database (`events.db`) with its own schema, `specs/event-journal-schema.sql`, extracted from `event-pipeline.md`; it shares no tables with `kernel.db`.
+
 ## Mandatory invariants
 
 - Every write transaction asserts current daemon fencing epoch.
