@@ -1,0 +1,147 @@
+diff --git a/agent-os/crates/testkit/src/bin/fixture-daemon.rs b/agent-os/crates/testkit/src/bin/fixture-daemon.rs
+index 2a50c08..5d88455 100644
+--- a/agent-os/crates/testkit/src/bin/fixture-daemon.rs
++++ b/agent-os/crates/testkit/src/bin/fixture-daemon.rs
+@@ -3,22 +3,32 @@
+ //! Parks without touching the filesystem and exits 0. Pass
+ //! `--exit-after-ms <ms>` to park for a bounded time instead of indefinitely.
+ 
+ use std::thread;
+ use std::time::Duration;
+ 
+ fn main() {
+     let mut args = std::env::args().skip(1);
+     let mut exit_after_ms = None;
+     while let Some(arg) = args.next() {
+-        if arg == "--exit-after-ms"
+-            && let Some(value) = args.next()
+-        {
+-            exit_after_ms = value.parse::<u64>().ok();
++        if arg == "--exit-after-ms" {
++            let value = match args.next() {
++                Some(value) => value,
++                None => fail("--exit-after-ms requires a value"),
++            };
++            exit_after_ms = Some(match value.parse::<u64>() {
++                Ok(ms) => ms,
++                Err(error) => fail(&format!("invalid --exit-after-ms value {value:?}: {error}")),
++            });
+         }
+     }
+ 
+     match exit_after_ms {
+         Some(ms) => thread::park_timeout(Duration::from_millis(ms)),
+         None => thread::park(),
+     }
+ }
++
++fn fail(message: &str) -> ! {
++    eprintln!("fixture-daemon: {message}");
++    std::process::exit(2);
++}
+diff --git a/agent-os/crates/testkit/src/process.rs b/agent-os/crates/testkit/src/process.rs
+index 76336e4..b36bc6d 100644
+--- a/agent-os/crates/testkit/src/process.rs
++++ b/agent-os/crates/testkit/src/process.rs
+@@ -2,20 +2,23 @@
+ 
+ use std::fs::File;
+ use std::io;
+ use std::path::{Path, PathBuf};
+ use std::process::{Child, Command, ExitStatus, Stdio};
+ use std::thread;
+ use std::time::{Duration, Instant};
+ 
+ use tempfile::TempDir;
+ 
++/// How long the wait loop parks between `try_wait` polls.
++const POLL_INTERVAL: Duration = Duration::from_millis(2);
++
+ /// A spawned daemon binary running against an isolated temporary tree.
+ ///
+ /// The child receives `AGENTD_HOME`, `AGENTD_RUNTIME_DIR`, and `AGENTD_SOCKET`
+ /// pointing into the temporary tree, with stdout and stderr redirected to log
+ /// files in the same tree. Dropping the host kills and reaps the child and
+ /// removes the tree.
+ #[derive(Debug)]
+ pub struct TempDaemonHost {
+     temp: TempDir,
+     home: PathBuf,
+@@ -66,33 +69,36 @@ impl TempDaemonHost {
+ 
+     /// Returns the socket path inside the temporary runtime directory.
+     pub fn socket_path(&self) -> &Path {
+         &self.socket
+     }
+ 
+     /// Waits up to `timeout` for the child to exit, reaping it on success.
+     ///
+     /// Returns [`io::ErrorKind::TimedOut`] when the child is still running
+     /// after the deadline.
++    ///
++    /// A timeout too large to represent as an [`Instant`] has no deadline and
++    /// is treated as unbounded rather than as an immediate timeout.
+     pub fn wait_for_exit(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
+         let deadline = Instant::now().checked_add(timeout);
+         loop {
+             if let Some(status) = self.child.try_wait()? {
+                 return Ok(status);
+             }
+-            if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
++            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                 return Err(io::Error::new(
+                     io::ErrorKind::TimedOut,
+                     "daemon did not exit before the timeout",
+                 ));
+             }
+-            thread::yield_now();
++            thread::park_timeout(POLL_INTERVAL);
+         }
+     }
+ }
+ 
+ impl Drop for TempDaemonHost {
+     fn drop(&mut self) {
+         let _ = self.child.kill();
+         let _ = self.child.wait();
+         let _ = std::fs::remove_dir_all(self.temp.path());
+     }
+diff --git a/agent-os/crates/testkit/tests/daemon_host.rs b/agent-os/crates/testkit/tests/daemon_host.rs
+index 24ad2e4..fdeabc2 100644
+--- a/agent-os/crates/testkit/tests/daemon_host.rs
++++ b/agent-os/crates/testkit/tests/daemon_host.rs
+@@ -12,20 +12,34 @@ const FIXTURE: &str = env!("CARGO_BIN_EXE_fixture-daemon");
+ fn test_temp_daemon_exits_cleanly() {
+     let status = Command::new(FIXTURE)
+         .args(["--exit-after-ms", "0"])
+         .status();
+     match status {
+         Ok(status) => assert!(status.success(), "fixture exited with {status}"),
+         Err(error) => panic!("failed to spawn fixture daemon: {error}"),
+     }
+ }
+ 
++#[test]
++fn test_temp_daemon_rejects_invalid_exit_after() {
++    let status = Command::new(FIXTURE)
++        .args(["--exit-after-ms", "not-a-number"])
++        .status();
++    match status {
++        Ok(status) => assert!(
++            !status.success(),
++            "a bad --exit-after-ms value must fail loudly"
++        ),
++        Err(error) => panic!("failed to spawn fixture daemon: {error}"),
++    }
++}
++
+ #[test]
+ fn test_temp_daemon_host_reaps_on_drop() {
+     let mut host = match TempDaemonHost::new(Path::new(FIXTURE)) {
+         Ok(host) => host,
+         Err(error) => panic!("failed to start the daemon host: {error}"),
+     };
+     assert!(host.home().is_dir(), "home directory must exist");
+     assert!(host.runtime_dir().is_dir(), "runtime directory must exist");
+     assert_ne!(
+         host.home(),

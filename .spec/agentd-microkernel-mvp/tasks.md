@@ -594,8 +594,8 @@
 
 ### Task FND-005: Implement the deterministic testkit
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-fnd005
 - depends_on: FND-003
 - files: `agent-os/crates/testkit/src/clock.rs`, `agent-os/crates/testkit/src/ids.rs`, `agent-os/crates/testkit/src/faults.rs`, `agent-os/crates/testkit/src/process.rs`, `agent-os/crates/testkit/src/lib.rs`, `agent-os/crates/testkit/src/bin/fixture-daemon.rs`, `agent-os/crates/testkit/tests/daemon_host.rs`, `agent-os/crates/testkit/tests/prop_faults.rs`
 - requirements: R17.1, R17.2, R17.3, N2, P3

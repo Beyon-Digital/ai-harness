@@ -90,3 +90,8 @@
 - 2026-09-11T05:29:10Z FND-003 -> review (@agent-fnd003)
 - 2026-09-11T05:45:22Z FND-003 -> done (@agent-fnd003)
 - 2026-09-11T05:45:23Z FND-003 fix re-reviewed clean; 13/14 done; FND-005 dispatched as final task.
+- 2026-09-11T05:45:58Z FND-005 -> claimed (@agent-fnd005)
+- 2026-09-11T05:46:10Z FND-005 -> in_progress (@agent-fnd005)
+- 2026-09-11T05:56:21Z FND-005 -> review (@agent-fnd005)
+- 2026-09-11T06:05:35Z FND-005 -> done (@agent-fnd005)
+- 2026-09-11T06:05:37Z FND-005 fix re-reviewed clean. All 14 tasks done. Final checkpoint and whole-branch review next.
