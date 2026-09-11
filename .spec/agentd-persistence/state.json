@@ -1,0 +1,9 @@
+{
+  "feature": "agentd-persistence",
+  "phase": "implement",
+  "gates": {
+    "design": "2026-09-11T12:31:35Z",
+    "implement": "2026-09-11T12:35:36Z"
+  },
+  "created": "2026-09-11T11:43:29Z"
+}
