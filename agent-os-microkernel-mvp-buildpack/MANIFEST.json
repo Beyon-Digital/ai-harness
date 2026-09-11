@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "agent-os-microkernel-mvp-buildpack",
-  "file_count": 156,
+  "file_count": 160,
   "files": [
     {
       "path": "AGENTS.md",
@@ -45,8 +45,8 @@
     },
     {
       "path": "SOURCE_CORRECTIONS.md",
-      "bytes": 397,
-      "sha256": "a47a9ffb1313091272fdee70d4d2a77a3beaf3b891822563de935ad5dd1b76a2"
+      "bytes": 2944,
+      "sha256": "3c281280b66ed70f12be267eb50e3ddc4bfd967afca70078384b141307236d6d"
     },
     {
       "path": "TASK_STATUS.yaml",
@@ -75,8 +75,8 @@
     },
     {
       "path": "architecture/persistence.md",
-      "bytes": 1544,
-      "sha256": "3ef9a8f9a0f98c4f6d6e9c2b2b7cda525afb9314d91bdb780482eeb02a97cd67"
+      "bytes": 1691,
+      "sha256": "b51563374e3c5c4a57ff6efdb7dc4b2434664066b06a7d35bce50b95d38f2856"
     },
     {
       "path": "architecture/runtime-flow.md",
@@ -85,8 +85,8 @@
     },
     {
       "path": "contracts/README.md",
-      "bytes": 619,
-      "sha256": "32cc76ae11088a31cec5b51a12a2ec4ad222a03237f40adf54b9ce035d59ad8c"
+      "bytes": 2126,
+      "sha256": "2478a883d185d1284379cf12b46d8f7edccddeaeeb9d16666c48b0344c48145d"
     },
     {
       "path": "contracts/capabilities/adapter-capabilities.yaml",
@@ -100,38 +100,38 @@
     },
     {
       "path": "contracts/catalog.yaml",
-      "bytes": 1688,
-      "sha256": "48073360833671d8b4e63fbee9c190b49d26ee4eb6288a4a92ed51ec55054917"
+      "bytes": 1701,
+      "sha256": "c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0"
     },
     {
       "path": "contracts/config/agent-os.schema.json",
-      "bytes": 1909,
-      "sha256": "58446b91e32cd9a559ff032ffd4cac434d695d538bc0913ba61b4cba6e4ff3df"
+      "bytes": 7632,
+      "sha256": "f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625"
     },
     {
       "path": "contracts/contract-lock.sha256",
-      "bytes": 2953,
-      "sha256": "d1d7024d5590c3cc972b41dfb3879ee4086d168cc498ace0424fb2069aa80a80"
+      "bytes": 2954,
+      "sha256": "4c2799ae3d6025954b559c6d911ae8b505ac529981ca99288e499eaddccbf78b"
     },
     {
-      "path": "contracts/control-api/control.proto",
-      "bytes": 924,
-      "sha256": "bcda77eb3e8a121cd4e67ea135b837bcb1a29769b85c7e5dd361446cddd49069"
+      "path": "contracts/control-api/commands.proto",
+      "bytes": 2907,
+      "sha256": "fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f"
     },
     {
       "path": "contracts/control-api/mvp_control.proto",
-      "bytes": 2817,
-      "sha256": "00fe58f502383314ab53a730efa42e8ffdef443f69b40eed4e4d9c8a1872713c"
+      "bytes": 2994,
+      "sha256": "89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e"
     },
     {
       "path": "contracts/domain/core.proto",
-      "bytes": 1892,
-      "sha256": "05ff59f74db26a4dd9085b284432363b2ec692842a42d566a5657275e9dea4be"
+      "bytes": 1949,
+      "sha256": "0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f"
     },
     {
       "path": "contracts/domain/effects.proto",
-      "bytes": 1482,
-      "sha256": "54147f463e8a7813f44c7a70c77d4efe6aa9d6d210b26e39f42a2c9df5dcbdae"
+      "bytes": 1521,
+      "sha256": "157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb"
     },
     {
       "path": "contracts/domain/entities.proto",
@@ -145,8 +145,8 @@
     },
     {
       "path": "contracts/events/catalog.yaml",
-      "bytes": 933,
-      "sha256": "e40f93188e6875b9a453d1e5a158095813600fb07865ffacff5baa9346990ba0"
+      "bytes": 12137,
+      "sha256": "33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a"
     },
     {
       "path": "contracts/events/event.proto",
@@ -235,8 +235,8 @@
     },
     {
       "path": "contracts/protocols/agent_loop.proto",
-      "bytes": 467,
-      "sha256": "5ac3fddc2a31c23030e8a308a712fbb444c93d230aa7c75a71b27f4a3db82471"
+      "bytes": 904,
+      "sha256": "43c01a57725c8967da5a5c373a041a6d1a68d51ae4281ebf286d4df43f832284"
     },
     {
       "path": "contracts/protocols/effect.proto",
@@ -250,13 +250,13 @@
     },
     {
       "path": "dag.json",
-      "bytes": 44786,
-      "sha256": "458c738abda8facec2ec6adca9c619dc46e8bafb177b4eca6789b0d6dd3fd8ee"
+      "bytes": 50551,
+      "sha256": "1ed1ee84e942f6d3ac8f8ed8ba9d2cc50099a5761e011aae6bea057d1a221e9d"
     },
     {
       "path": "dag.yaml",
-      "bytes": 34270,
-      "sha256": "df0ab355525a9f65669e86baef8ab47f7e32ad85bfa7159e26f1ac85ec4e9b6f"
+      "bytes": 39122,
+      "sha256": "dfcdd650b5596a24adcc71fea7e64d2e7efb681ec79ca3085169ea01b0c26863"
     },
     {
       "path": "examples/adapter-manifest.yaml",
@@ -270,8 +270,8 @@
     },
     {
       "path": "examples/default-config.yaml",
-      "bytes": 511,
-      "sha256": "a8fafce69b7fb26c104cbe01b80e59e09d6287d2aaf45874a98656d2e9b216aa"
+      "bytes": 1295,
+      "sha256": "dec35dd7f5b90e1f8cfc9fd05c7e5a932b91b074936a7fb9eb4b661ecde701d1"
     },
     {
       "path": "examples/effect-flow.yaml",
@@ -284,19 +284,29 @@
       "sha256": "1a72e661d26bb13f61b055ef608782ab691fef445a70f144406c11faca100d2f"
     },
     {
+      "path": "scripts/sync_dag_sources.py",
+      "bytes": 5133,
+      "sha256": "4cad31be7b1dc89e8adf45d89b6abf22492cd12df94bc7b86fe4d884d785f025"
+    },
+    {
+      "path": "scripts/test_validator_mutations.sh",
+      "bytes": 4359,
+      "sha256": "55ff80f2324eb494e83c7d06ed4fb6a2b83be1f938c5b47dd73daef26d4c5006"
+    },
+    {
       "path": "scripts/validate_buildpack.py",
-      "bytes": 3987,
-      "sha256": "f792d12067fcbd9717f9f828e68f086d37fd72f2d25b44ee745fdc8efdcee52b"
+      "bytes": 18990,
+      "sha256": "d52a80893a9e86f2226d67ec4a2977c081e1e1351a278dad55b2f2de2ed960a5"
     },
     {
       "path": "specs/README.md",
-      "bytes": 1545,
-      "sha256": "7f2c2b840ad91c840fb45ebf6a08e67d3512e68d2604804699b3b0ae7402c568"
+      "bytes": 1630,
+      "sha256": "90e7ea82d157bf91a06618880d55fdf225b60483f04d213d197f3d71173f78aa"
     },
     {
       "path": "specs/adapter-registry.md",
-      "bytes": 1607,
-      "sha256": "37a936d036ff6594f6cd6c8dbf9cc8b9a379b95bb7112b519c80417dc3b85a56"
+      "bytes": 2123,
+      "sha256": "de20ff282d9ccd44bc3e00a402f1f9bb0db5bc30caeffb7c70510d20410cbf87"
     },
     {
       "path": "specs/agent-task-session.md",
@@ -310,23 +320,23 @@
     },
     {
       "path": "specs/artifacts.md",
-      "bytes": 709,
-      "sha256": "8c90aae6551b66f1d9300e768179c6c5a63691cafb53e781d01234a39cf8578d"
+      "bytes": 1225,
+      "sha256": "84642e528a7364cd84135ae3cbd07d434fe9f58d207c572ff993ffa420e25ef2"
     },
     {
       "path": "specs/command-catalog.md",
-      "bytes": 3863,
-      "sha256": "ca5c31a0d3f8555c5f7f3f0a045949246d835a80f489f9ea0ef3a5207a8708f7"
+      "bytes": 13368,
+      "sha256": "b171b7aa3fa7d0817ff7672973b60aa0d109725bf2bb2e608199b3526e390022"
     },
     {
       "path": "specs/command-coordinator.md",
-      "bytes": 1712,
-      "sha256": "a9a4f26151989bd46a44a2c9f524b12af852b44894cbc4a8b58cecb4950338d2"
+      "bytes": 2634,
+      "sha256": "2b1197e4d85daebf8aa0227a7d1c8f14bdd5d1502fbcc4ec06945162e3749b34"
     },
     {
       "path": "specs/config-engine.md",
-      "bytes": 1522,
-      "sha256": "746d1d29c985f2391afaceb4cdf5c3e46acb89970146c439eea474f096604b15"
+      "bytes": 2382,
+      "sha256": "e3d1838578d4038f8e38a97335b438df9a6dc2baba89c5a22ca7f1f93c0622fe"
     },
     {
       "path": "specs/control-api.md",
@@ -335,8 +345,8 @@
     },
     {
       "path": "specs/effect-coordinator.md",
-      "bytes": 2211,
-      "sha256": "f01f1fda2c0b5a5dfbf7535c352af8cb9147efc1786756902cd635d8fa9499a0"
+      "bytes": 2222,
+      "sha256": "5afe902b4bf3518f5d07f7a8325814ec535dee2c7903c047166dc4cd128650df"
     },
     {
       "path": "specs/error-model.md",
@@ -345,8 +355,13 @@
     },
     {
       "path": "specs/event-catalog.md",
-      "bytes": 1532,
-      "sha256": "2ce82bca9df5a5f84d0795d199e118d3c727cbb12aa11b9305fd63d79d993023"
+      "bytes": 9058,
+      "sha256": "a8e585183e078b0f50ec24600c25b483e975669df97bf0168ec443a31af9c9e0"
+    },
+    {
+      "path": "specs/event-journal-schema.sql",
+      "bytes": 764,
+      "sha256": "61d37713359b1b57215008db7654b51955a8651105de93122a7646ff09682c2b"
     },
     {
       "path": "specs/event-pipeline.md",
@@ -360,18 +375,23 @@
     },
     {
       "path": "specs/kernel-store-schema.sql",
-      "bytes": 10368,
-      "sha256": "0d31c4a8392f45a305614797d4b9cc97ef460e44158a05ea04f73a97dde41bf2"
+      "bytes": 20296,
+      "sha256": "22d739d91e733d680fa0c62d6a16b459912f1c17c7d63a1f98184abde95fcc60"
     },
     {
       "path": "specs/kernel-store.md",
-      "bytes": 1844,
-      "sha256": "d5e225af11972472cb21aa8842214a7c06b51638bce73c1f1f8d63c6c1d0b3e7"
+      "bytes": 3829,
+      "sha256": "3ca923e4a3ffd46f1646f00eb4c93147de85433e74ee214d289b04b4fa342c10"
     },
     {
       "path": "specs/lifecycle.md",
       "bytes": 1313,
       "sha256": "8b1623f8bc5b3c1b8110ffd82f281d465921ae4cdf234dfa04fae5150426e3cf"
+    },
+    {
+      "path": "specs/limits.yaml",
+      "bytes": 725,
+      "sha256": "1aedc4043d5c3829d74f01b1f2da150ca1385dd44f0c2798ab93ff9e3c72bfae"
     },
     {
       "path": "specs/observability.md",
@@ -385,13 +405,13 @@
     },
     {
       "path": "specs/process-supervisor.md",
-      "bytes": 1286,
-      "sha256": "ae9156e3cbff2eb3a64e9b6fc57857b0ebedade104eded408114f7d4b2a3efb2"
+      "bytes": 1826,
+      "sha256": "9fe9c08cb9f6958ee6d18a90b6f4e5ae9d28d3a5a75e8118ecc8092a594c1ffa"
     },
     {
       "path": "specs/recovery-table.md",
-      "bytes": 2488,
-      "sha256": "dae81cb7e6e512185a4a788bd2ce4fd0940de322c49f786019d22bf7f18f8d8e"
+      "bytes": 15282,
+      "sha256": "2ac121e4229b1c6f0286dc606e0a63a5cf14a85f5875a8f1d4a26242723894a2"
     },
     {
       "path": "specs/resolved-run-environment.md",
@@ -410,8 +430,8 @@
     },
     {
       "path": "specs/run-graph.md",
-      "bytes": 1847,
-      "sha256": "ca21f5794497603339e048db9aa55f98fe49026a63a5cae741eb4c9df367b4d3"
+      "bytes": 2147,
+      "sha256": "0c9c7b171627666f20be29c8da92ab4d4372a58f1051184e210897e80a1e07a8"
     },
     {
       "path": "specs/runtime-manager.md",
@@ -440,13 +460,13 @@
     },
     {
       "path": "specs/types-and-ids.md",
-      "bytes": 1282,
-      "sha256": "8cc05ca8539d9f9a88019eb07cdcbb0fe9252571a6ed6ed56120e360db15532f"
+      "bytes": 7983,
+      "sha256": "e4833f5e7328751dafa766341edfa666efbc7717465b7e5ad5fc09dbdca5c1fe"
     },
     {
       "path": "specs/workspace.md",
-      "bytes": 1764,
-      "sha256": "ff7a915f93c25796bd5fdb19ddaebbc38013acce141457ef5015ba0e392a575b"
+      "bytes": 2176,
+      "sha256": "39ce17a0db42f2f489ac5b9257511a6a192727cdfdfd4f1bcaae8cb952292e86"
     },
     {
       "path": "tasks/ADP-001.md",
@@ -565,13 +585,13 @@
     },
     {
       "path": "tasks/FND-001.md",
-      "bytes": 1798,
-      "sha256": "4d7c78fcc21cfe095076ce2b8837df7c25100030b86e43fabc0e3e629a99b708"
+      "bytes": 4871,
+      "sha256": "e2869843b32184bc9a273eb15ed9f0f6fa2a18a8a1e59789e1ac237d633f5107"
     },
     {
       "path": "tasks/FND-002.md",
-      "bytes": 1621,
-      "sha256": "c6945eb8f46ea9bfbb52dc68dfedaedcfe6854f77ce030a29ecaa8ca6c44b99a"
+      "bytes": 2998,
+      "sha256": "957372d45b3e022b5a11abed361332b38c1d9d2bc3d5d158f85516b220548203"
     },
     {
       "path": "tasks/FND-003.md",
