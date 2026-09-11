@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+/// How long the wait loop parks between `try_wait` polls.
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
 /// A spawned daemon binary running against an isolated temporary tree.
 ///
 /// The child receives `AGENTD_HOME`, `AGENTD_RUNTIME_DIR`, and `AGENTD_SOCKET`
@@ -73,19 +76,22 @@ impl TempDaemonHost {
     ///
     /// Returns [`io::ErrorKind::TimedOut`] when the child is still running
     /// after the deadline.
+    ///
+    /// A timeout too large to represent as an [`Instant`] has no deadline and
+    /// is treated as unbounded rather than as an immediate timeout.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
         let deadline = Instant::now().checked_add(timeout);
         loop {
             if let Some(status) = self.child.try_wait()? {
                 return Ok(status);
             }
-            if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "daemon did not exit before the timeout",
                 ));
             }
-            thread::yield_now();
+            thread::park_timeout(POLL_INTERVAL);
         }
     }
 }

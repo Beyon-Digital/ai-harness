@@ -10,10 +10,15 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut exit_after_ms = None;
     while let Some(arg) = args.next() {
-        if arg == "--exit-after-ms"
-            && let Some(value) = args.next()
-        {
-            exit_after_ms = value.parse::<u64>().ok();
+        if arg == "--exit-after-ms" {
+            let value = match args.next() {
+                Some(value) => value,
+                None => fail("--exit-after-ms requires a value"),
+            };
+            exit_after_ms = Some(match value.parse::<u64>() {
+                Ok(ms) => ms,
+                Err(error) => fail(&format!("invalid --exit-after-ms value {value:?}: {error}")),
+            });
         }
     }
 
@@ -21,4 +26,9 @@ fn main() {
         Some(ms) => thread::park_timeout(Duration::from_millis(ms)),
         None => thread::park(),
     }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("fixture-daemon: {message}");
+    std::process::exit(2);
 }

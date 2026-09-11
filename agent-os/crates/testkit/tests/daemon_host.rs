@@ -20,6 +20,20 @@ fn test_temp_daemon_exits_cleanly() {
 }
 
 #[test]
+fn test_temp_daemon_rejects_invalid_exit_after() {
+    let status = Command::new(FIXTURE)
+        .args(["--exit-after-ms", "not-a-number"])
+        .status();
+    match status {
+        Ok(status) => assert!(
+            !status.success(),
+            "a bad --exit-after-ms value must fail loudly"
+        ),
+        Err(error) => panic!("failed to spawn fixture daemon: {error}"),
+    }
+}
+
+#[test]
 fn test_temp_daemon_host_reaps_on_drop() {
     let mut host = match TempDaemonHost::new(Path::new(FIXTURE)) {
         Ok(host) => host,
