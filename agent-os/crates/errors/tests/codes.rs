@@ -58,8 +58,7 @@ fn reconciliation_required_is_structurally_distinct_from_safe() {
 #[test]
 fn source_is_preserved_through_error_source() {
     let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked by policy");
-    let err = KernelError::new(ErrorCode::Internal, RetryClass::Never, "io failed")
-        .with_source(io);
+    let err = KernelError::new(ErrorCode::Internal, RetryClass::Never, "io failed").with_source(io);
 
     let source = err.source().expect("source must be preserved");
     assert_eq!(source.to_string(), "locked by policy");
