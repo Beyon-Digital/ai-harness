@@ -1,0 +1,92 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/adapter-protocol",
+    "crates/adapter-registry",
+    "crates/agentctl",
+    "crates/agentd",
+    "crates/approvals",
+    "crates/artifacts",
+    "crates/command-coordinator",
+    "crates/config-engine",
+    "crates/control-api",
+    "crates/domain",
+    "crates/effects",
+    "crates/errors",
+    "crates/event-journal",
+    "crates/event-journal-sqlite",
+    "crates/events",
+    "crates/identity",
+    "crates/kernel-store",
+    "crates/kernel-store-sqlite",
+    "crates/message-queue",
+    "crates/observability",
+    "crates/permissions",
+    "crates/process-supervisor",
+    "crates/resource-uri",
+    "crates/resources",
+    "crates/run-graph",
+    "crates/runtime",
+    "crates/sandbox",
+    "crates/scheduler",
+    "crates/secrets",
+    "crates/testkit",
+    "crates/workspace",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+prost = "0.14"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tonic = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+
+adapter-protocol = { path = "crates/adapter-protocol" }
+adapter-registry = { path = "crates/adapter-registry" }
+agentctl = { path = "crates/agentctl" }
+approvals = { path = "crates/approvals" }
+artifacts = { path = "crates/artifacts" }
+command-coordinator = { path = "crates/command-coordinator" }
+config-engine = { path = "crates/config-engine" }
+control-api = { path = "crates/control-api" }
+domain = { path = "crates/domain" }
+effects = { path = "crates/effects" }
+errors = { path = "crates/errors" }
+event-journal = { path = "crates/event-journal" }
+event-journal-sqlite = { path = "crates/event-journal-sqlite" }
+events = { path = "crates/events" }
+identity = { path = "crates/identity" }
+kernel-store = { path = "crates/kernel-store" }
+kernel-store-sqlite = { path = "crates/kernel-store-sqlite" }
+message-queue = { path = "crates/message-queue" }
+observability = { path = "crates/observability" }
+permissions = { path = "crates/permissions" }
+process-supervisor = { path = "crates/process-supervisor" }
+resource-uri = { path = "crates/resource-uri" }
+resources = { path = "crates/resources" }
+run-graph = { path = "crates/run-graph" }
+runtime = { path = "crates/runtime" }
+sandbox = { path = "crates/sandbox" }
+scheduler = { path = "crates/scheduler" }
+secrets = { path = "crates/secrets" }
+testkit = { path = "crates/testkit" }
+workspace = { path = "crates/workspace" }

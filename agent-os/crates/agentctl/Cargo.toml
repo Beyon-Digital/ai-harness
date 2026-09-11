@@ -1,0 +1,12 @@
+[package]
+name = "agentctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+control-api.workspace = true
+domain.workspace = true
+errors.workspace = true
+events.workspace = true

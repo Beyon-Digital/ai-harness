@@ -1,0 +1,11 @@
+[package]
+name = "resources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+domain.workspace = true
+errors.workspace = true
+kernel-store.workspace = true

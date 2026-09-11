@@ -1,0 +1,12 @@
+[package]
+name = "adapter-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+adapter-protocol.workspace = true
+domain.workspace = true
+errors.workspace = true
+process-supervisor.workspace = true
