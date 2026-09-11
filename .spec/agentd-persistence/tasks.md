@@ -265,8 +265,8 @@
 
 ### Task PST-004: Daemon lock, fence, and instance lifecycle
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst004
 - depends_on: PST-003B
 - files: `agent-os/crates/kernel-store-sqlite/src/fence.rs`, `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/fence.rs`, `agent-os/crates/agentd/src/lock.rs`, `agent-os/crates/agentd/tests/lock_exclusion.rs`, `agent-os/crates/identity/src/lib.rs`, `agent-os/crates/identity/src/daemon.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, R4.6, N2
