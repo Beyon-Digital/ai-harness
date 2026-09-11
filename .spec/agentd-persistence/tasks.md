@@ -30,15 +30,61 @@
 
 ---
 
+### Task PST-000: Declare persistence-module dependencies
+
+- status: done
+- owner: agent-pst000
+- depends_on: none
+- files: `agent-os/crates/kernel-store/Cargo.toml`, `agent-os/crates/kernel-store-sqlite/Cargo.toml`, `agent-os/crates/testkit/Cargo.toml`, `agent-os/crates/identity/Cargo.toml`, `agent-os/crates/events/Cargo.toml`, `agent-os/Cargo.lock`
+- requirements: N3, G1
+- scope: small
+- model: cheap
+
+**Objective:** Every persistence task compiles against declared dependencies, with the manifests owned by exactly one task.
+
+**Context the implementer cannot infer:**
+
+- FND-001 intentionally declared minimal per-crate dependencies; the persistence module needs more, and no other task may edit manifests.
+- Required edits (use `.workspace = true` where the dependency is already in `[workspace.dependencies]`; add workspace entries only if missing):
+  - `kernel-store`: add `async-trait`.
+  - `kernel-store-sqlite`: add `kernel-store`, `domain`, `errors`, `sqlx` with `sqlite` and `runtime-tokio` features, `tokio` with `rt`, `async-trait`, `observability`; dev-dependencies `testkit`, `tempfile`, `proptest`, `tokio` with `macros` and `rt-multi-thread`.
+  - `testkit`: add `kernel-store`, `errors`, `async-trait`; dev-dependency `tokio` with `macros` and `rt-multi-thread`.
+  - `identity`: add `kernel-store`, `domain`, `errors`.
+  - `events`: add `kernel-store`, `domain`, `errors`.
+- Do not remove or reorder existing dependency entries; append only.
+- The workspace manifest already declares `sqlx`, `tokio`, `async-trait`, `tempfile`, `proptest`. Path member crates are referenced directly with `path = "../name"`.
+
+**Steps:**
+
+- [ ] Edit the five manifests
+- [ ] Run `cargo check --workspace` and `cargo test --workspace --no-run` from `agent-os/` to resolve the lock
+- [ ] Run `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] Commit: `chore(workspace): declare persistence module dependencies [PST-000]`
+
+**Acceptance criteria:**
+
+- [ ] Each crate resolves the dependencies its tasks need; `Cargo.lock` updated
+- [ ] G1 — full workspace check, tests, clippy, and fmt still pass
+- [ ] N3 — no contract, schema, or build-pack file changed
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo check --workspace && cargo test --workspace --no-run` exits 0
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
+
+---
+
 ### Task PST-001: Bootstrap the kernel database
 
 - status: pending
 - owner: -
-- depends_on: none
+- depends_on: PST-000
 - files: `agent-os/crates/kernel-store-sqlite/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/schema.rs`, `agent-os/crates/kernel-store-sqlite/tests/bootstrap.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, N1, N3, G1, G2
 - scope: medium
 - model: standard
+- blocked_reason: need agent-os/crates/kernel-store-sqlite/Cargo.toml: task requires sqlx (SqliteConnectOptions) and tokio/tempfile dev-deps for #[tokio::test]; manifest currently declares only domain/errors/kernel-store and sqlx is absent from Cargo.lock; cannot compile RED or GREEN without it
 
 **Objective:** `SqliteKernelStore::open` creates `kernel.db` exactly once from the inception schema, seeds and verifies the schema version, applies the normative PRAGMAs and file modes, and never lets repositories create structure.
 
@@ -82,11 +128,12 @@
 
 - status: pending
 - owner: -
-- depends_on: none
+- depends_on: PST-000
 - files: `agent-os/crates/kernel-store/src/lib.rs`, `agent-os/crates/kernel-store/src/types.rs`, `agent-os/crates/kernel-store/src/txn.rs`, `agent-os/crates/kernel-store/src/repositories.rs`, `agent-os/crates/kernel-store/src/models.rs`, `agent-os/crates/testkit/src/store.rs`, `agent-os/crates/testkit/src/lib.rs`, `agent-os/crates/testkit/tests/store_mock.rs`
 - requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, P2
 - scope: large
 - model: capable
+- blocked_reason: need agent-os/crates/kernel-store/Cargo.toml and agent-os/crates/testkit/Cargo.toml: kernel-store needs async-trait.workspace = true for the #[async_trait] traits; testkit/src/store.rs must implement those traits (needs kernel-store + errors + async-trait deps) and tests/store_mock.rs needs tokio.workspace = true as dev-dep for #[tokio::test]. Without these manifest edits the task cannot compile RED or GREEN. All deps are in the local cargo cache and the registry is reachable, so a lock update + build succeeds once the manifests are amended. This is the same blocker PST-001 reported for kernel-store-sqlite/Cargo.toml.
 
 **Objective:** The port crate publishes object-safe async traits, typed models, and no SQL access — plus an in-memory mock so the contract is provably implementable twice.
 

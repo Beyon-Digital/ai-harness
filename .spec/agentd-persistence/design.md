@@ -408,6 +408,12 @@ Paths relative to `agent-os/`.
 
 | Path | Create or modify | Responsibility | Owner task |
 |---|---|---|---|
+| `crates/kernel-store/Cargo.toml` | modify | add `async-trait`; keep `domain`, `errors` | PST-000 |
+| `crates/kernel-store-sqlite/Cargo.toml` | modify | add `sqlx` (sqlite, runtime-tokio), `tokio`, `async-trait`, `observability`; dev: `testkit`, `tempfile`, `proptest` | PST-000 |
+| `crates/testkit/Cargo.toml` | modify | add `kernel-store`, `errors`, `async-trait`; dev: `tokio` | PST-000 |
+| `crates/identity/Cargo.toml` | modify | add `kernel-store`, `domain`, `errors` | PST-000 |
+| `crates/events/Cargo.toml` | modify | add `kernel-store`, `domain`, `errors` | PST-000 |
+| `Cargo.lock` | modify | resolution update for the new edges | PST-000 |
 | `crates/kernel-store/src/lib.rs` | modify | module wiring, re-exports | PST-002 |
 | `crates/kernel-store/src/types.rs` | create | `TxContext`, `DaemonEpoch`, `DaemonFence` | PST-002 |
 | `crates/kernel-store/src/txn.rs` | create | `KernelStore`, `KernelTxn`, `KernelReadTxn` | PST-002 |

@@ -4,3 +4,19 @@
 - 2026-09-11T12:31:35Z gate passed: design
 - 2026-09-11T12:35:36Z gate passed: implement
 - 2026-09-11T12:35:37Z Plan/requirements/design approved per user standing instruction; 6 tasks validated across 4 waves. Implementation starting.
+- 2026-09-11T12:36:42Z PST-001 -> claimed (@agent-pst001)
+- 2026-09-11T12:36:43Z PST-001 -> in_progress (@agent-pst001)
+- 2026-09-11T12:36:53Z PST-002 -> claimed (@agent-pst002)
+- 2026-09-11T12:36:59Z PST-002 -> in_progress (@agent-pst002)
+- 2026-09-11T12:38:20Z PST-001 -> blocked (@agent-pst001) — need agent-os/crates/kernel-store-sqlite/Cargo.toml: task requires sqlx (SqliteConnectOptions) and tokio/tempfile dev-deps for #[tokio::test]; manifest currently declares only domain/errors/kernel-store and sqlx is absent from Cargo.lock; cannot compile RED or GREEN without it
+- 2026-09-11T12:47:14Z PST-002 -> blocked (@agent-pst002) — need agent-os/crates/kernel-store/Cargo.toml and agent-os/crates/testkit/Cargo.toml: kernel-store needs async-trait.workspace = true for the #[async_trait] traits; testkit/src/store.rs must implement those traits (needs kernel-store + errors + async-trait deps) and tests/store_mock.rs needs tokio.workspace = true as dev-dep for #[tokio::test]. Without these manifest edits the task cannot compile RED or GREEN. All deps are in the local cargo cache and the registry is reachable, so a lock update + build succeeds once the manifests are amended. This is the same blocker PST-001 reported for kernel-store-sqlite/Cargo.toml.
+- 2026-09-11T12:48:30Z PST-001 -> pending (@agent-pst001)
+- 2026-09-11T12:48:31Z PST-002 -> pending (@agent-pst002)
+- 2026-09-11T12:48:58Z Ruling: foundation manifests were minimal by design; added PST-000 owning all module dependency declarations, with PST-001/PST-002 depending on it. Cost if wrong: a later persistence task finds an undeclared dep and blocks for an amendment.
+- 2026-09-11T12:49:59Z PST-000 -> claimed (@agent-pst000)
+- 2026-09-11T12:50:00Z PST-000 -> in_progress (@agent-pst000)
+- 2026-09-11T20:48:00Z PST-000 -> pending (@agent-pst000)
+- 2026-09-11T20:48:40Z PST-000 -> claimed (@agent-pst000)
+- 2026-09-11T20:48:40Z PST-000 -> in_progress (@agent-pst000)
+- 2026-09-11T21:02:16Z PST-000 -> review (@agent-pst000)
+- 2026-09-11T21:06:37Z PST-000 -> done (@agent-pst000)
