@@ -418,10 +418,9 @@ CREATE TABLE IF NOT EXISTS decisions (
   decision_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   turn_id TEXT NOT NULL,
-  -- LoopDecision variants (contracts/protocols/agent_loop.proto; specs/command-catalog.md:94-101):
-  -- complete=Complete, fail=Fail, wait=Wait, spawn_agent=SpawnAgent,
-  -- invoke_effect=InvokeEffect, request_approval=RequestApproval.
-  decision_type TEXT NOT NULL CHECK (decision_type IN ('complete','fail','wait','spawn_agent','invoke_effect','request_approval')),
+  -- Persisted literals are the canonical LoopDecision message names
+  -- (contracts/protocols/agent_loop.proto; specs/command-catalog.md:94-101).
+  decision_type TEXT NOT NULL CHECK (decision_type IN ('Complete','Fail','Wait','SpawnAgent','InvokeEffect','RequestApproval')),
   decision_digest TEXT NOT NULL,
   decision_bytes BLOB NOT NULL,
   run_revision INTEGER NOT NULL,

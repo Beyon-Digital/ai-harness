@@ -43,6 +43,15 @@ Table inventory:
 
 The durable Event Journal is a separate database (`events.db`) with its own schema, `specs/event-journal-schema.sql`, extracted from `event-pipeline.md`; it shares no tables with `kernel.db`.
 
+Persisted TEXT state literals for the GC-3 tables (identical to the CHECK constraints in the schema):
+
+| Column | Persisted literals |
+|---|---|
+| `loop_turns.state` (specs/runtime-manager.md) | `issued`, `accepted`, `stale` |
+| `decisions.decision_type` (contracts/protocols/agent_loop.proto) | `Complete`, `Fail`, `Wait`, `SpawnAgent`, `InvokeEffect`, `RequestApproval` |
+| `adapter_instances.state` (specs/process-supervisor.md) | `starting`, `ready`, `exited`, `failed` |
+| `conformance_reports.result` (specs/adapter-registry.md) | `pass`, `fail` |
+
 ## Mandatory invariants
 
 - Every write transaction asserts current daemon fencing epoch.

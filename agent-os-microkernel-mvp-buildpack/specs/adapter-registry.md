@@ -26,7 +26,7 @@ For process bundles, use a deterministic `bundle.lock` containing sorted relativ
 
 ## Conformance report binding
 
-A conformance report is a `conformance_reports` row in `kernel-store-schema.sql`, keyed by the exact identity `(adapter_id, adapter_version, bundle_digest)` and FK-bound to `adapter_registrations`. It records `report_digest`, `harness_version`, `result` (`pass`/`fail`), `run_at_ms`, and `details`. Reports are immutable (`BEFORE UPDATE`/`BEFORE DELETE` triggers raise `immutable record`); `adapter_registrations.conformance_state` reflects the report outcome.
+A conformance report is a `conformance_reports` row in `kernel-store-schema.sql`, keyed by the exact identity `(adapter_id, adapter_version, bundle_digest)` and FK-bound to `adapter_registrations`. It records `report_digest`, `harness_version`, `result` with persisted literals `pass`, `fail`, `run_at_ms`, and `details`. Reports are immutable (`BEFORE UPDATE`/`BEFORE DELETE` triggers raise `immutable record`); `adapter_registrations.conformance_state` reflects the report outcome.
 
 ## Resolution
 
