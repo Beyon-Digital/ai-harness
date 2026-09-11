@@ -1,0 +1,9 @@
+syntax = "proto3";
+package agentos.spec.v1;
+message DelegationHop { string principal_or_actor_id = 1; string run_id = 2; repeated string capability_grant_ids = 3; }
+message DelegationChain { string principal_id = 1; repeated DelegationHop hops = 2; }
+message ApprovalRequest {
+  string request_id = 1; string request_digest = 2; string actor_id = 3; string run_id = 4;
+  repeated string capability_ids = 5; string target_resource = 6; string operation = 7;
+  string extension_bundle_digest = 8; string config_generation_digest = 9; int64 expires_unix_ms = 10; string nonce = 11;
+}

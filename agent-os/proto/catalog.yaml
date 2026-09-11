@@ -1,0 +1,80 @@
+spec_version: 1
+ports:
+  kernel-store:
+    version: 1
+    scope: bootstrap-global
+    extension_policy: trusted-native-only
+  event-journal:
+    version: 1
+    scope: generation-global
+    extension_policy: reviewed-external-allowed
+  message-queue:
+    version: 1
+    scope: generation-global
+    extension_policy: reviewed-external-allowed
+  sandbox:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  workspace:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  artifact-store:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  model:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  memory-store:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  context:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  tool-runtime:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+  secret-store:
+    version: 1
+    scope: generation-global
+    extension_policy: reviewed-external-allowed
+  transport:
+    version: 1
+    scope: generation-global
+    extension_policy: external-allowed
+  agent-loop:
+    version: 1
+    scope: run-scoped
+    extension_policy: external-allowed
+effect_classes:
+- EFFECT_CLASS_READ_ONLY
+- LOCAL_MUTATION
+- EXTERNAL_MUTATION
+- OPAQUE
+idempotency:
+- NATURALLY_IDEMPOTENT
+- IDEMPOTENCY_KEY_SUPPORTED
+- NOT_IDEMPOTENT
+- UNKNOWN
+reconciliation:
+- STATUS_LOOKUP
+- RESULT_LOOKUP
+- DETERMINISTIC_INSPECTION
+- IMPOSSIBLE
+- UNKNOWN
+sandbox_tiers:
+- T0_TRUSTED
+- T1_CONSTRAINED
+- T2_UNTRUSTED
+- T3_HOSTILE
+workspace_modes:
+- READ_ONLY
+- EXCLUSIVE_WRITE
+- ISOLATED_FORK
+- SHARED_COORDINATED_WRITE

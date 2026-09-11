@@ -1,0 +1,19 @@
+syntax="proto3"; package agentos.spec.v1;
+message LoopInput {
+  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
+  string input_event_cursor=5; string turn_id=6; bytes state=7; bytes events=8;
+}
+message LoopDecision {
+  string run_id=1; uint64 run_revision=2; uint64 loop_epoch=3; uint64 step_sequence=4;
+  string input_event_cursor=5; string turn_id=6; string decision_id=7;
+  oneof decision {
+    Complete complete=8; Fail fail=9; Wait wait=10; SpawnAgent spawn_agent=11;
+    InvokeEffect invoke_effect=12; RequestApproval request_approval=13;
+  }
+}
+message Complete { string output_ref=1; }
+message Fail { string reason_code=1; }
+message Wait { string reason=1; string timer_id=2; }
+message SpawnAgent { bytes child_request=1; }
+message InvokeEffect { string operation=1; bytes payload=2; bytes effect_claim=3; }
+message RequestApproval { bytes approval_draft=1; }

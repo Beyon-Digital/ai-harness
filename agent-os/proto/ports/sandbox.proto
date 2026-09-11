@@ -1,0 +1,8 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service SandboxPort { rpc Create(SandboxCreateRequest) returns (SandboxCreateResult); rpc Exec(SandboxExecRequest) returns (GenericResult); rpc Status(SandboxStatusRequest) returns (StatusResponse); rpc Checkpoint(SandboxStatusRequest) returns (GenericResult); rpc Restore(SandboxRestoreRequest) returns (SandboxCreateResult); rpc Terminate(SandboxTerminateRequest) returns (GenericResult); }
+message SandboxCreateRequest { ExecutionContext context=1; string trust_tier=2; bytes spec_json=3; }
+message SandboxCreateResult { string sandbox_uri=1; bytes negotiated_capabilities_json=2; }
+message SandboxExecRequest { ExecutionContext context=1; string sandbox_uri=2; bytes exec_json=3; }
+message SandboxStatusRequest { ExecutionContext context=1; string sandbox_uri=2; }
+message SandboxRestoreRequest { ExecutionContext context=1; string checkpoint_uri=2; }
+message SandboxTerminateRequest { ExecutionContext context=1; string sandbox_uri=2; string mode=3; }

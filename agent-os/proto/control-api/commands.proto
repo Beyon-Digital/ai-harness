@@ -1,0 +1,139 @@
+syntax = "proto3";
+package agentos.spec.v1;
+
+import "domain/core.proto";
+import "domain/entities.proto";
+import "domain/effects.proto";
+import "protocols/agent_loop.proto";
+
+message CreateSession {
+  string session_id = 1;
+  bytes metadata = 2;
+}
+
+message PutAgentSpecRevision {
+  string agent_spec_id = 1;
+  string version = 2;
+  bytes body_bytes = 3;
+  string body_digest = 4;
+}
+
+message CreateTaskRun {
+  string task_id = 1;
+  string run_id = 2;
+  string session_id = 3;
+  string task_kind = 4;
+  bytes task_payload = 5;
+  VersionedRef agent_spec_ref = 6;
+  string parent_run_id = 7;
+  uint64 observed_parent_cancellation_epoch = 8;
+  string requested_profile = 9;
+  string workspace_uri = 10;
+  repeated string requested_capabilities = 11;
+  bytes requested_budget = 12;
+}
+
+message BindRun {
+  string run_id = 1;
+  uint64 expected_run_revision = 2;
+  string config_generation_id = 3;
+  ResolvedRunEnvironment resolved_environment = 4;
+}
+
+message ClaimReadyRun {
+  string run_id = 1;
+  string claim_owner = 2;
+  uint64 claim_ttl_ms = 3;
+}
+
+message AddRunDependency {
+  string source_run_id = 1;
+  string target_run_id = 2;
+  DependencyCondition condition = 3;
+  uint64 expected_graph_revision = 4;
+}
+
+message CancelRun {
+  string run_id = 1;
+  uint64 expected_run_revision = 2;
+  string reason = 3;
+}
+
+message SubmitLoopDecision {
+  LoopDecision decision = 1;
+}
+
+message ResolveUnknownEffect {
+  string effect_id = 1;
+  EffectState expected_effect_state = 2;
+  string action = 3;
+  string result_ref = 4;
+  string reason = 5;
+  string approval_request_id = 6;
+}
+
+message CreateApprovalRequest {
+  string request_id = 1;
+  string request_digest = 2;
+  string principal_id = 3;
+  string actor_id = 4;
+  string run_id = 5;
+  string operation = 6;
+  string target_resource = 7;
+  repeated string capability_ids = 8;
+  string extension_bundle_digest = 9;
+  string config_generation_digest = 10;
+  int64 expires_at_ms = 11;
+  string nonce = 12;
+}
+
+message RespondApproval {
+  string request_id = 1;
+  string request_digest = 2;
+  string decision = 3;
+  string device_id = 4;
+  string responder_principal_id = 5;
+}
+
+message ProposeConfigGeneration {
+  string generation_id = 1;
+  bytes document_bytes = 2;
+  string digest = 3;
+}
+
+message MarkConfigTested {
+  string generation_id = 1;
+  string digest = 2;
+  string test_report_digest = 3;
+  string test_result = 4;
+}
+
+message ActivateConfigGeneration {
+  string generation_id = 1;
+  uint64 expected_active_revision = 2;
+}
+
+message ScheduleTimer {
+  string timer_id = 1;
+  string run_id = 2;
+  string timer_kind = 3;
+  int64 due_at_ms = 4;
+  bytes payload = 5;
+}
+
+message CancelTimer {
+  string timer_id = 1;
+  uint64 expected_version = 2;
+}
+
+message RollbackConfigGeneration {
+  string generation_id = 1;
+  uint64 expected_active_revision = 2;
+  string reason = 3;
+}
+
+message ResolveBlockedRun {
+  string run_id = 1;
+  string action = 2;
+  string reason = 3;
+}

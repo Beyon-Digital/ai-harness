@@ -1,0 +1,36 @@
+syntax = "proto3";
+package agentos.spec.v1;
+
+message VersionedRef { string id = 1; string version = 2; string digest = 3; }
+message ResourceUri { string uri = 1; }
+
+enum RunState { RUN_STATE_UNSPECIFIED=0; CREATED=1; READY=2; RUNNING=3; WAITING_TOOL=4; WAITING_CHILD=5; WAITING_HUMAN=6; SUSPENDED=7; CANCELLING=8; COMPLETED=9; FAILED=10; CANCELLED=11; }
+enum RecoveryDisposition { RECOVERY_UNSPECIFIED=0; NORMAL=1; NEEDS_RECONCILIATION=2; RECOVERING=3; BLOCKED_UNKNOWN_EFFECT=4; BLOCKED_MISSING_RESOURCE=5; REQUIRES_HUMAN_DECISION=6; }
+enum WorkspaceAccessMode { WORKSPACE_MODE_UNSPECIFIED=0; READ_ONLY=1; EXCLUSIVE_WRITE=2; ISOLATED_FORK=3; SHARED_COORDINATED_WRITE=4; }
+
+message AgentRun {
+  string run_id = 1; string task_id = 2; string session_id = 3; string parent_run_id = 4;
+  RunState state = 5; RecoveryDisposition recovery = 6;
+  uint64 run_revision = 7; uint64 loop_epoch = 8; uint64 step_sequence = 9;
+  string input_event_cursor = 10; uint64 cancellation_epoch = 11;
+  string resolved_environment_id = 12;
+  string output_ref = 13;
+  string current_turn_id = 14;
+}
+
+message ResolvedBinding {
+  string port_id = 1; VersionedRef adapter = 2; map<string,string> capabilities = 3;
+}
+message ResolvedRunEnvironment {
+  string id = 1; string run_id = 2; VersionedRef agent_spec = 3; VersionedRef agent_loop = 4;
+  string config_generation_id = 5; repeated ResolvedBinding bindings = 6;
+  ResourceUri workspace_uri = 7; string workspace_base_revision = 8; WorkspaceAccessMode workspace_mode = 9;
+  string model_provider = 10; string model_id = 11; bytes model_parameters_json = 12;
+  string kernel_version = 13; repeated string protocol_versions = 14;
+  repeated string capability_grant_ids = 15; repeated string approval_request_ids = 16;
+}
+
+message WorkspaceLease {
+  string lease_id = 1; string workspace_id = 2; string owner_run_id = 3; WorkspaceAccessMode mode = 4;
+  uint64 lease_epoch = 5; repeated string delegated_from_run_ids = 6;
+}

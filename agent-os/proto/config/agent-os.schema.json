@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos.local/spec/config/v1.json",
+  "title": "Agent OS Configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kernel",
+    "services",
+    "profiles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store"
+      ],
+      "properties": {
+        "store": {
+          "type": "string"
+        },
+        "daemon_identity": {
+          "type": "string"
+        }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "event_journal": {
+          "type": "string"
+        },
+        "message_queue": {
+          "type": "string"
+        },
+        "secret_store": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "extends": {
+            "type": "string"
+          },
+          "sandbox": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          },
+          "artifact_store": {
+            "type": "string"
+          },
+          "memory_store": {
+            "type": "string"
+          },
+          "model_provider": {
+            "type": "string"
+          },
+          "tool_runtime": {
+            "type": "string"
+          },
+          "agent_loop": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "description": "Deprecated: legacy untyped policy bag. Use typed sections such as limits instead."
+    },
+    "limits": {
+      "type": "object",
+      "description": "Normative MVP thresholds. Source of truth: specs/limits.yaml; every key must be present.",
+      "additionalProperties": false,
+      "required": [
+        "queue",
+        "adapters",
+        "effects",
+        "runs",
+        "daemon",
+        "approvals",
+        "shutdown",
+        "events",
+        "streams",
+        "fs"
+      ],
+      "properties": {
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capacity_messages"
+          ],
+          "properties": {
+            "capacity_messages": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "adapters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_frame_bytes",
+            "handshake_timeout_ms",
+            "request_deadline_ms",
+            "health_ping_ms",
+            "health_missed_allowed",
+            "supervisor_max_restarts",
+            "supervisor_backoff_initial_ms",
+            "supervisor_backoff_max_ms"
+          ],
+          "properties": {
+            "max_frame_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "handshake_timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_deadline_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "health_ping_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "health_missed_allowed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "supervisor_max_restarts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "supervisor_backoff_initial_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "supervisor_backoff_max_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lease_ms",
+            "lease_renew_ms"
+          ],
+          "properties": {
+            "lease_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "lease_renew_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "runs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "claim_ttl_ms"
+          ],
+          "properties": {
+            "claim_ttl_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "daemon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "fence_lease_ms",
+            "fence_renew_ms"
+          ],
+          "properties": {
+            "fence_lease_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "fence_renew_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "approvals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ttl_ms"
+          ],
+          "properties": {
+            "ttl_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "shutdown": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "drain_deadline_ms"
+          ],
+          "properties": {
+            "drain_deadline_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "live_buffer_events",
+            "dispatcher_poll_ms",
+            "scheduler_poll_ms"
+          ],
+          "properties": {
+            "live_buffer_events": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "dispatcher_poll_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "scheduler_poll_ms": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "read_default_limit",
+            "read_max_limit"
+          ],
+          "properties": {
+            "read_default_limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "read_max_limit": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "fs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "db_file_mode",
+            "runtime_dir_mode",
+            "control_socket_mode"
+          ],
+          "properties": {
+            "db_file_mode": {
+              "type": "string",
+              "pattern": "^0[0-7]{3}$"
+            },
+            "runtime_dir_mode": {
+              "type": "string",
+              "pattern": "^0[0-7]{3}$"
+            },
+            "control_socket_mode": {
+              "type": "string",
+              "pattern": "^0[0-7]{3}$"
+            }
+          }
+        }
+      }
+    },
+    "remote_access": {
+      "type": "object"
+    },
+    "observability": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+syntax = "proto3";
+package agentos.spec.v1;
+enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; PRIVATE=3; SECRET=4; }
+enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; SESSION=2; AUDIT=3; DURABLE=4; }
+message EventEnvelope {
+  string event_id=1; string event_type=2; uint32 event_version=3; string stream_key=4; uint64 sequence=5;
+  int64 occurred_unix_ms=6; string run_id=7; string task_id=8; string session_id=9; string effect_id=10;
+  string causation_id=11; string correlation_id=12; Sensitivity sensitivity=13; RetentionClass retention=14;
+  bytes payload=15;
+}

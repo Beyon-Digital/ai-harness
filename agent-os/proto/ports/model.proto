@@ -1,0 +1,5 @@
+syntax="proto3"; package agentos.spec.v1; import "ports/common.proto";
+service ModelPort { rpc ListModels(Empty) returns (GenericResult); rpc Invoke(ModelInvokeRequest) returns (ModelInvokeResult); rpc Stream(ModelInvokeRequest) returns (stream ModelStreamChunk); rpc Status(StatusRequest) returns (StatusResponse); rpc Cancel(CancelRequest) returns (GenericResult); }
+message ModelInvokeRequest { ExecutionContext context=1; string model_id=2; bytes request_json=3; }
+message ModelInvokeResult { string provider_operation_ref=1; bytes response_json=2; bytes usage_json=3; }
+message ModelStreamChunk { string provider_operation_ref=1; uint64 sequence=2; bytes chunk_json=3; bool terminal=4; }
