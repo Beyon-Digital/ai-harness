@@ -13,6 +13,12 @@
 //! of comparing a live fence lease, and commit is guarded by a single
 //! whole-store revision, so any overlapping writer conflicts rather than
 //! receiving the row-level serialization `BEGIN IMMEDIATE` would provide.
+//!
+//! Beyond those two, the mock emulates the DDL constraints that later modules
+//! exercise: the partial unique index on active exclusive-write leases, the
+//! TEXT CHECK literal sets for the untyped persisted enums, and the foreign
+//! keys listed on [`MockStore`]. Every constraint that is still not emulated
+//! is called out in that list so mock-based tests do not rely on it.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -25,6 +31,7 @@ use domain::ids::{
     EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
 };
+use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::*;
@@ -77,6 +84,29 @@ struct MockState {
 /// `begin_write` rejects an absent (`0`) or mismatched context epoch with
 /// `FailedPrecondition`, mirroring the storage-layer epoch assertion (R4.3,
 /// D6).
+///
+/// Constraint emulation:
+///
+/// - a second active exclusive-write lease for one workspace is rejected with
+///   `Conflict`, mirroring `uq_workspace_exclusive_lease`;
+/// - the persisted-literal CHECK sets are validated for loop turns
+///   (`issued|accepted|stale`), decisions (`Complete|Fail|Wait|SpawnAgent|
+///   InvokeEffect|RequestApproval`), adapter instances (`starting|ready|
+///   exited|failed`), config generations (`proposed|validated|rejected` and
+///   `untested|passed|failed`), conformance reports (`pass|fail`), and
+///   approval responses (`approve|deny`), on insert and on state patches,
+///   failing `FailedPrecondition`/`Never`;
+/// - foreign-key existence is checked for artifacts (origin run and effect),
+///   timers (run), leases (workspace and owner run), turns (run), decisions
+///   (run and turn), grants (run and delegating grant), delegation hops
+///   (run), and dependency endpoints (source and target run).
+///
+/// Still unchecked, so mock-based tests must not rely on these being
+/// rejected: the immutability triggers (the port exposes no update or delete
+/// for those tables), CHECK constraints on typed enum and integer columns
+/// (unrepresentable through the port types), `workspaces.parent_workspace_id`,
+/// `approval_requests.run_id`, outbox entity references, delegation-hop chain
+/// contiguity, and any foreign key not listed above.
 ///
 /// Concurrency limitation: commits are guarded by one whole-store revision.
 /// Any overlapping write transaction started from an older revision fails
@@ -136,6 +166,76 @@ fn not_found(message: &'static str) -> KernelError {
 
 fn failed_precondition(message: &'static str) -> KernelError {
     KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, message)
+}
+
+/// Fails closed when an untyped literal violates its schema CHECK set.
+fn check_literal(column: &'static str, value: &str, allowed: &[&str]) -> errors::Result<()> {
+    if allowed.contains(&value) {
+        Ok(())
+    } else {
+        Err(KernelError::new(
+            ErrorCode::FailedPrecondition,
+            RetryClass::Never,
+            format!("{column} has an unknown literal: {value}"),
+        ))
+    }
+}
+
+/// Emulates `uq_workspace_exclusive_lease`: at most one active exclusive-write
+/// lease may exist per workspace.
+fn check_exclusive_lease(
+    state: &MockState,
+    workspace: WorkspaceId,
+    mode: WorkspaceAccessMode,
+    enforcement_state: LeaseEnforcementState,
+    exclude: Option<LeaseId>,
+) -> errors::Result<()> {
+    let would_be_active = mode == WorkspaceAccessMode::ExclusiveWrite
+        && enforcement_state == LeaseEnforcementState::Active;
+    let occupied = would_be_active
+        && state.leases.values().any(|row| {
+            row.workspace_id == workspace
+                && row.mode == WorkspaceAccessMode::ExclusiveWrite
+                && row.enforcement_state == LeaseEnforcementState::Active
+                && Some(row.lease_id) != exclude
+        });
+    if occupied {
+        return Err(conflict(
+            "exclusive write lease already active for the workspace",
+        ));
+    }
+    Ok(())
+}
+
+/// Directed reachability over the snapshot's dependency edges.
+fn reaches(state: &MockState, from: RunId, to: RunId) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut adjacency: HashMap<RunId, Vec<RunId>> = HashMap::new();
+    for dependency in state.dependencies.values() {
+        adjacency
+            .entry(dependency.source_run_id)
+            .or_default()
+            .push(dependency.target_run_id);
+    }
+    let mut seen: HashSet<RunId> = HashSet::new();
+    let mut queue: VecDeque<RunId> = VecDeque::new();
+    queue.push_back(from);
+    seen.insert(from);
+    while let Some(current) = queue.pop_front() {
+        if let Some(targets) = adjacency.get(&current) {
+            for target in targets {
+                if *target == to {
+                    return true;
+                }
+                if seen.insert(*target) {
+                    queue.push_back(*target);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Persists a fence and bumps the store revision, invalidating any write
@@ -704,34 +804,8 @@ impl GraphRead for MockGraphRepo {
     }
 
     async fn is_reachable(&mut self, from: RunId, to: RunId) -> errors::Result<bool> {
-        if from == to {
-            return Ok(true);
-        }
         let state = lock(&self.state)?;
-        let mut adjacency: HashMap<RunId, Vec<RunId>> = HashMap::new();
-        for dependency in state.dependencies.values() {
-            adjacency
-                .entry(dependency.source_run_id)
-                .or_default()
-                .push(dependency.target_run_id);
-        }
-        let mut seen: HashSet<RunId> = HashSet::new();
-        let mut queue: VecDeque<RunId> = VecDeque::new();
-        queue.push_back(from);
-        seen.insert(from);
-        while let Some(current) = queue.pop_front() {
-            if let Some(targets) = adjacency.get(&current) {
-                for target in targets {
-                    if *target == to {
-                        return Ok(true);
-                    }
-                    if seen.insert(*target) {
-                        queue.push_back(*target);
-                    }
-                }
-            }
-        }
-        Ok(false)
+        Ok(reaches(&state, from, to))
     }
 }
 
@@ -772,6 +846,14 @@ impl GraphRepo for MockGraphRepo {
         };
         if head.graph_revision != expected_revision {
             return Err(conflict("graph revision conflict"));
+        }
+        if !state.runs.contains_key(&new.source_run_id)
+            || !state.runs.contains_key(&new.target_run_id)
+        {
+            return Err(failed_precondition("dependency references a missing run"));
+        }
+        if reaches(&state, new.target_run_id, new.source_run_id) {
+            return Err(conflict("dependency would create a cycle"));
         }
         for dependency in state.dependencies.values() {
             if dependency.source_run_id == new.source_run_id
@@ -1099,6 +1181,12 @@ impl TimerRead for MockTimerRepo {
 #[async_trait]
 impl TimerRepo for MockTimerRepo {
     async fn insert(&mut self, timer: NewTimer) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if let Some(run) = timer.run_id
+            && !state.runs.contains_key(&run)
+        {
+            return Err(failed_precondition("timer references a missing run"));
+        }
         let row = TimerRow {
             timer_id: timer.timer_id,
             run_id: timer.run_id,
@@ -1113,12 +1201,7 @@ impl TimerRepo for MockTimerRepo {
             created_at_ms: timer.created_at_ms,
             updated_at_ms: timer.created_at_ms,
         };
-        insert_unique(
-            &mut lock(&self.state)?.timers,
-            row.timer_id,
-            row,
-            "duplicate timer id",
-        )
+        insert_unique(&mut state.timers, row.timer_id, row, "duplicate timer id")
     }
 
     async fn cas_transition(
@@ -1204,6 +1287,19 @@ impl SecurityRead for MockSecurityRepo {
 #[async_trait]
 impl SecurityRepo for MockSecurityRepo {
     async fn insert_grant(&mut self, grant: NewCapabilityGrant) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if let Some(run) = grant.run_id
+            && !state.runs.contains_key(&run)
+        {
+            return Err(failed_precondition("grant references a missing run"));
+        }
+        if let Some(parent) = grant.delegated_from_grant_id
+            && !state.grants.contains_key(&parent)
+        {
+            return Err(failed_precondition(
+                "grant references a missing parent grant",
+            ));
+        }
         let row = CapabilityGrantRow {
             grant_id: grant.grant_id,
             principal_id: grant.principal_id,
@@ -1216,15 +1312,18 @@ impl SecurityRepo for MockSecurityRepo {
             revoked_at_ms: grant.revoked_at_ms,
             created_at_ms: grant.created_at_ms,
         };
-        insert_unique(
-            &mut lock(&self.state)?.grants,
-            row.grant_id,
-            row,
-            "duplicate grant id",
-        )
+        insert_unique(&mut state.grants, row.grant_id, row, "duplicate grant id")
     }
 
     async fn insert_delegation_hop(&mut self, hop: NewDelegationHop) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if let Some(run) = hop.run_id
+            && !state.runs.contains_key(&run)
+        {
+            return Err(failed_precondition(
+                "delegation hop references a missing run",
+            ));
+        }
         let row = DelegationHopRow {
             chain_id: hop.chain_id,
             hop_index: hop.hop_index,
@@ -1233,7 +1332,7 @@ impl SecurityRepo for MockSecurityRepo {
             capability_grant_ids: hop.capability_grant_ids,
         };
         insert_unique(
-            &mut lock(&self.state)?.delegation_hops,
+            &mut state.delegation_hops,
             (row.chain_id, row.hop_index),
             row,
             "duplicate delegation hop",
@@ -1279,6 +1378,11 @@ impl SecurityRepo for MockSecurityRepo {
         response: NewApprovalResponse,
     ) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        check_literal(
+            "approval_responses.decision",
+            &response.decision,
+            &["approve", "deny"],
+        )?;
         if !state.approval_requests.contains_key(&response.request_id) {
             return Err(failed_precondition(
                 "approval response references a missing request",
@@ -1319,6 +1423,16 @@ impl ConfigRead for MockConfigRepo {
 impl ConfigRepo for MockConfigRepo {
     async fn insert_generation(&mut self, generation: NewConfigGeneration) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        check_literal(
+            "config_generations.validation_state",
+            &generation.validation_state,
+            &["proposed", "validated", "rejected"],
+        )?;
+        check_literal(
+            "config_generations.test_state",
+            &generation.test_state,
+            &["untested", "passed", "failed"],
+        )?;
         if state
             .config_generations
             .values()
@@ -1400,6 +1514,20 @@ impl WorkspaceRepo for MockWorkspaceRepo {
     }
 
     async fn insert_lease(&mut self, lease: NewWorkspaceLease) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if !state.workspaces.contains_key(&lease.workspace_id) {
+            return Err(failed_precondition("lease references a missing workspace"));
+        }
+        if !state.runs.contains_key(&lease.owner_run_id) {
+            return Err(failed_precondition("lease references a missing owner run"));
+        }
+        check_exclusive_lease(
+            &state,
+            lease.workspace_id,
+            lease.mode,
+            lease.enforcement_state,
+            None,
+        )?;
         let row = WorkspaceLeaseRow {
             lease_id: lease.lease_id,
             workspace_id: lease.workspace_id,
@@ -1411,12 +1539,7 @@ impl WorkspaceRepo for MockWorkspaceRepo {
             created_at_ms: lease.created_at_ms,
             updated_at_ms: lease.created_at_ms,
         };
-        insert_unique(
-            &mut lock(&self.state)?.leases,
-            row.lease_id,
-            row,
-            "duplicate lease id",
-        )
+        insert_unique(&mut state.leases, row.lease_id, row, "duplicate lease id")
     }
 
     async fn cas_lease(
@@ -1426,12 +1549,27 @@ impl WorkspaceRepo for MockWorkspaceRepo {
         patch: LeasePatch,
     ) -> errors::Result<bool> {
         let mut state = lock(&self.state)?;
-        let Some(lease) = state.leases.get_mut(&id) else {
+        let Some(lease) = state.leases.get(&id).cloned() else {
             return Ok(false);
         };
         if lease.lease_epoch != expect_epoch {
             return Ok(false);
         }
+        let mode = patch.mode.unwrap_or(lease.mode);
+        let enforcement_state = patch.enforcement_state.unwrap_or(lease.enforcement_state);
+        if let Some(owner) = patch.owner_run_id
+            && !state.runs.contains_key(&owner)
+        {
+            return Err(failed_precondition("lease references a missing owner run"));
+        }
+        check_exclusive_lease(
+            &state,
+            lease.workspace_id,
+            mode,
+            enforcement_state,
+            Some(id),
+        )?;
+        let lease = state.leases.get_mut(&id).expect("lease checked above");
         if let Some(value) = patch.enforcement_state {
             lease.enforcement_state = value;
         }
@@ -1507,6 +1645,11 @@ impl AdapterRepo for MockAdapterRepo {
 
     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        check_literal(
+            "adapter_instances.state",
+            &instance.state,
+            &["starting", "ready", "exited", "failed"],
+        )?;
         let key = (
             instance.adapter_id,
             instance.adapter_version.clone(),
@@ -1546,12 +1689,23 @@ impl AdapterRepo for MockAdapterRepo {
         patch: AdapterInstanceStatePatch,
     ) -> errors::Result<bool> {
         let mut state = lock(&self.state)?;
-        let Some(instance) = state.instances.get_mut(&id) else {
+        let Some(instance) = state.instances.get(&id) else {
             return Ok(false);
         };
         if instance.state != expect_state {
             return Ok(false);
         }
+        if let Some(value) = &patch.state {
+            check_literal(
+                "adapter_instances.state",
+                value,
+                &["starting", "ready", "exited", "failed"],
+            )?;
+        }
+        let instance = state
+            .instances
+            .get_mut(&id)
+            .expect("instance checked above");
         if let Some(value) = patch.state {
             instance.state = value;
         }
@@ -1572,6 +1726,11 @@ impl AdapterRepo for MockAdapterRepo {
         report: NewConformanceReport,
     ) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        check_literal(
+            "conformance_reports.result",
+            &report.result,
+            &["pass", "fail"],
+        )?;
         let key = (
             report.adapter_id,
             report.adapter_version.clone(),
@@ -1625,6 +1784,14 @@ impl ArtifactRead for MockArtifactRepo {
 impl ArtifactRepo for MockArtifactRepo {
     async fn insert(&mut self, artifact: NewArtifact) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        if !state.runs.contains_key(&artifact.origin_run_id) {
+            return Err(failed_precondition("artifact references a missing run"));
+        }
+        if let Some(effect) = artifact.origin_effect_id
+            && !state.effects.contains_key(&effect)
+        {
+            return Err(failed_precondition("artifact references a missing effect"));
+        }
         if state.artifacts_by_uri.contains_key(&artifact.uri) {
             return Err(conflict("duplicate artifact uri"));
         }
@@ -1671,6 +1838,15 @@ impl LoopRead for MockLoopRepo {
 #[async_trait]
 impl LoopRepo for MockLoopRepo {
     async fn insert_turn(&mut self, turn: NewLoopTurn) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        check_literal(
+            "loop_turns.state",
+            &turn.state,
+            &["issued", "accepted", "stale"],
+        )?;
+        if !state.runs.contains_key(&turn.run_id) {
+            return Err(failed_precondition("turn references a missing run"));
+        }
         let row = LoopTurnRow {
             turn_id: turn.turn_id,
             run_id: turn.run_id,
@@ -1681,12 +1857,7 @@ impl LoopRepo for MockLoopRepo {
             state: turn.state,
             issued_at_ms: turn.issued_at_ms,
         };
-        insert_unique(
-            &mut lock(&self.state)?.turns,
-            row.turn_id,
-            row,
-            "duplicate turn id",
-        )
+        insert_unique(&mut state.turns, row.turn_id, row, "duplicate turn id")
     }
 
     async fn cas_turn(
@@ -1696,12 +1867,16 @@ impl LoopRepo for MockLoopRepo {
         patch: LoopTurnPatch,
     ) -> errors::Result<bool> {
         let mut state = lock(&self.state)?;
-        let Some(turn) = state.turns.get_mut(&id) else {
+        let Some(turn) = state.turns.get(&id) else {
             return Ok(false);
         };
         if turn.state != expect_state {
             return Ok(false);
         }
+        if let Some(value) = &patch.state {
+            check_literal("loop_turns.state", value, &["issued", "accepted", "stale"])?;
+        }
+        let turn = state.turns.get_mut(&id).expect("turn checked above");
         if let Some(value) = patch.state {
             turn.state = value;
         }
@@ -1710,6 +1885,24 @@ impl LoopRepo for MockLoopRepo {
 
     async fn insert_decision(&mut self, decision: NewDecision) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
+        check_literal(
+            "decisions.decision_type",
+            &decision.decision_type,
+            &[
+                "Complete",
+                "Fail",
+                "Wait",
+                "SpawnAgent",
+                "InvokeEffect",
+                "RequestApproval",
+            ],
+        )?;
+        if !state.runs.contains_key(&decision.run_id) {
+            return Err(failed_precondition("decision references a missing run"));
+        }
+        if !state.turns.contains_key(&decision.turn_id) {
+            return Err(failed_precondition("decision references a missing turn"));
+        }
         if state
             .decisions
             .contains_key(&(decision.run_id, decision.decision_id))

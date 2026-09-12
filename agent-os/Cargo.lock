@@ -805,7 +805,6 @@ dependencies = [
  "domain",
  "errors",
  "kernel-store",
- "observability",
  "proptest",
  "sqlx",
  "tempfile",

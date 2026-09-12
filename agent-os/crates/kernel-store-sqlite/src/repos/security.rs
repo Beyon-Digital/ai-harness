@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use domain::ids::{ApprovalRequestId, CapabilityGrantId, DelegationChainId};
+use domain::run::UnknownStateValue;
 use domain::security::ApprovalState;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
@@ -117,6 +118,17 @@ fn decode_approval_request(row: &SqliteRow) -> errors::Result<ApprovalRequestRow
     })
 }
 
+/// Parses the exact `approval_responses.decision` CHECK literal set.
+fn approval_decision_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "approve" | "deny" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "ApprovalDecision",
+        }),
+    }
+}
+
 fn decode_approval_response(row: &SqliteRow) -> errors::Result<ApprovalResponseRow> {
     Ok(ApprovalResponseRow {
         request_id: mapping::decode_id(
@@ -124,7 +136,11 @@ fn decode_approval_response(row: &SqliteRow) -> errors::Result<ApprovalResponseR
             &mapping::text(row, "request_id")?,
         )?,
         request_digest: mapping::text(row, "request_digest")?,
-        decision: mapping::text(row, "decision")?,
+        decision: mapping::decode_state(
+            "approval_responses.decision",
+            &mapping::text(row, "decision")?,
+            approval_decision_from_state,
+        )?,
         device_id: mapping::decode_id(
             "approval_responses.device_id",
             &mapping::text(row, "device_id")?,

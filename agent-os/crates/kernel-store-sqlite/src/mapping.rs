@@ -74,15 +74,6 @@ fn message(code: ErrorCode) -> &'static str {
     }
 }
 
-/// Error for a repository group that has no SQL implementation in this store.
-pub(crate) fn unavailable(group: &'static str) -> KernelError {
-    KernelError::new(
-        ErrorCode::FailedPrecondition,
-        RetryClass::Never,
-        format!("repository group {group} is not available"),
-    )
-}
-
 /// Fails closed for a persisted enum value with no domain mirror variant.
 pub(crate) fn decode_wire<T>(
     column: &'static str,

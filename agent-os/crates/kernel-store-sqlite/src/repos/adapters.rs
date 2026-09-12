@@ -41,6 +41,17 @@ fn instance_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
     }
 }
 
+/// Parses the exact `conformance_reports.result` CHECK literal set.
+fn conformance_result_from_state(value: &str) -> Result<String, UnknownStateValue> {
+    match value {
+        "pass" | "fail" => Ok(value.to_owned()),
+        _ => Err(UnknownStateValue {
+            value: value.to_owned(),
+            enum_name: "ConformanceResult",
+        }),
+    }
+}
+
 const SELECT_REGISTRATION: &str = "SELECT adapter_id, version, bundle_digest, manifest_digest, \
      runtime_type, implemented_ports, capabilities, trust_state, conformance_state, created_at_ms \
      FROM adapter_registrations";
@@ -81,7 +92,11 @@ fn decode_conformance_report(row: &SqliteRow) -> errors::Result<ConformanceRepor
         bundle_digest: mapping::text(row, "bundle_digest")?,
         report_digest: mapping::text(row, "report_digest")?,
         harness_version: mapping::text(row, "harness_version")?,
-        result: mapping::text(row, "result")?,
+        result: mapping::decode_state(
+            "conformance_reports.result",
+            &mapping::text(row, "result")?,
+            conformance_result_from_state,
+        )?,
         run_at_ms: mapping::int(row, "run_at_ms")?,
         details: mapping::opt_blob(row, "details")?,
     })

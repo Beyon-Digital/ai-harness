@@ -12,7 +12,6 @@ kernel-store.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
-observability.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true

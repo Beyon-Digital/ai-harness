@@ -9,11 +9,13 @@ use std::path::Path;
 use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
 use domain::ids::{
     ActorId, AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
-    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, EffectId,
-    EventCursor, EventStreamKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId, TaskId,
-    TimerId, TurnId, WorkspaceId,
+    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId,
+    EffectId, EventCursor, EventStreamKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId,
+    TaskId, TimerId, TurnId, WorkspaceId,
 };
-use domain::resource::{LeaseEnforcementState, ReservationState, TimerState, WorkspaceAccessMode};
+use domain::resource::{
+    DependencyCondition, LeaseEnforcementState, ReservationState, TimerState, WorkspaceAccessMode,
+};
 use domain::run::{RecoveryDisposition, RunState};
 use domain::security::{
     ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState,
@@ -23,8 +25,8 @@ use kernel_store::models::{
     AdapterInstanceStatePatch, EffectPatch, LeasePatch, LoopTurnPatch, NewAdapterInstance,
     NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse, NewArtifact,
     NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
-    NewEffect, NewLoopTurn, NewReservation, NewRun, NewSession, NewTask, NewTimer, NewWorkspace,
-    NewWorkspaceLease, ReservationPatch, TimerPatch,
+    NewEffect, NewLoopTurn, NewReservation, NewRun, NewRunDependency, NewSession, NewTask,
+    NewTimer, NewWorkspace, NewWorkspaceLease, ReservationPatch, TimerPatch,
 };
 use kernel_store::{KernelStore, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
@@ -66,6 +68,7 @@ fn cursor(run: RunId) -> EventCursor {
 }
 
 struct Seeded {
+    task: TaskId,
     run: RunId,
 }
 
@@ -112,7 +115,7 @@ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch:
         .await
         .unwrap();
     txn.commit().await.unwrap();
-    Seeded { run }
+    Seeded { task, run }
 }
 
 fn new_exclusive_lease(
@@ -683,6 +686,88 @@ async fn exclusive_lease_index_rejects_second_active_lease() {
 }
 
 #[tokio::test]
+async fn dependency_cycles_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, epoch) = open_store(dir.path()).await;
+    let provider = DeterministicIds::new(1_700_000_000_000);
+    let seeded = seed_run(&store, &provider, epoch).await;
+    let second = RunId::new(&provider);
+    let third = RunId::new(&provider);
+
+    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+    for run in [second, third] {
+        txn.runs()
+            .insert(NewRun {
+                run_id: run,
+                task_id: seeded.task,
+                session_id: None,
+                parent_run_id: None,
+                state: RunState::Created,
+                recovery: RecoveryDisposition::Normal,
+                loop_epoch: 0,
+                step_sequence: 0,
+                input_event_cursor: cursor(run),
+                cancellation_epoch: 0,
+                resolved_environment_id: None,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap();
+    }
+    txn.graph().ensure_head(seeded.task).await.unwrap();
+    let edge = |source: RunId, target: RunId| NewRunDependency {
+        dependency_id: DependencyId::new(&provider),
+        task_id: seeded.task,
+        source_run_id: source,
+        target_run_id: target,
+        dependency_condition: DependencyCondition::CompletedSuccessfully,
+        created_at_ms: 20,
+    };
+    txn.graph()
+        .insert_dependency(edge(seeded.run, second), 0)
+        .await
+        .unwrap();
+    txn.graph()
+        .insert_dependency(edge(second, third), 1)
+        .await
+        .unwrap();
+
+    let back_edge = txn
+        .graph()
+        .insert_dependency(edge(third, seeded.run), 2)
+        .await
+        .unwrap_err();
+    assert_eq!(back_edge.code(), ErrorCode::Conflict);
+    assert_eq!(back_edge.retry_class(), RetryClass::Never);
+    let self_edge = txn
+        .graph()
+        .insert_dependency(edge(seeded.run, seeded.run), 2)
+        .await
+        .unwrap_err();
+    assert_eq!(self_edge.code(), ErrorCode::Conflict);
+    assert_eq!(self_edge.retry_class(), RetryClass::Never);
+
+    let head = txn.graph().get_head(seeded.task).await.unwrap().unwrap();
+    assert_eq!(
+        head.graph_revision, 2,
+        "rejected cycles must not advance the head"
+    );
+    assert_eq!(
+        txn.graph()
+            .list_dependencies(seeded.task)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        !txn.graph().is_reachable(third, seeded.run).await.unwrap(),
+        "the rejected back edge must not be stored"
+    );
+    drop(txn);
+}
+
+#[tokio::test]
 async fn adapter_repo_crud_and_cas_instance_state() {
     let dir = tempfile::tempdir().unwrap();
     let (store, epoch) = open_store(dir.path()).await;
@@ -1022,6 +1107,7 @@ async fn unknown_text_literals_fail_closed() {
     let instance = AdapterInstanceId::new(&provider);
     let valid = ConfigGenerationId::new(&provider);
     let bad_test_state = ConfigGenerationId::new(&provider);
+    let request = ApprovalRequestId::new(&provider);
 
     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
     txn.loop_turns()
@@ -1109,6 +1195,50 @@ async fn unknown_text_literals_fail_closed() {
         })
         .await
         .unwrap();
+    txn.adapters()
+        .insert_conformance_report(NewConformanceReport {
+            adapter_id: adapter,
+            adapter_version: "1.0.0".to_owned(),
+            bundle_digest: "bundle-1".to_owned(),
+            report_digest: "report-1".to_owned(),
+            harness_version: "0.1.0".to_owned(),
+            result: "pass".to_owned(),
+            run_at_ms: 24,
+            details: None,
+        })
+        .await
+        .unwrap();
+    txn.security()
+        .insert_approval_request(NewApprovalRequest {
+            request_id: request,
+            request_digest: "request-digest".to_owned(),
+            principal_id: PrincipalId::new(&provider),
+            actor_id: ActorId::new(&provider),
+            run_id: Some(seeded.run),
+            operation: "write-file".to_owned(),
+            target_resource: None,
+            capability_ids: vec![1],
+            extension_bundle_digest: None,
+            config_generation_digest: None,
+            expires_at_ms: 1_900_000_000_000,
+            nonce: "nonce-1".to_owned(),
+            state: ApprovalState::Pending,
+            created_at_ms: 20,
+            resolved_at_ms: None,
+        })
+        .await
+        .unwrap();
+    txn.security()
+        .insert_approval_response(NewApprovalResponse {
+            request_id: request,
+            request_digest: "request-digest".to_owned(),
+            decision: "approve".to_owned(),
+            device_id: domain::ids::DeviceId::new(&provider),
+            responder_principal_id: PrincipalId::new(&provider),
+            responded_at_ms: 30,
+        })
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
     drop(store);
 
@@ -1128,6 +1258,9 @@ async fn unknown_text_literals_fail_closed() {
         "UPDATE config_generations SET validation_state = 'bogus' WHERE digest = 'digest-valid'",
         "UPDATE config_generations SET test_state = 'bogus' \
          WHERE digest = 'digest-bad-test-state'",
+        "DROP TRIGGER trg_conformance_reports_update",
+        "UPDATE conformance_reports SET result = 'bogus'",
+        "UPDATE approval_responses SET decision = 'bogus'",
     ] {
         sqlx::query(statement).execute(&mut *conn).await.unwrap();
     }
@@ -1156,6 +1289,20 @@ async fn unknown_text_literals_fail_closed() {
         .unwrap_err();
     assert_eq!(test_state_error.code(), ErrorCode::Internal);
     assert_eq!(test_state_error.retry_class(), RetryClass::Never);
+    let report_error = read
+        .adapters()
+        .get_conformance_report(adapter, "1.0.0", "bundle-1")
+        .await
+        .unwrap_err();
+    assert_eq!(report_error.code(), ErrorCode::Internal);
+    assert_eq!(report_error.retry_class(), RetryClass::Never);
+    let response_error = read
+        .security()
+        .list_approval_responses(request)
+        .await
+        .unwrap_err();
+    assert_eq!(response_error.code(), ErrorCode::Internal);
+    assert_eq!(response_error.retry_class(), RetryClass::Never);
     drop(read);
 
     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();

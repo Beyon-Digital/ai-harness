@@ -102,6 +102,29 @@ async fn fetch_head(
     row.as_ref().map(decode_head).transpose()
 }
 
+/// Directed reachability over the persisted dependency edges using the
+/// connection owned by the enclosing transaction.
+async fn is_reachable_on(
+    conn: &mut sqlx::SqliteConnection,
+    from: RunId,
+    to: RunId,
+) -> errors::Result<bool> {
+    let reachable: i64 = sqlx::query_scalar(
+        "WITH RECURSIVE reach(run_id) AS ( \
+           SELECT ?1 \
+           UNION \
+           SELECT dependency.target_run_id FROM run_dependencies dependency \
+           JOIN reach ON dependency.source_run_id = reach.run_id \
+         ) SELECT EXISTS(SELECT 1 FROM reach WHERE run_id = ?2)",
+    )
+    .bind(from.to_string())
+    .bind(to.to_string())
+    .fetch_one(conn)
+    .await
+    .map_err(mapping::from_sqlx)?;
+    Ok(reachable != 0)
+}
+
 #[async_trait]
 impl GraphRead for SqliteGraphRepo {
     async fn get_head(&mut self, task: TaskId) -> errors::Result<Option<RunGraphHeadRow>> {
@@ -126,20 +149,7 @@ impl GraphRead for SqliteGraphRepo {
 
     async fn is_reachable(&mut self, from: RunId, to: RunId) -> errors::Result<bool> {
         let mut guard = self.conn.lock().await;
-        let reachable: i64 = sqlx::query_scalar(
-            "WITH RECURSIVE reach(run_id) AS ( \
-               SELECT ?1 \
-               UNION \
-               SELECT dependency.target_run_id FROM run_dependencies dependency \
-               JOIN reach ON dependency.source_run_id = reach.run_id \
-             ) SELECT EXISTS(SELECT 1 FROM reach WHERE run_id = ?2)",
-        )
-        .bind(from.to_string())
-        .bind(to.to_string())
-        .fetch_one(guard.connection()?)
-        .await
-        .map_err(mapping::from_sqlx)?;
-        Ok(reachable != 0)
+        is_reachable_on(guard.connection()?, from, to).await
     }
 }
 
@@ -197,6 +207,16 @@ impl GraphRepo for SqliteGraphRepo {
                 ErrorCode::Conflict,
                 RetryClass::Never,
                 "graph revision conflict",
+            ));
+        }
+
+        // The new edge closes a cycle exactly when its target already reaches
+        // its source; the check and insert share this immediate transaction.
+        if is_reachable_on(&mut *conn, new.target_run_id, new.source_run_id).await? {
+            return Err(KernelError::new(
+                ErrorCode::Conflict,
+                RetryClass::Never,
+                "dependency would create a cycle",
             ));
         }
 

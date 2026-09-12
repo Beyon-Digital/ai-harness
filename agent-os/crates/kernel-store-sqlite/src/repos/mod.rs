@@ -81,10 +81,3 @@ impl ConnGuard<'_> {
         })
     }
 }
-
-use crate::mapping;
-
-/// The shared fail-closed constructor remains linked through this assertion:
-/// no repository group needs it now that idempotency and streams have SQL
-/// implementations.
-const _: fn(&'static str) -> errors::KernelError = mapping::unavailable;
