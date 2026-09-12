@@ -70,8 +70,8 @@
 
 ### Task CMD-001A: Additive fault-injection seam
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-cmd001a
 - depends_on: CMD-000
 - files: `agent-os/crates/domain/src/faults.rs`, `agent-os/crates/testkit/src/faults.rs`, `agent-os/crates/testkit/tests/prop_faults.rs`
 - requirements: R4.3, R4.4, N2, P2
