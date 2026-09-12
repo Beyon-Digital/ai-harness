@@ -1,0 +1,57 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 78ad07a..d0402f2 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -178,25 +178,30 @@ dependencies = [
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ 
+ [[package]]
+ name = "command-coordinator"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "event-journal",
+  "events",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "config-engine"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+ ]
+ 
+diff --git a/agent-os/crates/command-coordinator/Cargo.toml b/agent-os/crates/command-coordinator/Cargo.toml
+index 67abbba..b627219 100644
+--- a/agent-os/crates/command-coordinator/Cargo.toml
++++ b/agent-os/crates/command-coordinator/Cargo.toml
+@@ -4,10 +4,17 @@ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ event-journal.workspace = true
+ events.workspace = true
+ kernel-store.workspace = true
++async-trait.workspace = true
++
++[dev-dependencies]
++tokio.workspace = true
++testkit.workspace = true
++tempfile.workspace = true
++kernel-store-sqlite.workspace = true

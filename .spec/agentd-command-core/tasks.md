@@ -31,8 +31,8 @@
 
 ### Task CMD-000: Declare command-coordinator dependencies
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-cmd000
 - depends_on: none
 - files: `agent-os/crates/command-coordinator/Cargo.toml`, `agent-os/Cargo.lock`
 - requirements: N3, G1, G2
