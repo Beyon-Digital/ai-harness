@@ -1,0 +1,2033 @@
+diff --git a/agent-os/crates/events/src/lib.rs b/agent-os/crates/events/src/lib.rs
+index fe00bda..aa1ee68 100644
+--- a/agent-os/crates/events/src/lib.rs
++++ b/agent-os/crates/events/src/lib.rs
+@@ -1,2 +1,4 @@
+ //! Event envelope, sequence and cursor helpers, and the live event bus.
+ #![forbid(unsafe_code)]
++
++pub mod outbox;
+diff --git a/agent-os/crates/events/src/outbox.rs b/agent-os/crates/events/src/outbox.rs
+new file mode 100644
+index 0000000..dc3fd0d
+--- /dev/null
++++ b/agent-os/crates/events/src/outbox.rs
+@@ -0,0 +1,145 @@
++//! Transactional outbox staging: allocate a stream position and insert the
++//! immutable outbox row inside the caller's write transaction.
++//!
++//! [`stage`] performs no I/O of its own: it uses the transaction's stream
++//! repository, so the event becomes visible exactly when the causing
++//! transaction commits and disappears with its rollback (R6.1, R6.5, D9).
++//! Allocation is the single conditional statement of D10, which makes the
++//! per-stream sequence structurally contiguous.
++
++use domain::ids::{EventId, EventStreamKey};
++use domain::security::{RetentionClass, SensitivityClass};
++use domain::time::{Clock, SystemClock};
++use kernel_store::KernelTxn;
++use kernel_store::models::NewOutboxEvent;
++
++/// Initial persisted version for events staged through [`stage`].
++const EVENT_VERSION: u32 = 1;
++
++/// Event contents staged into the transactional outbox.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct DraftEvent {
++    /// Stable identity of the event; unique across the outbox.
++    pub event_id: EventId,
++    /// Stream that receives the event.
++    pub stream_key: EventStreamKey,
++    /// Event type name from the contracts.
++    pub event_type: String,
++    /// Serialized event payload; never logged.
++    pub payload: Vec<u8>,
++    /// Sensitivity classification of the payload.
++    pub sensitivity: SensitivityClass,
++    /// Retention class of the payload.
++    pub retention: RetentionClass,
++    /// Optional correlation identifier linking related events.
++    pub correlation_id: Option<String>,
++    /// Optional event that directly caused this one.
++    pub causation_id: Option<EventId>,
++}
++
++impl DraftEvent {
++    /// Projects the draft onto the immutable outbox insert model.
++    fn into_new(self, sequence: u64, occurred_at_ms: i64) -> NewOutboxEvent {
++        NewOutboxEvent {
++            event_id: self.event_id,
++            event_type: self.event_type,
++            event_version: EVENT_VERSION,
++            stream_key: self.stream_key,
++            sequence,
++            occurred_at_ms,
++            run_id: None,
++            task_id: None,
++            session_id: None,
++            effect_id: None,
++            causation_id: self.causation_id,
++            correlation_id: self.correlation_id,
++            sensitivity: self.sensitivity,
++            retention: self.retention,
++            payload: self.payload,
++        }
++    }
++}
++
++/// Allocates the next sequence for `draft`'s stream and inserts its immutable
++/// outbox row in `txn`, returning the allocated sequence.
++pub async fn stage(txn: &mut dyn KernelTxn, draft: DraftEvent) -> errors::Result<u64> {
++    stage_at(txn, draft, SystemClock.now_unix_ms()).await
++}
++
++async fn stage_at(
++    txn: &mut dyn KernelTxn,
++    draft: DraftEvent,
++    occurred_at_ms: i64,
++) -> errors::Result<u64> {
++    let streams = txn.streams();
++    let sequence = streams.allocate(draft.stream_key.clone()).await?;
++    streams
++        .insert_outbox(draft.into_new(sequence, occurred_at_ms))
++        .await?;
++    Ok(sequence)
++}
++
++#[cfg(test)]
++mod tests {
++    use std::str::FromStr;
++
++    use domain::ids::{EventId, EventStreamKey};
++    use domain::security::{RetentionClass, SensitivityClass};
++
++    use super::DraftEvent;
++
++    fn event_id(text: &str) -> EventId {
++        match EventId::from_str(text) {
++            Ok(id) => id,
++            Err(error) => panic!("event id rejected: {error}"),
++        }
++    }
++
++    fn stream_key(text: &str) -> EventStreamKey {
++        match EventStreamKey::new(text) {
++            Ok(key) => key,
++            Err(error) => panic!("stream key rejected: {error}"),
++        }
++    }
++
++    #[test]
++    fn draft_projects_onto_the_immutable_outbox_row() {
++        let draft = DraftEvent {
++            event_id: event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70"),
++            stream_key: stream_key("run/018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70"),
++            event_type: "run.created".to_owned(),
++            payload: vec![0x07, 0x08],
++            sensitivity: SensitivityClass::Private,
++            retention: RetentionClass::Durable,
++            correlation_id: Some("corr-1".to_owned()),
++            causation_id: Some(event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71")),
++        };
++
++        let event = draft.into_new(7, 1_700_000_000_042);
++
++        assert_eq!(
++            event.event_id,
++            event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70")
++        );
++        assert_eq!(event.event_type, "run.created");
++        assert_eq!(event.event_version, 1);
++        assert_eq!(
++            event.stream_key,
++            stream_key("run/018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70")
++        );
++        assert_eq!(event.sequence, 7);
++        assert_eq!(event.occurred_at_ms, 1_700_000_000_042);
++        assert_eq!(event.sensitivity, SensitivityClass::Private);
++        assert_eq!(event.retention, RetentionClass::Durable);
++        assert_eq!(event.correlation_id.as_deref(), Some("corr-1"));
++        assert_eq!(
++            event.causation_id,
++            Some(event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71"))
++        );
++        assert_eq!(event.payload, vec![0x07, 0x08]);
++        assert!(event.run_id.is_none());
++        assert!(event.task_id.is_none());
++        assert!(event.session_id.is_none());
++        assert!(event.effect_id.is_none());
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs b/agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs
+new file mode 100644
+index 0000000..5f808fa
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs
+@@ -0,0 +1,93 @@
++//! Idempotency repository: scoped replay lookup and insert over
++//! `idempotency_records` (R5.1-R5.4).
++//!
++//! The unique `(principal_id, idempotency_key)` primary key is the single
++//! authority for replay safety: a second insert for the same key is rejected
++//! by the storage constraint and maps to `Conflict` (D5), with no pre-check
++//! race between a lookup and the insert.
++
++use async_trait::async_trait;
++use domain::ids::{IdempotencyKey, PrincipalId};
++use kernel_store::models::{IdempotencyRecordRow, NewIdempotencyRecord};
++use kernel_store::repositories::IdempotencyRepo;
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `idempotency_records` table.
++pub(crate) struct SqliteIdempotencyRepo {
++    conn: SharedConn,
++}
++
++impl SqliteIdempotencyRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_record(row: &SqliteRow) -> errors::Result<IdempotencyRecordRow> {
++    Ok(IdempotencyRecordRow {
++        principal_id: mapping::decode_id(
++            "idempotency_records.principal_id",
++            &mapping::text(row, "principal_id")?,
++        )?,
++        idempotency_key: mapping::decode_id(
++            "idempotency_records.idempotency_key",
++            &mapping::text(row, "idempotency_key")?,
++        )?,
++        request_digest: mapping::text(row, "request_digest")?,
++        command_id: mapping::decode_id(
++            "idempotency_records.command_id",
++            &mapping::text(row, "command_id")?,
++        )?,
++        outcome_code: mapping::text(row, "outcome_code")?,
++        outcome_payload: mapping::blob(row, "outcome_payload")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl IdempotencyRepo for SqliteIdempotencyRepo {
++    async fn lookup(
++        &mut self,
++        principal: PrincipalId,
++        key: &IdempotencyKey,
++    ) -> errors::Result<Option<IdempotencyRecordRow>> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        let row = sqlx::query(
++            "SELECT principal_id, idempotency_key, request_digest, command_id, \
++             outcome_code, outcome_payload, created_at_ms FROM idempotency_records \
++             WHERE principal_id = ?1 AND idempotency_key = ?2",
++        )
++        .bind(principal.to_string())
++        .bind(key.as_str())
++        .fetch_optional(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        row.as_ref().map(decode_record).transpose()
++    }
++
++    async fn insert(&mut self, record: NewIdempotencyRecord) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        sqlx::query(
++            "INSERT INTO idempotency_records (principal_id, idempotency_key, \
++             request_digest, command_id, outcome_code, outcome_payload, created_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
++        )
++        .bind(record.principal_id.to_string())
++        .bind(record.idempotency_key.as_str())
++        .bind(record.request_digest)
++        .bind(record.command_id.to_string())
++        .bind(record.outcome_code)
++        .bind(record.outcome_payload)
++        .bind(record.created_at_ms)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+index 72a3bfe..eb98e63 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+@@ -1,41 +1,37 @@
+ //! Repository implementations over a shared SQLite connection.
+ //!
+ //! The groups implemented by the SQLite store are [`adapters`], [`artifacts`],
+-//! [`config`], [`effects`], [`environments`], [`graph`], [`loop_turns`],
+-//! [`resources`], [`runs`], [`security`], [`sessions`], [`tasks`], [`timers`],
+-//! and [`workspaces`]; each repository view shares the connection owned by its
+-//! transaction through [`SharedConn`].
+-//!
+-//! [`UnavailableRepo`] stands in for the idempotency and stream groups whose
+-//! SQL implementations arrive with PST-005. Every operation on it fails closed
+-//! with `FailedPrecondition`/`Never`, so a caller can never observe fabricated
+-//! rows.
++//! [`config`], [`effects`], [`environments`], [`graph`], [`idempotency`],
++//! [`loop_turns`], [`resources`], [`runs`], [`security`], [`sessions`],
++//! [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each repository
++//! view shares the connection owned by its transaction through [`SharedConn`].
+ 
+ pub(crate) mod adapters;
+ pub(crate) mod artifacts;
+ pub(crate) mod config;
+ pub(crate) mod effects;
+ pub(crate) mod environments;
+ pub(crate) mod graph;
++pub(crate) mod idempotency;
+ pub(crate) mod loop_turns;
+ pub(crate) mod resources;
+ pub(crate) mod runs;
+ pub(crate) mod security;
+ pub(crate) mod sessions;
++pub(crate) mod streams;
+ pub(crate) mod tasks;
+ pub(crate) mod timers;
+ pub(crate) mod workspaces;
+ 
+ use std::sync::Arc;
+ 
+-use domain::ids::*;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use sqlx::Sqlite;
+ use sqlx::pool::PoolConnection;
+ use sqlx::sqlite::SqliteConnection;
+ 
+ /// Shared handle to the write connection owned by a write transaction.
+ pub(crate) type WriteConn = Arc<tokio::sync::Mutex<Option<sqlx::Transaction<'static, Sqlite>>>>;
+ 
+ /// Shared handle to the read connection owned by a read transaction.
+@@ -79,56 +75,16 @@ impl ConnGuard<'_> {
+         .ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::FailedPrecondition,
+                 RetryClass::Never,
+                 "transaction connection is already finished",
+             )
+         })
+     }
+ }
+ 
+-/// Repository view for groups without a SQL implementation in this store.
+-#[derive(Clone, Copy, Debug, Default)]
+-pub(crate) struct UnavailableRepo;
+-
+-use kernel_store::models::*;
+-use kernel_store::repositories::*;
+-
+ use crate::mapping;
+ 
+-macro_rules! unavailable_repo {
+-    ($($trait_name:ident { $(async fn $method:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?) -> errors::Result<$out:ty>;)* })*) => {
+-        $(
+-            #[async_trait::async_trait]
+-            impl $trait_name for UnavailableRepo {
+-                $(
+-                    async fn $method(&mut self $(, $arg: $ty)*) -> errors::Result<$out> {
+-                        $(let _ = $arg;)*
+-                        Err(mapping::unavailable(stringify!($trait_name)))
+-                    }
+-                )*
+-            }
+-        )*
+-    };
+-}
+-
+-unavailable_repo! {
+-    IdempotencyRepo {
+-        async fn lookup(
+-            &mut self,
+-            principal: PrincipalId,
+-            key: &IdempotencyKey,
+-        ) -> errors::Result<Option<IdempotencyRecordRow>>;
+-        async fn insert(&mut self, record: NewIdempotencyRecord) -> errors::Result<()>;
+-    }
+-    StreamRepo {
+-        async fn allocate(&mut self, stream_key: EventStreamKey) -> errors::Result<u64>;
+-        async fn insert_outbox(&mut self, event: NewOutboxEvent) -> errors::Result<()>;
+-        async fn scan_unpublished(&mut self, limit: u32)
+-            -> errors::Result<Vec<OutboxEventRow>>;
+-        async fn mark_published(
+-            &mut self,
+-            event_id: EventId,
+-            kind: PublishKind,
+-        ) -> errors::Result<()>;
+-    }
+-}
++/// The shared fail-closed constructor remains linked through this assertion:
++/// no repository group needs it now that idempotency and streams have SQL
++/// implementations.
++const _: fn(&'static str) -> errors::KernelError = mapping::unavailable;
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/streams.rs b/agent-os/crates/kernel-store-sqlite/src/repos/streams.rs
+new file mode 100644
+index 0000000..ff65d39
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/streams.rs
+@@ -0,0 +1,183 @@
++//! Stream and outbox repository: structural sequence allocation, immutable
++//! outbox insertion, ordered unpublished scans, and publication metadata
++//! updates (R6.1-R6.5).
++//!
++//! Allocation is a single conditional statement per event (D10): the UPSERT
++//! either creates the head at `1` or increments it, and `RETURNING` yields the
++//! allocated value, so a gap or duplicate is impossible even under concurrent
++//! writers serialized by `BEGIN IMMEDIATE`.
++
++use async_trait::async_trait;
++use domain::ids::{EventId, EventStreamKey};
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{NewOutboxEvent, OutboxEventRow};
++use kernel_store::repositories::{PublishKind, StreamRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over `event_stream_heads` and `outbox_events`.
++pub(crate) struct SqliteStreamRepo {
++    conn: SharedConn,
++}
++
++impl SqliteStreamRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_event(row: &SqliteRow) -> errors::Result<OutboxEventRow> {
++    let event_version = mapping::int(row, "event_version")?;
++    Ok(OutboxEventRow {
++        event_id: mapping::decode_id("outbox_events.event_id", &mapping::text(row, "event_id")?)?,
++        event_type: mapping::text(row, "event_type")?,
++        event_version: u32::try_from(event_version).map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "outbox_events.event_version is out of range",
++            )
++        })?,
++        stream_key: mapping::decode_id(
++            "outbox_events.stream_key",
++            &mapping::text(row, "stream_key")?,
++        )?,
++        sequence: mapping::decode_u64("outbox_events.sequence", mapping::int(row, "sequence")?)?,
++        occurred_at_ms: mapping::int(row, "occurred_at_ms")?,
++        run_id: mapping::decode_opt_id("outbox_events.run_id", mapping::opt_text(row, "run_id")?)?,
++        task_id: mapping::decode_opt_id(
++            "outbox_events.task_id",
++            mapping::opt_text(row, "task_id")?,
++        )?,
++        session_id: mapping::decode_opt_id(
++            "outbox_events.session_id",
++            mapping::opt_text(row, "session_id")?,
++        )?,
++        effect_id: mapping::decode_opt_id(
++            "outbox_events.effect_id",
++            mapping::opt_text(row, "effect_id")?,
++        )?,
++        causation_id: mapping::decode_opt_id(
++            "outbox_events.causation_id",
++            mapping::opt_text(row, "causation_id")?,
++        )?,
++        correlation_id: mapping::opt_text(row, "correlation_id")?,
++        sensitivity: mapping::decode_wire(
++            "outbox_events.sensitivity",
++            mapping::int(row, "sensitivity")?,
++            SensitivityClass::from_wire,
++        )?,
++        retention: mapping::decode_wire(
++            "outbox_events.retention",
++            mapping::int(row, "retention")?,
++            RetentionClass::from_wire,
++        )?,
++        payload: mapping::blob(row, "payload")?,
++        journal_published_at_ms: mapping::opt_int(row, "journal_published_at_ms")?,
++        live_published_at_ms: mapping::opt_int(row, "live_published_at_ms")?,
++    })
++}
++
++#[async_trait]
++impl StreamRepo for SqliteStreamRepo {
++    async fn allocate(&mut self, stream_key: EventStreamKey) -> errors::Result<u64> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        let row = sqlx::query(
++            "INSERT INTO event_stream_heads (stream_key, last_sequence) VALUES (?1, 1) \
++             ON CONFLICT(stream_key) DO UPDATE SET last_sequence = last_sequence + 1 \
++             RETURNING last_sequence",
++        )
++        .bind(stream_key.as_str())
++        .fetch_one(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        mapping::decode_u64(
++            "event_stream_heads.last_sequence",
++            mapping::int(&row, "last_sequence")?,
++        )
++    }
++
++    async fn insert_outbox(&mut self, event: NewOutboxEvent) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        sqlx::query(
++            "INSERT INTO outbox_events (event_id, event_type, event_version, stream_key, \
++             sequence, occurred_at_ms, run_id, task_id, session_id, effect_id, causation_id, \
++             correlation_id, sensitivity, retention, payload) \
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
++        )
++        .bind(event.event_id.to_string())
++        .bind(event.event_type)
++        .bind(i64::from(event.event_version))
++        .bind(event.stream_key.as_str())
++        .bind(mapping::encode_u64(
++            "outbox_events.sequence",
++            event.sequence,
++        )?)
++        .bind(event.occurred_at_ms)
++        .bind(event.run_id.map(|id| id.to_string()))
++        .bind(event.task_id.map(|id| id.to_string()))
++        .bind(event.session_id.map(|id| id.to_string()))
++        .bind(event.effect_id.map(|id| id.to_string()))
++        .bind(event.causation_id.map(|id| id.to_string()))
++        .bind(event.correlation_id)
++        .bind(i64::from(event.sensitivity.to_wire()))
++        .bind(i64::from(event.retention.to_wire()))
++        .bind(event.payload)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++
++    async fn scan_unpublished(&mut self, limit: u32) -> errors::Result<Vec<OutboxEventRow>> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        let rows = sqlx::query(
++            "SELECT event_id, event_type, event_version, stream_key, sequence, \
++             occurred_at_ms, run_id, task_id, session_id, effect_id, causation_id, \
++             correlation_id, sensitivity, retention, payload, journal_published_at_ms, \
++             live_published_at_ms FROM outbox_events WHERE journal_published_at_ms IS NULL \
++             ORDER BY stream_key, sequence LIMIT ?1",
++        )
++        .bind(i64::from(limit))
++        .fetch_all(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_event).collect()
++    }
++
++    async fn mark_published(&mut self, event_id: EventId, kind: PublishKind) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        let published_at_ms = mapping::unix_ms_now()?;
++        let statement = match kind {
++            PublishKind::Journal => {
++                "UPDATE outbox_events SET journal_published_at_ms = ?1 WHERE event_id = ?2"
++            }
++            PublishKind::Live => {
++                "UPDATE outbox_events SET live_published_at_ms = ?1 WHERE event_id = ?2"
++            }
++        };
++        let result = sqlx::query(statement)
++            .bind(published_at_ms)
++            .bind(event_id.to_string())
++            .execute(conn)
++            .await
++            .map_err(mapping::from_sqlx)?;
++        if result.rows_affected() == 0 {
++            return Err(KernelError::new(
++                ErrorCode::NotFound,
++                RetryClass::Never,
++                "outbox event not found",
++            ));
++        }
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/txn.rs b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+index f78c7c1..33a3185 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/txn.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+@@ -17,47 +17,48 @@ use domain::ids::DaemonInstanceId;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ use sqlx::Sqlite;
+ 
+ use crate::SqliteKernelStore;
+ use crate::mapping;
+ use crate::repos::{
+-    ReadConn, SharedConn, UnavailableRepo, WriteConn, adapters::SqliteAdapterRepo,
+-    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
+-    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo, loop_turns::SqliteLoopRepo,
++    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, artifacts::SqliteArtifactRepo,
++    config::SqliteConfigRepo, effects::SqliteEffectRepo, environments::SqliteEnvironmentRepo,
++    graph::SqliteGraphRepo, idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo,
+     resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
+-    sessions::SqliteSessionRepo, tasks::SqliteTaskRepo, timers::SqliteTimerRepo,
+-    workspaces::SqliteWorkspaceRepo,
++    sessions::SqliteSessionRepo, streams::SqliteStreamRepo, tasks::SqliteTaskRepo,
++    timers::SqliteTimerRepo, workspaces::SqliteWorkspaceRepo,
+ };
+ 
+ /// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
+ pub(crate) struct SqliteWriteTxn {
+     ctx: TxContext,
+     conn: WriteConn,
+     runs: SqliteRunRepo,
+     tasks: SqliteTaskRepo,
+     sessions: SqliteSessionRepo,
+     graph: SqliteGraphRepo,
+     environments: SqliteEnvironmentRepo,
+     effects: SqliteEffectRepo,
+     resources: SqliteResourceRepo,
+     timers: SqliteTimerRepo,
+     security: SqliteSecurityRepo,
+     config: SqliteConfigRepo,
+     workspaces: SqliteWorkspaceRepo,
+     adapters: SqliteAdapterRepo,
+     artifacts: SqliteArtifactRepo,
+     loop_turns: SqliteLoopRepo,
+-    unavailable: UnavailableRepo,
++    idempotency: SqliteIdempotencyRepo,
++    streams: SqliteStreamRepo,
+ }
+ 
+ impl SqliteWriteTxn {
+     fn new(ctx: TxContext, txn: sqlx::Transaction<'static, Sqlite>) -> Self {
+         let conn: WriteConn = Arc::new(tokio::sync::Mutex::new(Some(txn)));
+         let shared = SharedConn::Write(conn.clone());
+         Self {
+             ctx,
+             conn,
+             runs: SqliteRunRepo::new(shared.clone()),
+@@ -66,22 +67,23 @@ impl SqliteWriteTxn {
+             graph: SqliteGraphRepo::new(shared.clone()),
+             environments: SqliteEnvironmentRepo::new(shared.clone()),
+             effects: SqliteEffectRepo::new(shared.clone()),
+             resources: SqliteResourceRepo::new(shared.clone()),
+             timers: SqliteTimerRepo::new(shared.clone()),
+             security: SqliteSecurityRepo::new(shared.clone()),
+             config: SqliteConfigRepo::new(shared.clone()),
+             workspaces: SqliteWorkspaceRepo::new(shared.clone()),
+             adapters: SqliteAdapterRepo::new(shared.clone()),
+             artifacts: SqliteArtifactRepo::new(shared.clone()),
+-            loop_turns: SqliteLoopRepo::new(shared),
+-            unavailable: UnavailableRepo,
++            loop_turns: SqliteLoopRepo::new(shared.clone()),
++            idempotency: SqliteIdempotencyRepo::new(shared.clone()),
++            streams: SqliteStreamRepo::new(shared),
+         }
+     }
+ 
+     async fn take(&self) -> errors::Result<sqlx::Transaction<'static, Sqlite>> {
+         let mut guard = self.conn.lock().await;
+         guard.take().ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::FailedPrecondition,
+                 RetryClass::Never,
+                 "write transaction is already finished",
+@@ -146,25 +148,25 @@ impl KernelTxn for SqliteWriteTxn {
+ 
+     fn artifacts(&mut self) -> &mut dyn ArtifactRepo {
+         &mut self.artifacts
+     }
+ 
+     fn loop_turns(&mut self) -> &mut dyn LoopRepo {
+         &mut self.loop_turns
+     }
+ 
+     fn idempotency(&mut self) -> &mut dyn IdempotencyRepo {
+-        &mut self.unavailable
++        &mut self.idempotency
+     }
+ 
+     fn streams(&mut self) -> &mut dyn StreamRepo {
+-        &mut self.unavailable
++        &mut self.streams
+     }
+ 
+     async fn commit(self: Box<Self>) -> errors::Result<()> {
+         let txn = self.take().await?;
+         txn.commit().await.map_err(mapping::from_sqlx)
+     }
+ 
+     async fn rollback(self: Box<Self>) -> errors::Result<()> {
+         let txn = self.take().await?;
+         txn.rollback().await.map_err(mapping::from_sqlx)
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/idempotency.rs b/agent-os/crates/kernel-store-sqlite/tests/idempotency.rs
+new file mode 100644
+index 0000000..bcf9647
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/idempotency.rs
+@@ -0,0 +1,356 @@
++//! Idempotency records: transactional replay lookup, same-digest replay,
++//! digest conflicts, and exactly one insert under concurrent identical
++//! submissions (R5.1-R5.5, P4).
++
++use std::path::Path;
++use std::sync::Arc;
++
++use domain::ids::{CommandId, DaemonInstanceId, IdempotencyKey, PrincipalId};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::NewIdempotencyRecord;
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
++use testkit::ids::DeterministicIds;
++use tokio::sync::Barrier;
++
++const DB_FILE: &str = "kernel.db";
++const SEED_MS: i64 = 1_700_000_000_000;
++
++fn config(db_path: &Path, pool_max_connections: u32) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path, pool_max_connections: u32) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE), pool_max_connections))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(SEED_MS);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn key(text: &str) -> IdempotencyKey {
++    match IdempotencyKey::new(text) {
++        Ok(key) => key,
++        Err(error) => panic!("idempotency key rejected: {error}"),
++    }
++}
++
++fn record(
++    provider: &DeterministicIds,
++    principal: PrincipalId,
++    idempotency_key: &IdempotencyKey,
++    digest: &str,
++    outcome_code: &str,
++) -> NewIdempotencyRecord {
++    NewIdempotencyRecord {
++        principal_id: principal,
++        idempotency_key: idempotency_key.clone(),
++        request_digest: digest.to_owned(),
++        command_id: CommandId::new(provider),
++        outcome_code: outcome_code.to_owned(),
++        outcome_payload: vec![0x01, 0x02, 0x03],
++        created_at_ms: SEED_MS,
++    }
++}
++
++async fn row_count(db_path: &Path) -> i64 {
++    let options = SqliteConnectOptions::new()
++        .filename(db_path)
++        .create_if_missing(false);
++    let pool = SqlitePoolOptions::new()
++        .max_connections(1)
++        .connect_with(options)
++        .await
++        .unwrap();
++    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_records")
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++    count
++}
++
++#[tokio::test]
++async fn insert_then_lookup_returns_the_stored_record() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), 4).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let principal = PrincipalId::new(&provider);
++    let idempotency_key = key("command-1");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.idempotency()
++        .insert(record(
++            &provider,
++            principal,
++            &idempotency_key,
++            "digest-1",
++            "ok",
++        ))
++        .await
++        .unwrap();
++    let stored = txn
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("record visible inside its own transaction");
++    txn.commit().await.unwrap();
++
++    assert_eq!(stored.principal_id, principal);
++    assert_eq!(stored.idempotency_key, idempotency_key);
++    assert_eq!(stored.request_digest, "digest-1");
++    assert_eq!(stored.outcome_code, "ok");
++    assert_eq!(stored.outcome_payload, vec![0x01, 0x02, 0x03]);
++    assert_eq!(stored.created_at_ms, SEED_MS);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let replayed = txn
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("committed record visible");
++    txn.commit().await.unwrap();
++    assert_eq!(replayed, stored);
++}
++
++#[tokio::test]
++async fn lookup_inside_a_rolled_back_transaction_leaves_no_record() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), 4).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let principal = PrincipalId::new(&provider);
++    let idempotency_key = key("command-2");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.idempotency()
++        .insert(record(
++            &provider,
++            principal,
++            &idempotency_key,
++            "digest-1",
++            "ok",
++        ))
++        .await
++        .unwrap();
++    assert!(
++        txn.idempotency()
++            .lookup(principal, &idempotency_key)
++            .await
++            .unwrap()
++            .is_some(),
++        "record visible before rollback"
++    );
++    txn.rollback().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert!(
++        txn.idempotency()
++            .lookup(principal, &idempotency_key)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    txn.commit().await.unwrap();
++    assert_eq!(row_count(&dir.path().join(DB_FILE)).await, 0);
++}
++
++#[tokio::test]
++async fn replaying_the_same_digest_returns_the_unchanged_outcome() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), 4).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let principal = PrincipalId::new(&provider);
++    let idempotency_key = key("command-3");
++    let original = record(
++        &provider,
++        principal,
++        &idempotency_key,
++        "digest-1",
++        "created",
++    );
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.idempotency().insert(original.clone()).await.unwrap();
++    txn.commit().await.unwrap();
++
++    let mut replay = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let stored = replay
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("a replay finds the stored record");
++    assert_eq!(stored.request_digest, original.request_digest);
++    assert_eq!(stored.outcome_code, original.outcome_code);
++    assert_eq!(stored.outcome_payload, original.outcome_payload);
++    assert_eq!(stored.created_at_ms, original.created_at_ms);
++    replay.commit().await.unwrap();
++
++    assert_eq!(
++        row_count(&dir.path().join(DB_FILE)).await,
++        1,
++        "the replay must not insert a second row"
++    );
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let error = txn
++        .idempotency()
++        .insert(original.clone())
++        .await
++        .expect_err("a blind duplicate insert is rejected by the unique key");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    let stored = txn
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("the conflicting insert leaves the stored record untouched");
++    txn.rollback().await.unwrap();
++
++    assert_eq!(stored.request_digest, original.request_digest);
++    assert_eq!(stored.outcome_code, original.outcome_code);
++    assert_eq!(stored.outcome_payload, original.outcome_payload);
++    assert_eq!(stored.command_id, original.command_id);
++    assert_eq!(stored.created_at_ms, original.created_at_ms);
++    assert_eq!(row_count(&dir.path().join(DB_FILE)).await, 1);
++}
++
++#[tokio::test]
++async fn same_key_with_a_different_digest_conflicts() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), 4).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let principal = PrincipalId::new(&provider);
++    let idempotency_key = key("command-4");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.idempotency()
++        .insert(record(
++            &provider,
++            principal,
++            &idempotency_key,
++            "digest-1",
++            "ok",
++        ))
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let error = txn
++        .idempotency()
++        .insert(record(
++            &provider,
++            principal,
++            &idempotency_key,
++            "digest-2",
++            "ok",
++        ))
++        .await
++        .expect_err("a different digest must conflict");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    let stored = txn
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("original record survives the conflict");
++    txn.commit().await.unwrap();
++
++    assert_eq!(stored.request_digest, "digest-1");
++    assert_eq!(row_count(&dir.path().join(DB_FILE)).await, 1);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn concurrent_identical_submissions_produce_one_row() {
++    const SUBMISSIONS: usize = 6;
++
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), SUBMISSIONS as u32 + 2).await;
++    let store = Arc::new(store);
++    let provider = Arc::new(DeterministicIds::new(SEED_MS));
++    let principal = PrincipalId::new(provider.as_ref());
++    let idempotency_key = key("command-5");
++
++    let barrier = Arc::new(Barrier::new(SUBMISSIONS));
++    let mut handles = Vec::new();
++    for _ in 0..SUBMISSIONS {
++        let store = Arc::clone(&store);
++        let provider = Arc::clone(&provider);
++        let barrier = Arc::clone(&barrier);
++        let idempotency_key = idempotency_key.clone();
++        handles.push(tokio::spawn(async move {
++            barrier.wait().await;
++            let ctx = TxContext {
++                daemon_epoch: epoch,
++                principal_id: PrincipalId::new(provider.as_ref()),
++                command_id: CommandId::new(provider.as_ref()),
++                correlation_id: None,
++            };
++            let mut txn = store.begin_write(ctx).await.unwrap();
++            let replayed = txn
++                .idempotency()
++                .lookup(principal, &idempotency_key)
++                .await
++                .unwrap()
++                .is_some();
++            if !replayed {
++                txn.idempotency()
++                    .insert(record(
++                        provider.as_ref(),
++                        principal,
++                        &idempotency_key,
++                        "digest-1",
++                        "ok",
++                    ))
++                    .await
++                    .unwrap();
++            }
++            txn.commit().await.unwrap();
++            replayed
++        }));
++    }
++
++    let mut inserts = 0;
++    for handle in handles {
++        if !handle.await.unwrap() {
++            inserts += 1;
++        }
++    }
++    assert_eq!(inserts, 1, "exactly one racing submission may insert");
++    assert_eq!(row_count(&dir.path().join(DB_FILE)).await, 1);
++
++    let mut txn = store
++        .begin_write(context(provider.as_ref(), epoch))
++        .await
++        .unwrap();
++    let stored = txn
++        .idempotency()
++        .lookup(principal, &idempotency_key)
++        .await
++        .unwrap()
++        .expect("winning record");
++    txn.commit().await.unwrap();
++    assert_eq!(stored.request_digest, "digest-1");
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/outbox.rs b/agent-os/crates/kernel-store-sqlite/tests/outbox.rs
+new file mode 100644
+index 0000000..06ec9bf
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/outbox.rs
+@@ -0,0 +1,368 @@
++//! Transactional outbox: contiguous in-transaction allocation, unique event
++//! identities and stream positions, ordered unpublished scans, publication
++//! metadata updates, immutability, and commit/rollback visibility
++//! (R6.1-R6.3, R6.5).
++
++use std::path::Path;
++
++use domain::ids::{CommandId, DaemonInstanceId, EventId, EventStreamKey, PrincipalId};
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::NewOutboxEvent;
++use kernel_store::repositories::PublishKind;
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use sqlx::Sqlite;
++use sqlx::pool::PoolConnection;
++use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
++use testkit::ids::DeterministicIds;
++
++const DB_FILE: &str = "kernel.db";
++const SEED_MS: i64 = 1_700_000_000_000;
++
++fn config(db_path: &Path) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections: 8,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE)))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(SEED_MS);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++async fn direct_connection(db_path: &Path) -> PoolConnection<Sqlite> {
++    let options = SqliteConnectOptions::new()
++        .filename(db_path)
++        .create_if_missing(false);
++    SqlitePoolOptions::new()
++        .max_connections(1)
++        .connect_with(options)
++        .await
++        .unwrap()
++        .acquire()
++        .await
++        .unwrap()
++}
++
++async fn direct_count(db_path: &Path) -> i64 {
++    let mut connection = direct_connection(db_path).await;
++    sqlx::query_scalar("SELECT COUNT(*) FROM outbox_events")
++        .fetch_one(&mut *connection)
++        .await
++        .unwrap()
++}
++
++fn stream(key: &str) -> EventStreamKey {
++    match EventStreamKey::new(key) {
++        Ok(stream) => stream,
++        Err(error) => panic!("stream key rejected: {error}"),
++    }
++}
++
++fn event(
++    provider: &DeterministicIds,
++    stream_key: &EventStreamKey,
++    sequence: u64,
++) -> NewOutboxEvent {
++    NewOutboxEvent {
++        event_id: EventId::new(provider),
++        event_type: "run.created".to_owned(),
++        event_version: 1,
++        stream_key: stream_key.clone(),
++        sequence,
++        occurred_at_ms: SEED_MS,
++        run_id: None,
++        task_id: None,
++        session_id: None,
++        effect_id: None,
++        causation_id: None,
++        correlation_id: Some("corr-1".to_owned()),
++        sensitivity: SensitivityClass::Internal,
++        retention: RetentionClass::Audit,
++        payload: vec![0x07],
++    }
++}
++
++#[tokio::test]
++async fn allocate_returns_contiguous_sequences_per_stream() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let left = stream("run/left");
++    let right = stream("run/right");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert_eq!(txn.streams().allocate(left.clone()).await.unwrap(), 1);
++    assert_eq!(txn.streams().allocate(right.clone()).await.unwrap(), 1);
++    assert_eq!(txn.streams().allocate(left.clone()).await.unwrap(), 2);
++    assert_eq!(txn.streams().allocate(left.clone()).await.unwrap(), 3);
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert_eq!(txn.streams().allocate(left).await.unwrap(), 4);
++    assert_eq!(txn.streams().allocate(right).await.unwrap(), 2);
++    txn.commit().await.unwrap();
++}
++
++#[tokio::test]
++async fn duplicate_event_id_is_rejected() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let stream_key = stream("run/duplicate");
++
++    let first = event(&provider, &stream_key, 1);
++    let duplicate_id = first.event_id;
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.streams().insert_outbox(first).await.unwrap();
++    txn.commit().await.unwrap();
++
++    let mut second = event(&provider, &stream_key, 2);
++    second.event_id = duplicate_id;
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let error = txn
++        .streams()
++        .insert_outbox(second)
++        .await
++        .expect_err("a duplicate event id must conflict");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    txn.rollback().await.unwrap();
++    assert_eq!(direct_count(&dir.path().join(DB_FILE)).await, 1);
++}
++
++#[tokio::test]
++async fn duplicate_stream_sequence_is_rejected() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let stream_key = stream("run/position");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.streams()
++        .insert_outbox(event(&provider, &stream_key, 1))
++        .await
++        .unwrap();
++    let error = txn
++        .streams()
++        .insert_outbox(event(&provider, &stream_key, 1))
++        .await
++        .expect_err("a duplicate stream position must conflict");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    txn.rollback().await.unwrap();
++    assert_eq!(direct_count(&dir.path().join(DB_FILE)).await, 0);
++}
++
++#[tokio::test]
++async fn scan_unpublished_is_ordered_and_honors_the_limit() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let alpha = stream("run/alpha");
++    let beta = stream("run/beta");
++    let gamma = stream("run/gamma");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let beta_one = event(&provider, &beta, 1);
++    let alpha_two = event(&provider, &alpha, 2);
++    let alpha_one = event(&provider, &alpha, 1);
++    let gamma_one = event(&provider, &gamma, 1);
++    for row in [&beta_one, &alpha_two, &alpha_one, &gamma_one] {
++        txn.streams().insert_outbox(row.clone()).await.unwrap();
++    }
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let scanned = txn.streams().scan_unpublished(10).await.unwrap();
++    let ids: Vec<EventId> = scanned.iter().map(|row| row.event_id).collect();
++    assert_eq!(
++        ids,
++        vec![
++            alpha_one.event_id,
++            alpha_two.event_id,
++            beta_one.event_id,
++            gamma_one.event_id
++        ]
++    );
++    assert_eq!(scanned[0].sequence, 1);
++    assert_eq!(scanned[1].sequence, 2);
++    assert!(
++        scanned
++            .iter()
++            .all(|row| row.journal_published_at_ms.is_none())
++    );
++
++    let limited = txn.streams().scan_unpublished(2).await.unwrap();
++    let limited_ids: Vec<EventId> = limited.iter().map(|row| row.event_id).collect();
++    assert_eq!(limited_ids, vec![alpha_one.event_id, alpha_two.event_id]);
++    txn.rollback().await.unwrap();
++}
++
++#[tokio::test]
++async fn mark_published_updates_only_the_selected_marker() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let stream_key = stream("run/markers");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let journal = event(&provider, &stream_key, 1);
++    let live = event(&provider, &stream_key, 2);
++    txn.streams().insert_outbox(journal.clone()).await.unwrap();
++    txn.streams().insert_outbox(live.clone()).await.unwrap();
++    txn.streams()
++        .mark_published(journal.event_id, PublishKind::Journal)
++        .await
++        .unwrap();
++    txn.streams()
++        .mark_published(live.event_id, PublishKind::Live)
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let scanned = txn.streams().scan_unpublished(10).await.unwrap();
++    assert_eq!(
++        scanned.len(),
++        1,
++        "live publication keeps the journal marker null"
++    );
++    assert_eq!(scanned[0].event_id, live.event_id);
++    assert!(scanned[0].live_published_at_ms.is_some());
++    let not_found = txn
++        .streams()
++        .mark_published(EventId::new(&provider), PublishKind::Journal)
++        .await
++        .expect_err("publishing an absent event is not found");
++    assert_eq!(not_found.code(), ErrorCode::NotFound);
++    assert_eq!(not_found.retry_class(), RetryClass::Never);
++    txn.streams()
++        .mark_published(live.event_id, PublishKind::Journal)
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut connection = direct_connection(&dir.path().join(DB_FILE)).await;
++    let (journal_ms, live_ms): (Option<i64>, Option<i64>) = sqlx::query_as(
++        "SELECT journal_published_at_ms, live_published_at_ms FROM outbox_events \
++         WHERE event_id = ?1",
++    )
++    .bind(journal.event_id.to_string())
++    .fetch_one(&mut *connection)
++    .await
++    .unwrap();
++    assert!(journal_ms.is_some());
++    assert!(live_ms.is_none());
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert!(txn.streams().scan_unpublished(10).await.unwrap().is_empty());
++    txn.rollback().await.unwrap();
++}
++
++#[tokio::test]
++async fn outbox_rows_reject_mutation_outside_publication_metadata() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let stream_key = stream("run/immutable");
++    let staged = event(&provider, &stream_key, 1);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    txn.streams().insert_outbox(staged.clone()).await.unwrap();
++    txn.commit().await.unwrap();
++
++    let mut connection = direct_connection(&dir.path().join(DB_FILE)).await;
++    let error = sqlx::query("UPDATE outbox_events SET payload = ?1 WHERE event_id = ?2")
++        .bind(vec![0x00u8])
++        .bind(staged.event_id.to_string())
++        .execute(&mut *connection)
++        .await
++        .expect_err("payload mutation must be rejected by the schema trigger");
++    let code = error
++        .as_database_error()
++        .expect("constraint failure")
++        .code();
++    assert_eq!(code.as_deref(), Some("1811"));
++    drop(connection);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let scanned = txn.streams().scan_unpublished(10).await.unwrap();
++    assert_eq!(scanned.len(), 1);
++    assert_eq!(scanned[0].payload, staged.payload);
++    txn.rollback().await.unwrap();
++}
++
++#[tokio::test]
++async fn rollback_discards_outbox_rows_and_stream_allocations() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(SEED_MS);
++    let stream_key = stream("run/atomic");
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert_eq!(txn.streams().allocate(stream_key.clone()).await.unwrap(), 1);
++    let committed = event(&provider, &stream_key, 1);
++    txn.streams()
++        .insert_outbox(committed.clone())
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++
++    let mut failing = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert_eq!(
++        failing
++            .streams()
++            .allocate(stream_key.clone())
++            .await
++            .unwrap(),
++        2
++    );
++    failing
++        .streams()
++        .insert_outbox(event(&provider, &stream_key, 2))
++        .await
++        .unwrap();
++    assert_eq!(direct_count(&dir.path().join(DB_FILE)).await, 1);
++    failing.rollback().await.unwrap();
++    assert_eq!(direct_count(&dir.path().join(DB_FILE)).await, 1);
++
++    let mut retry = store.begin_write(context(&provider, epoch)).await.unwrap();
++    assert_eq!(
++        retry.streams().allocate(stream_key.clone()).await.unwrap(),
++        2,
++        "a rolled back allocation is not consumed"
++    );
++    let replacement = event(&provider, &stream_key, 2);
++    retry
++        .streams()
++        .insert_outbox(replacement.clone())
++        .await
++        .unwrap();
++    retry.commit().await.unwrap();
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    let scanned = txn.streams().scan_unpublished(10).await.unwrap();
++    let sequences: Vec<u64> = scanned.iter().map(|row| row.sequence).collect();
++    assert_eq!(sequences, vec![1, 2]);
++    assert_eq!(scanned[1].event_id, replacement.event_id);
++    txn.rollback().await.unwrap();
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs b/agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs
+new file mode 100644
+index 0000000..8df90a0
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs
+@@ -0,0 +1,203 @@
++//! Concurrent stream appends: barrier-synchronized tasks stage bursts on one
++//! stream, and the allocations are unique and contiguous (R6.4, P3, N2).
++//!
++//! Every write transaction reserves writer ordering with `BEGIN IMMEDIATE`, so
++//! allocations are serialized even though `RETURNING` computes each next value
++//! from the persisted head. The assertions are about the persisted result, not
++//! about task scheduling: any barrier interleaving must yield `1..=total`.
++
++use std::path::Path;
++use std::sync::Arc;
++
++use domain::ids::{CommandId, DaemonInstanceId, EventId, EventStreamKey, PrincipalId};
++use domain::security::{RetentionClass, SensitivityClass};
++use kernel_store::models::NewOutboxEvent;
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::ids::DeterministicIds;
++use tokio::sync::Barrier;
++
++const DB_FILE: &str = "kernel.db";
++const SEED_MS: i64 = 1_700_000_000_000;
++
++fn config(db_path: &Path, pool_max_connections: u32) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path, pool_max_connections: u32) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE), pool_max_connections))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(SEED_MS);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn stream(key: &str) -> EventStreamKey {
++    match EventStreamKey::new(key) {
++        Ok(stream) => stream,
++        Err(error) => panic!("stream key rejected: {error}"),
++    }
++}
++
++fn event(
++    provider: &DeterministicIds,
++    stream_key: &EventStreamKey,
++    sequence: u64,
++    task: usize,
++) -> NewOutboxEvent {
++    NewOutboxEvent {
++        event_id: EventId::new(provider),
++        event_type: format!("burst.{task}"),
++        event_version: 1,
++        stream_key: stream_key.clone(),
++        sequence,
++        occurred_at_ms: SEED_MS,
++        run_id: None,
++        task_id: None,
++        session_id: None,
++        effect_id: None,
++        causation_id: None,
++        correlation_id: Some(format!("task-{task}")),
++        sensitivity: SensitivityClass::Internal,
++        retention: RetentionClass::Audit,
++        payload: vec![task as u8],
++    }
++}
++
++async fn assert_contiguous(
++    store: &SqliteKernelStore,
++    provider: &DeterministicIds,
++    epoch: u64,
++    total: u64,
++) {
++    let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
++    let scanned = txn.streams().scan_unpublished(total as u32).await.unwrap();
++    let sequences: Vec<u64> = scanned.iter().map(|row| row.sequence).collect();
++    assert_eq!(
++        sequences,
++        (1..=total).collect::<Vec<u64>>(),
++        "the scan must return the stream in contiguous sequence order"
++    );
++    txn.rollback().await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
++async fn barrier_bursts_with_one_transaction_per_event_stay_contiguous() {
++    const TASKS: usize = 6;
++    const BURST: usize = 8;
++    const TOTAL: u64 = (TASKS * BURST) as u64;
++
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), TASKS as u32 + 2).await;
++    let store = Arc::new(store);
++    let provider = Arc::new(DeterministicIds::new(SEED_MS));
++    let stream_key = stream("run/barrier-per-event");
++    let barrier = Arc::new(Barrier::new(TASKS));
++
++    let mut handles = Vec::new();
++    for task in 0..TASKS {
++        let store = Arc::clone(&store);
++        let provider = Arc::clone(&provider);
++        let barrier = Arc::clone(&barrier);
++        let stream_key = stream_key.clone();
++        handles.push(tokio::spawn(async move {
++            let mut allocated = Vec::with_capacity(BURST);
++            barrier.wait().await;
++            for _ in 0..BURST {
++                let mut txn = store
++                    .begin_write(context(provider.as_ref(), epoch))
++                    .await
++                    .unwrap();
++                let sequence = txn.streams().allocate(stream_key.clone()).await.unwrap();
++                txn.streams()
++                    .insert_outbox(event(provider.as_ref(), &stream_key, sequence, task))
++                    .await
++                    .unwrap();
++                txn.commit().await.unwrap();
++                allocated.push(sequence);
++            }
++            allocated
++        }));
++    }
++
++    let mut allocated = Vec::with_capacity(TOTAL as usize);
++    for handle in handles {
++        allocated.extend(handle.await.unwrap());
++    }
++    allocated.sort_unstable();
++    assert_eq!(
++        allocated,
++        (1..=TOTAL).collect::<Vec<u64>>(),
++        "concurrent allocations must be unique and gap-free"
++    );
++    assert_contiguous(&store, &provider, epoch, TOTAL).await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn barrier_bursts_staged_in_one_transaction_stay_contiguous() {
++    const TASKS: usize = 4;
++    const BURST: usize = 6;
++    const TOTAL: u64 = (TASKS * BURST) as u64;
++
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path(), TASKS as u32 + 2).await;
++    let store = Arc::new(store);
++    let provider = Arc::new(DeterministicIds::new(SEED_MS));
++    let stream_key = stream("run/barrier-per-burst");
++    let barrier = Arc::new(Barrier::new(TASKS));
++
++    let mut handles = Vec::new();
++    for task in 0..TASKS {
++        let store = Arc::clone(&store);
++        let provider = Arc::clone(&provider);
++        let barrier = Arc::clone(&barrier);
++        let stream_key = stream_key.clone();
++        handles.push(tokio::spawn(async move {
++            barrier.wait().await;
++            let mut txn = store
++                .begin_write(context(provider.as_ref(), epoch))
++                .await
++                .unwrap();
++            let mut allocated = Vec::with_capacity(BURST);
++            for _ in 0..BURST {
++                let sequence = txn.streams().allocate(stream_key.clone()).await.unwrap();
++                txn.streams()
++                    .insert_outbox(event(provider.as_ref(), &stream_key, sequence, task))
++                    .await
++                    .unwrap();
++                allocated.push(sequence);
++            }
++            txn.commit().await.unwrap();
++            allocated
++        }));
++    }
++
++    let mut allocated = Vec::with_capacity(TOTAL as usize);
++    for handle in handles {
++        allocated.extend(handle.await.unwrap());
++    }
++    allocated.sort_unstable();
++    assert_eq!(
++        allocated,
++        (1..=TOTAL).collect::<Vec<u64>>(),
++        "a burst committed in one transaction must extend the stream without gaps"
++    );
++    assert_contiguous(&store, &provider, epoch, TOTAL).await;
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/props.rs b/agent-os/crates/kernel-store-sqlite/tests/props.rs
+new file mode 100644
+index 0000000..3cd5f74
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/tests/props.rs
+@@ -0,0 +1,408 @@
++//! Property tests over generated workloads: one CAS winner (P2), contiguous
++//! concurrent stream sequences (P3), and replay invariance (P4).
++//!
++//! Each case runs against a fresh temporary store on a real multi-threaded
++//! runtime. Concurrency is synchronized with barriers, never with sleeps (N2).
++
++use std::path::Path;
++use std::sync::{Arc, Mutex};
++
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, EventCursor, EventId, EventStreamKey, IdempotencyKey,
++    PrincipalId, RunId, SessionId, TaskId,
++};
++use domain::run::{RecoveryDisposition, RunState};
++use domain::security::{RetentionClass, SensitivityClass};
++use kernel_store::models::{
++    NewIdempotencyRecord, NewOutboxEvent, NewRun, NewSession, NewTask, RunCas, RunPatch,
++};
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use proptest::prelude::*;
++use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
++use testkit::ids::DeterministicIds;
++use tokio::sync::Barrier;
++
++const DB_FILE: &str = "kernel.db";
++const SEED_MS: i64 = 1_700_000_000_000;
++const PROP_CASES: u32 = 16;
++
++/// Every table created by the inception schema; a replay must leave all of
++/// them exactly as it found them (P4).
++const CANONICAL_TABLES: [&str; 30] = [
++    "kernel_meta",
++    "daemon_fence",
++    "agent_specs",
++    "sessions",
++    "tasks",
++    "resolved_run_environments",
++    "runs",
++    "resolved_bindings",
++    "run_graph_heads",
++    "run_dependencies",
++    "workspace_leases",
++    "effects",
++    "resource_reservations",
++    "timers",
++    "capability_grants",
++    "delegation_hops",
++    "approval_requests",
++    "approval_responses",
++    "adapter_registrations",
++    "config_generations",
++    "active_config_generation",
++    "idempotency_records",
++    "event_stream_heads",
++    "outbox_events",
++    "artifacts",
++    "workspaces",
++    "loop_turns",
++    "decisions",
++    "adapter_instances",
++    "conformance_reports",
++];
++
++fn runtime() -> tokio::runtime::Runtime {
++    tokio::runtime::Builder::new_multi_thread()
++        .worker_threads(4)
++        .enable_all()
++        .build()
++        .expect("property test runtime")
++}
++
++fn config(db_path: &Path, pool_max_connections: u32) -> StoreConfig {
++    StoreConfig {
++        path: db_path.to_path_buf(),
++        pool_max_connections,
++        busy_timeout_ms: 5_000,
++    }
++}
++
++fn context(provider: &DeterministicIds, daemon_epoch: u64) -> TxContext {
++    TxContext {
++        daemon_epoch,
++        principal_id: PrincipalId::new(provider),
++        command_id: CommandId::new(provider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &Path, pool_max_connections: u32) -> (SqliteKernelStore, u64) {
++    let store = SqliteKernelStore::open(config(&dir.join(DB_FILE), pool_max_connections))
++        .await
++        .unwrap();
++    let provider = DeterministicIds::new(SEED_MS);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    (store, fence.epoch.0)
++}
++
++fn cursor(run: RunId) -> EventCursor {
++    let stream = match EventStreamKey::new(format!("run/{run}")) {
++        Ok(stream) => stream,
++        Err(error) => panic!("stream key rejected: {error}"),
++    };
++    EventCursor::new(stream, 0)
++}
++
++async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch: u64) -> RunId {
++    let session = SessionId::new(provider);
++    let task = TaskId::new(provider);
++    let run = RunId::new(provider);
++    let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
++    txn.sessions()
++        .insert(NewSession {
++            session_id: session,
++            principal_id: PrincipalId::new(provider),
++            created_at_ms: 10,
++            metadata: None,
++        })
++        .await
++        .unwrap();
++    txn.tasks()
++        .insert(NewTask {
++            task_id: task,
++            session_id: Some(session),
++            created_by_actor_id: ActorId::new(provider),
++            task_kind: "property".to_owned(),
++            payload: vec![],
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.runs()
++        .insert(NewRun {
++            run_id: run,
++            task_id: task,
++            session_id: Some(session),
++            parent_run_id: None,
++            state: RunState::Created,
++            recovery: RecoveryDisposition::Normal,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor: cursor(run),
++            cancellation_epoch: 0,
++            resolved_environment_id: None,
++            created_at_ms: 10,
++        })
++        .await
++        .unwrap();
++    txn.commit().await.unwrap();
++    run
++}
++
++async fn canonical_counts(db_path: &Path) -> Vec<i64> {
++    let options = SqliteConnectOptions::new()
++        .filename(db_path)
++        .create_if_missing(false);
++    let pool = SqlitePoolOptions::new()
++        .max_connections(1)
++        .connect_with(options)
++        .await
++        .unwrap();
++    let mut counts = Vec::with_capacity(CANONICAL_TABLES.len());
++    for table in CANONICAL_TABLES {
++        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
++            .fetch_one(&pool)
++            .await
++            .unwrap();
++        counts.push(count);
++    }
++    counts
++}
++
++fn staged_event(
++    provider: &DeterministicIds,
++    stream_key: &EventStreamKey,
++    sequence: u64,
++    task: usize,
++) -> NewOutboxEvent {
++    NewOutboxEvent {
++        event_id: EventId::new(provider),
++        event_type: format!("property.{task}"),
++        event_version: 1,
++        stream_key: stream_key.clone(),
++        sequence,
++        occurred_at_ms: SEED_MS,
++        run_id: None,
++        task_id: None,
++        session_id: None,
++        effect_id: None,
++        causation_id: None,
++        correlation_id: None,
++        sensitivity: SensitivityClass::Internal,
++        retention: RetentionClass::Audit,
++        payload: vec![task as u8],
++    }
++}
++
++proptest! {
++    #![proptest_config(ProptestConfig::with_cases(PROP_CASES))]
++
++    /// P2: for any set of writers racing one CAS expectation, exactly one
++    /// commits and the persisted row reflects only that writer's patch.
++    #[test]
++    fn cas_race_has_exactly_one_winner(writers in 2usize..=6, step in 1u64..=10_000) {
++        runtime().block_on(async {
++            let dir = tempfile::tempdir().unwrap();
++            let (store, epoch) = open_store(dir.path(), writers as u32 + 2).await;
++            let store = Arc::new(store);
++            let provider = DeterministicIds::new(SEED_MS);
++            let run = seed_run(&store, &provider, epoch).await;
++            let barrier = Arc::new(Barrier::new(writers));
++
++            let mut handles = Vec::new();
++            for _ in 0..writers {
++                let store = Arc::clone(&store);
++                let barrier = Arc::clone(&barrier);
++                let ctx = context(&provider, epoch);
++                handles.push(tokio::spawn(async move {
++                    barrier.wait().await;
++                    let mut txn = store.begin_write(ctx).await.unwrap();
++                    let won = txn
++                        .runs()
++                        .cas_update(
++                            run,
++                            RunCas {
++                                run_revision: 0,
++                                state: None,
++                                cancellation_epoch: None,
++                            },
++                            RunPatch {
++                                step_sequence: Some(step),
++                                bump_revision: true,
++                                ..RunPatch::default()
++                            },
++                        )
++                        .await
++                        .unwrap();
++                    txn.commit().await.unwrap();
++                    won
++                }));
++            }
++
++            let mut wins = 0usize;
++            for handle in handles {
++                if handle.await.unwrap() {
++                    wins += 1;
++                }
++            }
++            assert_eq!(wins, 1, "exactly one of {writers} racing writers may commit");
++
++            let mut read = store.begin_read().await.unwrap();
++            let row = read.runs().get(run).await.unwrap().unwrap();
++            assert_eq!(row.run_revision, 1);
++            assert_eq!(row.step_sequence, step);
++        });
++    }
++
++    /// P3: for any interleaving of concurrent appends to one stream, the
++    /// allocated sequences are unique and contiguous from one.
++    #[test]
++    fn concurrent_appends_are_contiguous(
++        tasks in 2usize..=4,
++        burst in 1usize..=5,
++        txn_size in 1usize..=3,
++    ) {
++        runtime().block_on(async {
++            let total = tasks * burst;
++            let dir = tempfile::tempdir().unwrap();
++            let (store, epoch) = open_store(dir.path(), tasks as u32 + 2).await;
++            let store = Arc::new(store);
++            let provider = Arc::new(DeterministicIds::new(SEED_MS));
++            let stream_key = match EventStreamKey::new("run/property-appends") {
++                Ok(stream) => stream,
++                Err(error) => panic!("stream key rejected: {error}"),
++            };
++            let barrier = Arc::new(Barrier::new(tasks));
++            let staged = Arc::new(Mutex::new(Vec::with_capacity(total)));
++
++            let mut handles = Vec::new();
++            for task in 0..tasks {
++                let store = Arc::clone(&store);
++                let provider = Arc::clone(&provider);
++                let barrier = Arc::clone(&barrier);
++                let staged = Arc::clone(&staged);
++                let stream_key = stream_key.clone();
++                handles.push(tokio::spawn(async move {
++                    let mut remaining = burst;
++                    barrier.wait().await;
++                    while remaining > 0 {
++                        let chunk = txn_size.min(remaining);
++                        let mut txn = store
++                            .begin_write(context(provider.as_ref(), epoch))
++                            .await
++                            .unwrap();
++                        for _ in 0..chunk {
++                            let sequence =
++                                txn.streams().allocate(stream_key.clone()).await.unwrap();
++                            txn.streams()
++                                .insert_outbox(staged_event(
++                                    provider.as_ref(),
++                                    &stream_key,
++                                    sequence,
++                                    task,
++                                ))
++                                .await
++                                .unwrap();
++                            staged.lock().unwrap().push(sequence);
++                        }
++                        txn.commit().await.unwrap();
++                        remaining -= chunk;
++                    }
++                }));
++            }
++            for handle in handles {
++                handle.await.unwrap();
++            }
++
++            let mut sequences = staged.lock().unwrap().clone();
++            sequences.sort_unstable();
++            let expected: Vec<u64> = (1..=total as u64).collect();
++            assert_eq!(
++                sequences, expected,
++                "allocations must cover 1..={total} exactly once"
++            );
++
++            let mut txn = store
++                .begin_write(context(provider.as_ref(), epoch))
++                .await
++                .unwrap();
++            let rows = txn
++                .streams()
++                .scan_unpublished(total as u32)
++                .await
++                .unwrap();
++            let scanned: Vec<u64> = rows.iter().map(|row| row.sequence).collect();
++            assert_eq!(scanned, expected, "the ordered scan must match allocation order");
++            txn.rollback().await.unwrap();
++        });
++    }
++
++    /// P4: for any stored outcome and any number of replays with the same
++    /// principal, key, and digest, the stored outcome is returned and every
++    /// canonical table keeps its row count.
++    #[test]
++    fn replay_returns_the_stored_outcome_unchanged(
++        outcome_code in "[a-z][a-z0-9_]{0,15}",
++        payload in prop::collection::vec(any::<u8>(), 0..16),
++        replays in 1usize..=5,
++    ) {
++        runtime().block_on(async {
++            let dir = tempfile::tempdir().unwrap();
++            let (store, epoch) = open_store(dir.path(), 4).await;
++            let provider = DeterministicIds::new(SEED_MS);
++            let principal = PrincipalId::new(&provider);
++            let idempotency_key = IdempotencyKey::new("property-replay").unwrap();
++            let digest = "property-digest";
++
++            let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++            txn.idempotency()
++                .insert(NewIdempotencyRecord {
++                    principal_id: principal,
++                    idempotency_key: idempotency_key.clone(),
++                    request_digest: digest.to_owned(),
++                    command_id: CommandId::new(&provider),
++                    outcome_code: outcome_code.clone(),
++                    outcome_payload: payload.clone(),
++                    created_at_ms: SEED_MS,
++                })
++                .await
++                .unwrap();
++            txn.commit().await.unwrap();
++
++            let db_path = dir.path().join(DB_FILE);
++            let before = canonical_counts(&db_path).await;
++
++            for _ in 0..replays {
++                let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++                let stored = txn
++                    .idempotency()
++                    .lookup(principal, &idempotency_key)
++                    .await
++                    .unwrap()
++                    .expect("a replay finds the stored record");
++                assert_eq!(stored.request_digest, digest);
++                assert_eq!(stored.outcome_code, outcome_code);
++                assert_eq!(stored.outcome_payload, payload);
++                assert_eq!(stored.created_at_ms, SEED_MS);
++                txn.commit().await.unwrap();
++            }
++
++            let after = canonical_counts(&db_path).await;
++            assert_eq!(
++                after, before,
++                "a replay must not change any canonical row count"
++            );
++            assert_eq!(
++                after[CANONICAL_TABLES
++                    .iter()
++                    .position(|table| *table == "idempotency_records")
++                    .expect("idempotency_records is a canonical table")],
++                1
++            );
++        });
++    }
++}

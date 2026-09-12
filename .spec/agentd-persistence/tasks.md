@@ -311,8 +311,8 @@
 
 ### Task PST-005: Idempotency, streams, and the outbox API
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-pst005b
 - depends_on: PST-003B, PST-004
 - files: `agent-os/crates/kernel-store-sqlite/src/repos/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/streams.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/tests/idempotency.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox_concurrent.rs`, `agent-os/crates/kernel-store-sqlite/tests/props.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/src/outbox.rs`
 - requirements: R5.1, R5.2, R5.3, R5.4, R5.5, R6.1, R6.2, R6.3, R6.4, R6.5, P2, P3, P4, N2
