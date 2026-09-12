@@ -24,12 +24,12 @@ use sqlx::Sqlite;
 use crate::SqliteKernelStore;
 use crate::mapping;
 use crate::repos::{
-    ReadConn, SharedConn, UnavailableRepo, WriteConn, adapters::SqliteAdapterRepo,
-    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
-    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo, loop_turns::SqliteLoopRepo,
+    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, artifacts::SqliteArtifactRepo,
+    config::SqliteConfigRepo, effects::SqliteEffectRepo, environments::SqliteEnvironmentRepo,
+    graph::SqliteGraphRepo, idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo,
     resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
-    sessions::SqliteSessionRepo, tasks::SqliteTaskRepo, timers::SqliteTimerRepo,
-    workspaces::SqliteWorkspaceRepo,
+    sessions::SqliteSessionRepo, streams::SqliteStreamRepo, tasks::SqliteTaskRepo,
+    timers::SqliteTimerRepo, workspaces::SqliteWorkspaceRepo,
 };
 
 /// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
@@ -50,7 +50,8 @@ pub(crate) struct SqliteWriteTxn {
     adapters: SqliteAdapterRepo,
     artifacts: SqliteArtifactRepo,
     loop_turns: SqliteLoopRepo,
-    unavailable: UnavailableRepo,
+    idempotency: SqliteIdempotencyRepo,
+    streams: SqliteStreamRepo,
 }
 
 impl SqliteWriteTxn {
@@ -73,8 +74,9 @@ impl SqliteWriteTxn {
             workspaces: SqliteWorkspaceRepo::new(shared.clone()),
             adapters: SqliteAdapterRepo::new(shared.clone()),
             artifacts: SqliteArtifactRepo::new(shared.clone()),
-            loop_turns: SqliteLoopRepo::new(shared),
-            unavailable: UnavailableRepo,
+            loop_turns: SqliteLoopRepo::new(shared.clone()),
+            idempotency: SqliteIdempotencyRepo::new(shared.clone()),
+            streams: SqliteStreamRepo::new(shared),
         }
     }
 
@@ -153,11 +155,11 @@ impl KernelTxn for SqliteWriteTxn {
     }
 
     fn idempotency(&mut self) -> &mut dyn IdempotencyRepo {
-        &mut self.unavailable
+        &mut self.idempotency
     }
 
     fn streams(&mut self) -> &mut dyn StreamRepo {
-        &mut self.unavailable
+        &mut self.streams
     }
 
     async fn commit(self: Box<Self>) -> errors::Result<()> {

@@ -1,15 +1,10 @@
 //! Repository implementations over a shared SQLite connection.
 //!
 //! The groups implemented by the SQLite store are [`adapters`], [`artifacts`],
-//! [`config`], [`effects`], [`environments`], [`graph`], [`loop_turns`],
-//! [`resources`], [`runs`], [`security`], [`sessions`], [`tasks`], [`timers`],
-//! and [`workspaces`]; each repository view shares the connection owned by its
-//! transaction through [`SharedConn`].
-//!
-//! [`UnavailableRepo`] stands in for the idempotency and stream groups whose
-//! SQL implementations arrive with PST-005. Every operation on it fails closed
-//! with `FailedPrecondition`/`Never`, so a caller can never observe fabricated
-//! rows.
+//! [`config`], [`effects`], [`environments`], [`graph`], [`idempotency`],
+//! [`loop_turns`], [`resources`], [`runs`], [`security`], [`sessions`],
+//! [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each repository
+//! view shares the connection owned by its transaction through [`SharedConn`].
 
 pub(crate) mod adapters;
 pub(crate) mod artifacts;
@@ -17,18 +12,19 @@ pub(crate) mod config;
 pub(crate) mod effects;
 pub(crate) mod environments;
 pub(crate) mod graph;
+pub(crate) mod idempotency;
 pub(crate) mod loop_turns;
 pub(crate) mod resources;
 pub(crate) mod runs;
 pub(crate) mod security;
 pub(crate) mod sessions;
+pub(crate) mod streams;
 pub(crate) mod tasks;
 pub(crate) mod timers;
 pub(crate) mod workspaces;
 
 use std::sync::Arc;
 
-use domain::ids::*;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use sqlx::Sqlite;
@@ -86,49 +82,9 @@ impl ConnGuard<'_> {
     }
 }
 
-/// Repository view for groups without a SQL implementation in this store.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct UnavailableRepo;
-
-use kernel_store::models::*;
-use kernel_store::repositories::*;
-
 use crate::mapping;
 
-macro_rules! unavailable_repo {
-    ($($trait_name:ident { $(async fn $method:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?) -> errors::Result<$out:ty>;)* })*) => {
-        $(
-            #[async_trait::async_trait]
-            impl $trait_name for UnavailableRepo {
-                $(
-                    async fn $method(&mut self $(, $arg: $ty)*) -> errors::Result<$out> {
-                        $(let _ = $arg;)*
-                        Err(mapping::unavailable(stringify!($trait_name)))
-                    }
-                )*
-            }
-        )*
-    };
-}
-
-unavailable_repo! {
-    IdempotencyRepo {
-        async fn lookup(
-            &mut self,
-            principal: PrincipalId,
-            key: &IdempotencyKey,
-        ) -> errors::Result<Option<IdempotencyRecordRow>>;
-        async fn insert(&mut self, record: NewIdempotencyRecord) -> errors::Result<()>;
-    }
-    StreamRepo {
-        async fn allocate(&mut self, stream_key: EventStreamKey) -> errors::Result<u64>;
-        async fn insert_outbox(&mut self, event: NewOutboxEvent) -> errors::Result<()>;
-        async fn scan_unpublished(&mut self, limit: u32)
-            -> errors::Result<Vec<OutboxEventRow>>;
-        async fn mark_published(
-            &mut self,
-            event_id: EventId,
-            kind: PublishKind,
-        ) -> errors::Result<()>;
-    }
-}
+/// The shared fail-closed constructor remains linked through this assertion:
+/// no repository group needs it now that idempotency and streams have SQL
+/// implementations.
+const _: fn(&'static str) -> errors::KernelError = mapping::unavailable;
