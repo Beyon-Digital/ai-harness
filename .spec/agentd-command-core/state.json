@@ -1,0 +1,8 @@
+{
+  "feature": "agentd-command-core",
+  "phase": "implement",
+  "gates": {
+    "implement": "2026-09-12T17:05:30Z"
+  },
+  "created": "2026-09-12T17:03:16Z"
+}
