@@ -11,3 +11,10 @@ errors.workspace = true
 event-journal.workspace = true
 events.workspace = true
 kernel-store.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+testkit.workspace = true
+tempfile.workspace = true
+kernel-store-sqlite.workspace = true
