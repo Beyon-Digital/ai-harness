@@ -57,16 +57,27 @@ impl ArmedFaults {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
-}
 
-impl FaultInjector for ArmedFaults {
-    fn trigger(&self, point: &str) {
+    fn fire(&self, point: &str) -> bool {
         if let Some(state) = self.states().get_mut(point)
             && state.armed
             && !state.triggered
         {
             state.triggered = true;
+            true
+        } else {
+            false
         }
+    }
+}
+
+impl FaultInjector for ArmedFaults {
+    fn trigger(&self, point: &str) {
+        let _ = self.fire(point);
+    }
+
+    fn inject(&self, point: &str) -> bool {
+        self.fire(point)
     }
 }
 
