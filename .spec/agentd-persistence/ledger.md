@@ -53,3 +53,5 @@
 - 2026-09-12T15:49:32Z PST-005 -> review (@agent-pst005b)
 - 2026-09-12T15:53:44Z PST-005 -> done (@agent-pst005b)
 - 2026-09-12T15:57:26Z Final checkpoint: fmt/clippy/workspace tests green; pack validator BUILD PACK OK; repo validator OK; mirror check OK. 7/7 tasks done. Whole-branch review dispatched.
+- 2026-09-12T16:42:07Z Ruling: the store observability table (store.txn, store.error, store.fence, store.busy) is deferred; store instrumentation moves to a later module, and the unused observability dependency was removed from kernel-store-sqlite. Cost if wrong: store-level signals are absent until the owning module instruments them.
+- 2026-09-12T16:42:07Z Final-review follow-ups resolved: cycle guard implemented and mirrored; mock fidelity (lease index, CHECK literals, FKs) added; opaque state literals validated; dead mapping helper removed. Re-review: 1 open item was the controller-owned deferral record, now recorded.

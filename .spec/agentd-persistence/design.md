@@ -409,7 +409,7 @@ Paths relative to `agent-os/`.
 | Path | Create or modify | Responsibility | Owner task |
 |---|---|---|---|
 | `crates/kernel-store/Cargo.toml` | modify | add `async-trait`; keep `domain`, `errors` | PST-000 |
-| `crates/kernel-store-sqlite/Cargo.toml` | modify | add `sqlx` (sqlite, runtime-tokio), `tokio`, `async-trait`, `observability`; dev: `testkit`, `tempfile`, `proptest` | PST-000 |
+| `crates/kernel-store-sqlite/Cargo.toml` | modify | add `sqlx` (sqlite, runtime-tokio), `tokio`, `async-trait`; dev: `testkit`, `tempfile`, `proptest` | PST-000 |
 | `crates/testkit/Cargo.toml` | modify | add `kernel-store`, `errors`, `async-trait`; dev: `tokio` | PST-000 |
 | `crates/identity/Cargo.toml` | modify | add `kernel-store`, `domain`, `errors` | PST-000 |
 | `crates/events/Cargo.toml` | modify | add `kernel-store`, `domain`, `errors` | PST-000 |

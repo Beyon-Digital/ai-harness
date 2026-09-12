@@ -1,0 +1,2066 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index c657ab6..78ad07a 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -798,21 +798,20 @@ dependencies = [
+ ]
+ 
+ [[package]]
+ name = "kernel-store-sqlite"
+ version = "0.1.0"
+ dependencies = [
+  "async-trait",
+  "domain",
+  "errors",
+  "kernel-store",
+- "observability",
+  "proptest",
+  "sqlx",
+  "tempfile",
+  "testkit",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "lazy_static"
+ version = "1.5.0"
+diff --git a/agent-os/crates/kernel-store-sqlite/Cargo.toml b/agent-os/crates/kernel-store-sqlite/Cargo.toml
+index d02db8a..38fa819 100644
+--- a/agent-os/crates/kernel-store-sqlite/Cargo.toml
++++ b/agent-os/crates/kernel-store-sqlite/Cargo.toml
+@@ -5,17 +5,16 @@ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
+ sqlx.workspace = true
+ tokio.workspace = true
+ async-trait.workspace = true
+-observability.workspace = true
+ 
+ [dev-dependencies]
+ testkit.workspace = true
+ tempfile.workspace = true
+ proptest.workspace = true
+ tokio.workspace = true
+diff --git a/agent-os/crates/kernel-store-sqlite/src/mapping.rs b/agent-os/crates/kernel-store-sqlite/src/mapping.rs
+index 2c1b350..c7bb97b 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/mapping.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/mapping.rs
+@@ -67,29 +67,20 @@ pub(crate) fn classify_sqlite(code: i32) -> (ErrorCode, RetryClass) {
+ fn message(code: ErrorCode) -> &'static str {
+     match code {
+         ErrorCode::Conflict => "storage constraint conflict",
+         ErrorCode::FailedPrecondition => "storage constraint rejected the write",
+         ErrorCode::Unavailable => "storage is unavailable",
+         ErrorCode::NotFound => "required row is missing",
+         _ => "storage operation failed",
+     }
+ }
+ 
+-/// Error for a repository group that has no SQL implementation in this store.
+-pub(crate) fn unavailable(group: &'static str) -> KernelError {
+-    KernelError::new(
+-        ErrorCode::FailedPrecondition,
+-        RetryClass::Never,
+-        format!("repository group {group} is not available"),
+-    )
+-}
+-
+ /// Fails closed for a persisted enum value with no domain mirror variant.
+ pub(crate) fn decode_wire<T>(
+     column: &'static str,
+     value: i64,
+     decode: fn(i32) -> Result<T, UnknownEnumValue>,
+ ) -> errors::Result<T> {
+     let value =
+         i32::try_from(value).map_err(|_| invariant(column, "is outside the enum wire range"))?;
+     decode(value).map_err(|error| {
+         KernelError::new(
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+index a54da7a..efd547d 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/adapters.rs
+@@ -34,20 +34,31 @@ impl SqliteAdapterRepo {
+ fn instance_state_from_state(value: &str) -> Result<String, UnknownStateValue> {
+     match value {
+         "starting" | "ready" | "exited" | "failed" => Ok(value.to_owned()),
+         _ => Err(UnknownStateValue {
+             value: value.to_owned(),
+             enum_name: "AdapterInstanceState",
+         }),
+     }
+ }
+ 
++/// Parses the exact `conformance_reports.result` CHECK literal set.
++fn conformance_result_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "pass" | "fail" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "ConformanceResult",
++        }),
++    }
++}
++
+ const SELECT_REGISTRATION: &str = "SELECT adapter_id, version, bundle_digest, manifest_digest, \
+      runtime_type, implemented_ports, capabilities, trust_state, conformance_state, created_at_ms \
+      FROM adapter_registrations";
+ 
+ fn decode_registration(row: &SqliteRow) -> errors::Result<AdapterRegistrationRow> {
+     Ok(AdapterRegistrationRow {
+         adapter_id: mapping::decode_id(
+             "adapter_registrations.adapter_id",
+             &mapping::text(row, "adapter_id")?,
+         )?,
+@@ -74,21 +85,25 @@ fn decode_registration(row: &SqliteRow) -> errors::Result<AdapterRegistrationRow
+ fn decode_conformance_report(row: &SqliteRow) -> errors::Result<ConformanceReportRow> {
+     Ok(ConformanceReportRow {
+         adapter_id: mapping::decode_id(
+             "conformance_reports.adapter_id",
+             &mapping::text(row, "adapter_id")?,
+         )?,
+         adapter_version: mapping::text(row, "adapter_version")?,
+         bundle_digest: mapping::text(row, "bundle_digest")?,
+         report_digest: mapping::text(row, "report_digest")?,
+         harness_version: mapping::text(row, "harness_version")?,
+-        result: mapping::text(row, "result")?,
++        result: mapping::decode_state(
++            "conformance_reports.result",
++            &mapping::text(row, "result")?,
++            conformance_result_from_state,
++        )?,
+         run_at_ms: mapping::int(row, "run_at_ms")?,
+         details: mapping::opt_blob(row, "details")?,
+     })
+ }
+ 
+ #[async_trait]
+ impl AdapterRead for SqliteAdapterRepo {
+     async fn get_registration(
+         &mut self,
+         adapter_id: AdapterId,
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs b/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs
+index bae4962..ba8c3fd 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/graph.rs
+@@ -95,20 +95,43 @@ async fn fetch_head(
+     task: TaskId,
+ ) -> errors::Result<Option<RunGraphHeadRow>> {
+     let row = sqlx::query("SELECT task_id, graph_revision FROM run_graph_heads WHERE task_id = ?1")
+         .bind(task.to_string())
+         .fetch_optional(conn)
+         .await
+         .map_err(mapping::from_sqlx)?;
+     row.as_ref().map(decode_head).transpose()
+ }
+ 
++/// Directed reachability over the persisted dependency edges using the
++/// connection owned by the enclosing transaction.
++async fn is_reachable_on(
++    conn: &mut sqlx::SqliteConnection,
++    from: RunId,
++    to: RunId,
++) -> errors::Result<bool> {
++    let reachable: i64 = sqlx::query_scalar(
++        "WITH RECURSIVE reach(run_id) AS ( \
++           SELECT ?1 \
++           UNION \
++           SELECT dependency.target_run_id FROM run_dependencies dependency \
++           JOIN reach ON dependency.source_run_id = reach.run_id \
++         ) SELECT EXISTS(SELECT 1 FROM reach WHERE run_id = ?2)",
++    )
++    .bind(from.to_string())
++    .bind(to.to_string())
++    .fetch_one(conn)
++    .await
++    .map_err(mapping::from_sqlx)?;
++    Ok(reachable != 0)
++}
++
+ #[async_trait]
+ impl GraphRead for SqliteGraphRepo {
+     async fn get_head(&mut self, task: TaskId) -> errors::Result<Option<RunGraphHeadRow>> {
+         let mut guard = self.conn.lock().await;
+         fetch_head(guard.connection()?, task).await
+     }
+ 
+     async fn list_dependencies(&mut self, task: TaskId) -> errors::Result<Vec<RunDependencyRow>> {
+         let mut guard = self.conn.lock().await;
+         let rows = sqlx::query(
+@@ -119,34 +142,21 @@ impl GraphRead for SqliteGraphRepo {
+         )
+         .bind(task.to_string())
+         .fetch_all(guard.connection()?)
+         .await
+         .map_err(mapping::from_sqlx)?;
+         rows.iter().map(decode_dependency).collect()
+     }
+ 
+     async fn is_reachable(&mut self, from: RunId, to: RunId) -> errors::Result<bool> {
+         let mut guard = self.conn.lock().await;
+-        let reachable: i64 = sqlx::query_scalar(
+-            "WITH RECURSIVE reach(run_id) AS ( \
+-               SELECT ?1 \
+-               UNION \
+-               SELECT dependency.target_run_id FROM run_dependencies dependency \
+-               JOIN reach ON dependency.source_run_id = reach.run_id \
+-             ) SELECT EXISTS(SELECT 1 FROM reach WHERE run_id = ?2)",
+-        )
+-        .bind(from.to_string())
+-        .bind(to.to_string())
+-        .fetch_one(guard.connection()?)
+-        .await
+-        .map_err(mapping::from_sqlx)?;
+-        Ok(reachable != 0)
++        is_reachable_on(guard.connection()?, from, to).await
+     }
+ }
+ 
+ #[async_trait]
+ impl GraphRepo for SqliteGraphRepo {
+     async fn ensure_head(&mut self, task: TaskId) -> errors::Result<RunGraphHeadRow> {
+         let mut guard = self.conn.lock().await;
+         let conn = guard.connection()?;
+         sqlx::query(
+             "INSERT INTO run_graph_heads (task_id, graph_revision) VALUES (?1, 0) \
+@@ -193,20 +203,30 @@ impl GraphRepo for SqliteGraphRepo {
+             ));
+         };
+         if head.graph_revision != expected_revision {
+             return Err(KernelError::new(
+                 ErrorCode::Conflict,
+                 RetryClass::Never,
+                 "graph revision conflict",
+             ));
+         }
+ 
++        // The new edge closes a cycle exactly when its target already reaches
++        // its source; the check and insert share this immediate transaction.
++        if is_reachable_on(&mut *conn, new.target_run_id, new.source_run_id).await? {
++            return Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "dependency would create a cycle",
++            ));
++        }
++
+         sqlx::query(
+             "INSERT INTO run_dependencies (dependency_id, task_id, source_run_id, target_run_id, \
+              dependency_condition, created_graph_revision, created_at_ms) \
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         )
+         .bind(new.dependency_id.to_string())
+         .bind(new.task_id.to_string())
+         .bind(new.source_run_id.to_string())
+         .bind(new.target_run_id.to_string())
+         .bind(dependency_condition_to_state(new.dependency_condition))
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+index eb98e63..c4a9191 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+@@ -74,17 +74,10 @@ impl ConnGuard<'_> {
+         }
+         .ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::FailedPrecondition,
+                 RetryClass::Never,
+                 "transaction connection is already finished",
+             )
+         })
+     }
+ }
+-
+-use crate::mapping;
+-
+-/// The shared fail-closed constructor remains linked through this assertion:
+-/// no repository group needs it now that idempotency and streams have SQL
+-/// implementations.
+-const _: fn(&'static str) -> errors::KernelError = mapping::unavailable;
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/security.rs b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+index 44a4c3e..dffa428 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+@@ -1,18 +1,19 @@
+ //! Security repository: capability grants, delegation hops, and approvals.
+ //!
+ //! Approval requests and their responses are append-only here; capability
+ //! grants and delegation hops are insert-then-read records. No update or
+ //! delete operation is exposed.
+ 
+ use async_trait::async_trait;
+ use domain::ids::{ApprovalRequestId, CapabilityGrantId, DelegationChainId};
++use domain::run::UnknownStateValue;
+ use domain::security::ApprovalState;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::{
+     ApprovalRequestRow, ApprovalResponseRow, CapabilityGrantRow, DelegationHopRow,
+     NewApprovalRequest, NewApprovalResponse, NewCapabilityGrant, NewDelegationHop,
+ };
+ use kernel_store::repositories::{SecurityRead, SecurityRepo};
+ use sqlx::sqlite::SqliteRow;
+ 
+@@ -110,28 +111,43 @@ fn decode_approval_request(row: &SqliteRow) -> errors::Result<ApprovalRequestRow
+         state: mapping::decode_state(
+             "approval_requests.state",
+             &mapping::text(row, "state")?,
+             ApprovalState::from_state_str,
+         )?,
+         created_at_ms: mapping::int(row, "created_at_ms")?,
+         resolved_at_ms: mapping::opt_int(row, "resolved_at_ms")?,
+     })
+ }
+ 
++/// Parses the exact `approval_responses.decision` CHECK literal set.
++fn approval_decision_from_state(value: &str) -> Result<String, UnknownStateValue> {
++    match value {
++        "approve" | "deny" => Ok(value.to_owned()),
++        _ => Err(UnknownStateValue {
++            value: value.to_owned(),
++            enum_name: "ApprovalDecision",
++        }),
++    }
++}
++
+ fn decode_approval_response(row: &SqliteRow) -> errors::Result<ApprovalResponseRow> {
+     Ok(ApprovalResponseRow {
+         request_id: mapping::decode_id(
+             "approval_responses.request_id",
+             &mapping::text(row, "request_id")?,
+         )?,
+         request_digest: mapping::text(row, "request_digest")?,
+-        decision: mapping::text(row, "decision")?,
++        decision: mapping::decode_state(
++            "approval_responses.decision",
++            &mapping::text(row, "decision")?,
++            approval_decision_from_state,
++        )?,
+         device_id: mapping::decode_id(
+             "approval_responses.device_id",
+             &mapping::text(row, "device_id")?,
+         )?,
+         responder_principal_id: mapping::decode_id(
+             "approval_responses.responder_principal_id",
+             &mapping::text(row, "responder_principal_id")?,
+         )?,
+         responded_at_ms: mapping::int(row, "responded_at_ms")?,
+     })
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+index 87860f7..d2eecee 100644
+--- a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
++++ b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+@@ -2,36 +2,38 @@
+ //!
+ //! One test per group inserts, reads, and exercises one compare-and-set
+ //! conflict; a final test proves unknown persisted values fail decoding with
+ //! `Internal`/`Never`. Every test uses its own temporary database.
+ 
+ use std::path::Path;
+ 
+ use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
+ use domain::ids::{
+     ActorId, AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+-    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, EffectId,
+-    EventCursor, EventStreamKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId, TaskId,
+-    TimerId, TurnId, WorkspaceId,
++    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId,
++    EffectId, EventCursor, EventStreamKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId,
++    TaskId, TimerId, TurnId, WorkspaceId,
++};
++use domain::resource::{
++    DependencyCondition, LeaseEnforcementState, ReservationState, TimerState, WorkspaceAccessMode,
+ };
+-use domain::resource::{LeaseEnforcementState, ReservationState, TimerState, WorkspaceAccessMode};
+ use domain::run::{RecoveryDisposition, RunState};
+ use domain::security::{
+     ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState,
+ };
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::{
+     AdapterInstanceStatePatch, EffectPatch, LeasePatch, LoopTurnPatch, NewAdapterInstance,
+     NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse, NewArtifact,
+     NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
+-    NewEffect, NewLoopTurn, NewReservation, NewRun, NewSession, NewTask, NewTimer, NewWorkspace,
+-    NewWorkspaceLease, ReservationPatch, TimerPatch,
++    NewEffect, NewLoopTurn, NewReservation, NewRun, NewRunDependency, NewSession, NewTask,
++    NewTimer, NewWorkspace, NewWorkspaceLease, ReservationPatch, TimerPatch,
+ };
+ use kernel_store::{KernelStore, TxContext};
+ use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
+ use testkit::ids::DeterministicIds;
+ 
+ const DB_FILE: &str = "kernel.db";
+ 
+ fn config(db_path: &Path) -> StoreConfig {
+     StoreConfig {
+         path: db_path.to_path_buf(),
+@@ -59,20 +61,21 @@ async fn open_store(dir: &Path) -> (SqliteKernelStore, u64) {
+         .await
+         .unwrap();
+     (store, fence.epoch.0)
+ }
+ 
+ fn cursor(run: RunId) -> EventCursor {
+     EventCursor::new(EventStreamKey::new(format!("run/{run}")).unwrap(), 0)
+ }
+ 
+ struct Seeded {
++    task: TaskId,
+     run: RunId,
+ }
+ 
+ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch: u64) -> Seeded {
+     let session = SessionId::new(provider);
+     let task = TaskId::new(provider);
+     let run = RunId::new(provider);
+     let mut txn = store.begin_write(context(provider, epoch)).await.unwrap();
+     txn.sessions()
+         .insert(NewSession {
+@@ -105,21 +108,21 @@ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch:
+             loop_epoch: 0,
+             step_sequence: 0,
+             input_event_cursor: cursor(run),
+             cancellation_epoch: 0,
+             resolved_environment_id: None,
+             created_at_ms: 10,
+         })
+         .await
+         .unwrap();
+     txn.commit().await.unwrap();
+-    Seeded { run }
++    Seeded { task, run }
+ }
+ 
+ fn new_exclusive_lease(
+     lease: LeaseId,
+     workspace: WorkspaceId,
+     owner_run: RunId,
+     enforcement_state: LeaseEnforcementState,
+ ) -> NewWorkspaceLease {
+     NewWorkspaceLease {
+         lease_id: lease,
+@@ -675,20 +678,102 @@ async fn exclusive_lease_index_rejects_second_active_lease() {
+         .expect("a revoked exclusive lease releases the workspace");
+     txn.commit().await.unwrap();
+ 
+     let mut read = store.begin_read().await.unwrap();
+     let first_row = read.workspaces().get_lease(first).await.unwrap().unwrap();
+     assert_eq!(first_row.enforcement_state, LeaseEnforcementState::Revoked);
+     let second_row = read.workspaces().get_lease(second).await.unwrap().unwrap();
+     assert_eq!(second_row.enforcement_state, LeaseEnforcementState::Active);
+ }
+ 
++#[tokio::test]
++async fn dependency_cycles_are_rejected() {
++    let dir = tempfile::tempdir().unwrap();
++    let (store, epoch) = open_store(dir.path()).await;
++    let provider = DeterministicIds::new(1_700_000_000_000);
++    let seeded = seed_run(&store, &provider, epoch).await;
++    let second = RunId::new(&provider);
++    let third = RunId::new(&provider);
++
++    let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
++    for run in [second, third] {
++        txn.runs()
++            .insert(NewRun {
++                run_id: run,
++                task_id: seeded.task,
++                session_id: None,
++                parent_run_id: None,
++                state: RunState::Created,
++                recovery: RecoveryDisposition::Normal,
++                loop_epoch: 0,
++                step_sequence: 0,
++                input_event_cursor: cursor(run),
++                cancellation_epoch: 0,
++                resolved_environment_id: None,
++                created_at_ms: 10,
++            })
++            .await
++            .unwrap();
++    }
++    txn.graph().ensure_head(seeded.task).await.unwrap();
++    let edge = |source: RunId, target: RunId| NewRunDependency {
++        dependency_id: DependencyId::new(&provider),
++        task_id: seeded.task,
++        source_run_id: source,
++        target_run_id: target,
++        dependency_condition: DependencyCondition::CompletedSuccessfully,
++        created_at_ms: 20,
++    };
++    txn.graph()
++        .insert_dependency(edge(seeded.run, second), 0)
++        .await
++        .unwrap();
++    txn.graph()
++        .insert_dependency(edge(second, third), 1)
++        .await
++        .unwrap();
++
++    let back_edge = txn
++        .graph()
++        .insert_dependency(edge(third, seeded.run), 2)
++        .await
++        .unwrap_err();
++    assert_eq!(back_edge.code(), ErrorCode::Conflict);
++    assert_eq!(back_edge.retry_class(), RetryClass::Never);
++    let self_edge = txn
++        .graph()
++        .insert_dependency(edge(seeded.run, seeded.run), 2)
++        .await
++        .unwrap_err();
++    assert_eq!(self_edge.code(), ErrorCode::Conflict);
++    assert_eq!(self_edge.retry_class(), RetryClass::Never);
++
++    let head = txn.graph().get_head(seeded.task).await.unwrap().unwrap();
++    assert_eq!(
++        head.graph_revision, 2,
++        "rejected cycles must not advance the head"
++    );
++    assert_eq!(
++        txn.graph()
++            .list_dependencies(seeded.task)
++            .await
++            .unwrap()
++            .len(),
++        2
++    );
++    assert!(
++        !txn.graph().is_reachable(third, seeded.run).await.unwrap(),
++        "the rejected back edge must not be stored"
++    );
++    drop(txn);
++}
++
+ #[tokio::test]
+ async fn adapter_repo_crud_and_cas_instance_state() {
+     let dir = tempfile::tempdir().unwrap();
+     let (store, epoch) = open_store(dir.path()).await;
+     let provider = DeterministicIds::new(1_700_000_000_000);
+     let adapter = AdapterId::new(&provider);
+     let instance = AdapterInstanceId::new(&provider);
+ 
+     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+     txn.adapters()
+@@ -1015,20 +1100,21 @@ async fn unknown_text_literals_fail_closed() {
+     let db_path = dir.path().join(DB_FILE);
+     let (store, epoch) = open_store(dir.path()).await;
+     let provider = DeterministicIds::new(1_700_000_000_000);
+     let seeded = seed_run(&store, &provider, epoch).await;
+     let turn = TurnId::new(&provider);
+     let decision = DecisionId::new(&provider);
+     let adapter = AdapterId::new(&provider);
+     let instance = AdapterInstanceId::new(&provider);
+     let valid = ConfigGenerationId::new(&provider);
+     let bad_test_state = ConfigGenerationId::new(&provider);
++    let request = ApprovalRequestId::new(&provider);
+ 
+     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+     txn.loop_turns()
+         .insert_turn(NewLoopTurn {
+             turn_id: turn,
+             run_id: seeded.run,
+             run_revision: 0,
+             loop_epoch: 0,
+             step_sequence: 0,
+             input_event_cursor: cursor(seeded.run),
+@@ -1102,39 +1188,86 @@ async fn unknown_text_literals_fail_closed() {
+             generation_id: bad_test_state,
+             digest: "digest-bad-test-state".to_owned(),
+             document: vec![8],
+             validation_state: "proposed".to_owned(),
+             test_state: "untested".to_owned(),
+             created_by_actor_id: ActorId::new(&provider),
+             created_at_ms: 23,
+         })
+         .await
+         .unwrap();
++    txn.adapters()
++        .insert_conformance_report(NewConformanceReport {
++            adapter_id: adapter,
++            adapter_version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            report_digest: "report-1".to_owned(),
++            harness_version: "0.1.0".to_owned(),
++            result: "pass".to_owned(),
++            run_at_ms: 24,
++            details: None,
++        })
++        .await
++        .unwrap();
++    txn.security()
++        .insert_approval_request(NewApprovalRequest {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            principal_id: PrincipalId::new(&provider),
++            actor_id: ActorId::new(&provider),
++            run_id: Some(seeded.run),
++            operation: "write-file".to_owned(),
++            target_resource: None,
++            capability_ids: vec![1],
++            extension_bundle_digest: None,
++            config_generation_digest: None,
++            expires_at_ms: 1_900_000_000_000,
++            nonce: "nonce-1".to_owned(),
++            state: ApprovalState::Pending,
++            created_at_ms: 20,
++            resolved_at_ms: None,
++        })
++        .await
++        .unwrap();
++    txn.security()
++        .insert_approval_response(NewApprovalResponse {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            decision: "approve".to_owned(),
++            device_id: domain::ids::DeviceId::new(&provider),
++            responder_principal_id: PrincipalId::new(&provider),
++            responded_at_ms: 30,
++        })
++        .await
++        .unwrap();
+     txn.commit().await.unwrap();
+     drop(store);
+ 
+     let options = sqlx::sqlite::SqliteConnectOptions::new()
+         .filename(&db_path)
+         .create_if_missing(false);
+     let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+     let mut conn = pool.acquire().await.unwrap();
+     sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
+         .execute(&mut *conn)
+         .await
+         .unwrap();
+     for statement in [
+         "UPDATE loop_turns SET state = 'bogus'",
+         "UPDATE decisions SET decision_type = 'Bogus'",
+         "UPDATE adapter_instances SET state = 'bogus'",
+         "UPDATE config_generations SET validation_state = 'bogus' WHERE digest = 'digest-valid'",
+         "UPDATE config_generations SET test_state = 'bogus' \
+          WHERE digest = 'digest-bad-test-state'",
++        "DROP TRIGGER trg_conformance_reports_update",
++        "UPDATE conformance_reports SET result = 'bogus'",
++        "UPDATE approval_responses SET decision = 'bogus'",
+     ] {
+         sqlx::query(statement).execute(&mut *conn).await.unwrap();
+     }
+     drop(conn);
+     drop(pool);
+ 
+     let store = SqliteKernelStore::open(config(&db_path)).await.unwrap();
+     let mut read = store.begin_read().await.unwrap();
+     let turn_error = read.loop_turns().get_turn(turn).await.unwrap_err();
+     assert_eq!(turn_error.code(), ErrorCode::Internal);
+@@ -1149,20 +1282,34 @@ async fn unknown_text_literals_fail_closed() {
+     let validation_error = read.config().get_generation(valid).await.unwrap_err();
+     assert_eq!(validation_error.code(), ErrorCode::Internal);
+     assert_eq!(validation_error.retry_class(), RetryClass::Never);
+     let test_state_error = read
+         .config()
+         .get_generation(bad_test_state)
+         .await
+         .unwrap_err();
+     assert_eq!(test_state_error.code(), ErrorCode::Internal);
+     assert_eq!(test_state_error.retry_class(), RetryClass::Never);
++    let report_error = read
++        .adapters()
++        .get_conformance_report(adapter, "1.0.0", "bundle-1")
++        .await
++        .unwrap_err();
++    assert_eq!(report_error.code(), ErrorCode::Internal);
++    assert_eq!(report_error.retry_class(), RetryClass::Never);
++    let response_error = read
++        .security()
++        .list_approval_responses(request)
++        .await
++        .unwrap_err();
++    assert_eq!(response_error.code(), ErrorCode::Internal);
++    assert_eq!(response_error.retry_class(), RetryClass::Never);
+     drop(read);
+ 
+     let mut txn = store.begin_write(context(&provider, epoch)).await.unwrap();
+     let instance_error = txn
+         .adapters()
+         .cas_instance_state(
+             instance,
+             "starting",
+             AdapterInstanceStatePatch {
+                 state: Some("ready".to_owned()),
+diff --git a/agent-os/crates/testkit/src/store.rs b/agent-os/crates/testkit/src/store.rs
+index 12e8695..a16dae2 100644
+--- a/agent-os/crates/testkit/src/store.rs
++++ b/agent-os/crates/testkit/src/store.rs
+@@ -6,32 +6,39 @@
+ //! expected revision/state/token, idempotency keys are unique, and stream
+ //! allocation hands out contiguous sequences per stream key. Write
+ //! transactions assert the persisted daemon epoch at begin, like the storage
+ //! layer (R4.3, D6).
+ //!
+ //! Two behaviours are intentionally coarser than SQLite and are documented on
+ //! [`MockStore`]: the epoch assertion rejects absent or stale epochs instead
+ //! of comparing a live fence lease, and commit is guarded by a single
+ //! whole-store revision, so any overlapping writer conflicts rather than
+ //! receiving the row-level serialization `BEGIN IMMEDIATE` would provide.
++//!
++//! Beyond those two, the mock emulates the DDL constraints that later modules
++//! exercise: the partial unique index on active exclusive-write leases, the
++//! TEXT CHECK literal sets for the untyped persisted enums, and the foreign
++//! keys listed on [`MockStore`]. Every constraint that is still not emulated
++//! is called out in that list so mock-based tests do not rely on it.
+ 
+ use std::collections::hash_map::Entry;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ 
+ use async_trait::async_trait;
+ use domain::ids::{
+     AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+     ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
+     EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
+     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
+ };
++use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::*;
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ 
+ #[derive(Clone, Default)]
+ struct MockState {
+     revision: u64,
+@@ -71,20 +78,43 @@ struct MockState {
+ 
+ /// In-memory `KernelStore` double.
+ ///
+ /// The persisted daemon epoch starts at `0`, meaning no daemon fence has been
+ /// recorded. Use [`MockStore::set_daemon_epoch`] or
+ /// [`KernelStore::acquire_daemon_fence`] before opening a write transaction:
+ /// `begin_write` rejects an absent (`0`) or mismatched context epoch with
+ /// `FailedPrecondition`, mirroring the storage-layer epoch assertion (R4.3,
+ /// D6).
+ ///
++/// Constraint emulation:
++///
++/// - a second active exclusive-write lease for one workspace is rejected with
++///   `Conflict`, mirroring `uq_workspace_exclusive_lease`;
++/// - the persisted-literal CHECK sets are validated for loop turns
++///   (`issued|accepted|stale`), decisions (`Complete|Fail|Wait|SpawnAgent|
++///   InvokeEffect|RequestApproval`), adapter instances (`starting|ready|
++///   exited|failed`), config generations (`proposed|validated|rejected` and
++///   `untested|passed|failed`), conformance reports (`pass|fail`), and
++///   approval responses (`approve|deny`), on insert and on state patches,
++///   failing `FailedPrecondition`/`Never`;
++/// - foreign-key existence is checked for artifacts (origin run and effect),
++///   timers (run), leases (workspace and owner run), turns (run), decisions
++///   (run and turn), grants (run and delegating grant), delegation hops
++///   (run), and dependency endpoints (source and target run).
++///
++/// Still unchecked, so mock-based tests must not rely on these being
++/// rejected: the immutability triggers (the port exposes no update or delete
++/// for those tables), CHECK constraints on typed enum and integer columns
++/// (unrepresentable through the port types), `workspaces.parent_workspace_id`,
++/// `approval_requests.run_id`, outbox entity references, delegation-hop chain
++/// contiguity, and any foreign key not listed above.
++///
+ /// Concurrency limitation: commits are guarded by one whole-store revision.
+ /// Any overlapping write transaction started from an older revision fails
+ /// with `Conflict`/`Safe` even when CAS expectations match and the rows
+ /// touched are disjoint. The SQLite store serializes writers with
+ /// `BEGIN IMMEDIATE` and would permit disjoint or non-conflicting commits, so
+ /// mock-based concurrency tests must stay conservative and must not assume
+ /// that two overlapping writers both succeed.
+ #[derive(Clone, Default)]
+ pub struct MockStore {
+     state: Arc<Mutex<MockState>>,
+@@ -131,20 +161,90 @@ fn conflict(message: &'static str) -> KernelError {
+ }
+ 
+ fn not_found(message: &'static str) -> KernelError {
+     KernelError::new(ErrorCode::NotFound, RetryClass::Never, message)
+ }
+ 
+ fn failed_precondition(message: &'static str) -> KernelError {
+     KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, message)
+ }
+ 
++/// Fails closed when an untyped literal violates its schema CHECK set.
++fn check_literal(column: &'static str, value: &str, allowed: &[&str]) -> errors::Result<()> {
++    if allowed.contains(&value) {
++        Ok(())
++    } else {
++        Err(KernelError::new(
++            ErrorCode::FailedPrecondition,
++            RetryClass::Never,
++            format!("{column} has an unknown literal: {value}"),
++        ))
++    }
++}
++
++/// Emulates `uq_workspace_exclusive_lease`: at most one active exclusive-write
++/// lease may exist per workspace.
++fn check_exclusive_lease(
++    state: &MockState,
++    workspace: WorkspaceId,
++    mode: WorkspaceAccessMode,
++    enforcement_state: LeaseEnforcementState,
++    exclude: Option<LeaseId>,
++) -> errors::Result<()> {
++    let would_be_active = mode == WorkspaceAccessMode::ExclusiveWrite
++        && enforcement_state == LeaseEnforcementState::Active;
++    let occupied = would_be_active
++        && state.leases.values().any(|row| {
++            row.workspace_id == workspace
++                && row.mode == WorkspaceAccessMode::ExclusiveWrite
++                && row.enforcement_state == LeaseEnforcementState::Active
++                && Some(row.lease_id) != exclude
++        });
++    if occupied {
++        return Err(conflict(
++            "exclusive write lease already active for the workspace",
++        ));
++    }
++    Ok(())
++}
++
++/// Directed reachability over the snapshot's dependency edges.
++fn reaches(state: &MockState, from: RunId, to: RunId) -> bool {
++    if from == to {
++        return true;
++    }
++    let mut adjacency: HashMap<RunId, Vec<RunId>> = HashMap::new();
++    for dependency in state.dependencies.values() {
++        adjacency
++            .entry(dependency.source_run_id)
++            .or_default()
++            .push(dependency.target_run_id);
++    }
++    let mut seen: HashSet<RunId> = HashSet::new();
++    let mut queue: VecDeque<RunId> = VecDeque::new();
++    queue.push_back(from);
++    seen.insert(from);
++    while let Some(current) = queue.pop_front() {
++        if let Some(targets) = adjacency.get(&current) {
++            for target in targets {
++                if *target == to {
++                    return true;
++                }
++                if seen.insert(*target) {
++                    queue.push_back(*target);
++                }
++            }
++        }
++    }
++    false
++}
++
+ /// Persists a fence and bumps the store revision, invalidating any write
+ /// transaction opened before the change.
+ fn install_fence(state: &mut MockState, epoch: u64, instance: DaemonInstanceId) -> DaemonFence {
+     let fence = DaemonFence {
+         instance_id: instance,
+         epoch: DaemonEpoch(epoch),
+         lease_expires_unix_ms: i64::MAX,
+     };
+     state.daemon_epoch = epoch;
+     state.daemon_fence = Some(fence.clone());
+@@ -697,48 +797,22 @@ impl GraphRead for MockGraphRepo {
+             .dependencies
+             .values()
+             .filter(|row| row.task_id == task)
+             .cloned()
+             .collect();
+         rows.sort_by_key(|row| (row.created_graph_revision, row.dependency_id));
+         Ok(rows)
+     }
+ 
+     async fn is_reachable(&mut self, from: RunId, to: RunId) -> errors::Result<bool> {
+-        if from == to {
+-            return Ok(true);
+-        }
+         let state = lock(&self.state)?;
+-        let mut adjacency: HashMap<RunId, Vec<RunId>> = HashMap::new();
+-        for dependency in state.dependencies.values() {
+-            adjacency
+-                .entry(dependency.source_run_id)
+-                .or_default()
+-                .push(dependency.target_run_id);
+-        }
+-        let mut seen: HashSet<RunId> = HashSet::new();
+-        let mut queue: VecDeque<RunId> = VecDeque::new();
+-        queue.push_back(from);
+-        seen.insert(from);
+-        while let Some(current) = queue.pop_front() {
+-            if let Some(targets) = adjacency.get(&current) {
+-                for target in targets {
+-                    if *target == to {
+-                        return Ok(true);
+-                    }
+-                    if seen.insert(*target) {
+-                        queue.push_back(*target);
+-                    }
+-                }
+-            }
+-        }
+-        Ok(false)
++        Ok(reaches(&state, from, to))
+     }
+ }
+ 
+ #[async_trait]
+ impl GraphRepo for MockGraphRepo {
+     async fn ensure_head(&mut self, task: TaskId) -> errors::Result<RunGraphHeadRow> {
+         let mut state = lock(&self.state)?;
+         let row = state
+             .graph_heads
+             .entry(task)
+@@ -766,20 +840,28 @@ impl GraphRepo for MockGraphRepo {
+         new: NewRunDependency,
+         expected_revision: u64,
+     ) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
+         let Some(head) = state.graph_heads.get(&new.task_id) else {
+             return Err(not_found("graph head missing for task"));
+         };
+         if head.graph_revision != expected_revision {
+             return Err(conflict("graph revision conflict"));
+         }
++        if !state.runs.contains_key(&new.source_run_id)
++            || !state.runs.contains_key(&new.target_run_id)
++        {
++            return Err(failed_precondition("dependency references a missing run"));
++        }
++        if reaches(&state, new.target_run_id, new.source_run_id) {
++            return Err(conflict("dependency would create a cycle"));
++        }
+         for dependency in state.dependencies.values() {
+             if dependency.source_run_id == new.source_run_id
+                 && dependency.target_run_id == new.target_run_id
+             {
+                 return Err(conflict("duplicate run dependency"));
+             }
+         }
+         let row = RunDependencyRow {
+             dependency_id: new.dependency_id,
+             task_id: new.task_id,
+@@ -1092,40 +1174,41 @@ impl TimerRead for MockTimerRepo {
+             .cloned()
+             .collect();
+         rows.sort_by_key(|row| (row.due_at_ms, row.timer_id));
+         Ok(rows)
+     }
+ }
+ 
+ #[async_trait]
+ impl TimerRepo for MockTimerRepo {
+     async fn insert(&mut self, timer: NewTimer) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if let Some(run) = timer.run_id
++            && !state.runs.contains_key(&run)
++        {
++            return Err(failed_precondition("timer references a missing run"));
++        }
+         let row = TimerRow {
+             timer_id: timer.timer_id,
+             run_id: timer.run_id,
+             timer_kind: timer.timer_kind,
+             payload: timer.payload,
+             due_at_ms: timer.due_at_ms,
+             state: timer.state,
+             version: timer.version,
+             claim_owner: None,
+             claim_fencing_token: None,
+             claim_daemon_epoch: None,
+             created_at_ms: timer.created_at_ms,
+             updated_at_ms: timer.created_at_ms,
+         };
+-        insert_unique(
+-            &mut lock(&self.state)?.timers,
+-            row.timer_id,
+-            row,
+-            "duplicate timer id",
+-        )
++        insert_unique(&mut state.timers, row.timer_id, row, "duplicate timer id")
+     }
+ 
+     async fn cas_transition(
+         &mut self,
+         id: TimerId,
+         expect_state: domain::resource::TimerState,
+         expect_version: u64,
+         patch: TimerPatch,
+     ) -> errors::Result<bool> {
+         let mut state = lock(&self.state)?;
+@@ -1197,50 +1280,66 @@ impl SecurityRead for MockSecurityRepo {
+             .filter(|row| row.request_id == request)
+             .cloned()
+             .collect();
+         Ok(rows)
+     }
+ }
+ 
+ #[async_trait]
+ impl SecurityRepo for MockSecurityRepo {
+     async fn insert_grant(&mut self, grant: NewCapabilityGrant) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if let Some(run) = grant.run_id
++            && !state.runs.contains_key(&run)
++        {
++            return Err(failed_precondition("grant references a missing run"));
++        }
++        if let Some(parent) = grant.delegated_from_grant_id
++            && !state.grants.contains_key(&parent)
++        {
++            return Err(failed_precondition(
++                "grant references a missing parent grant",
++            ));
++        }
+         let row = CapabilityGrantRow {
+             grant_id: grant.grant_id,
+             principal_id: grant.principal_id,
+             actor_id: grant.actor_id,
+             run_id: grant.run_id,
+             capability_id: grant.capability_id,
+             scope: grant.scope,
+             delegated_from_grant_id: grant.delegated_from_grant_id,
+             expires_at_ms: grant.expires_at_ms,
+             revoked_at_ms: grant.revoked_at_ms,
+             created_at_ms: grant.created_at_ms,
+         };
+-        insert_unique(
+-            &mut lock(&self.state)?.grants,
+-            row.grant_id,
+-            row,
+-            "duplicate grant id",
+-        )
++        insert_unique(&mut state.grants, row.grant_id, row, "duplicate grant id")
+     }
+ 
+     async fn insert_delegation_hop(&mut self, hop: NewDelegationHop) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if let Some(run) = hop.run_id
++            && !state.runs.contains_key(&run)
++        {
++            return Err(failed_precondition(
++                "delegation hop references a missing run",
++            ));
++        }
+         let row = DelegationHopRow {
+             chain_id: hop.chain_id,
+             hop_index: hop.hop_index,
+             principal_or_actor_id: hop.principal_or_actor_id,
+             run_id: hop.run_id,
+             capability_grant_ids: hop.capability_grant_ids,
+         };
+         insert_unique(
+-            &mut lock(&self.state)?.delegation_hops,
++            &mut state.delegation_hops,
+             (row.chain_id, row.hop_index),
+             row,
+             "duplicate delegation hop",
+         )
+     }
+ 
+     async fn insert_approval_request(&mut self, request: NewApprovalRequest) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
+         if state
+             .approval_requests
+@@ -1272,20 +1371,25 @@ impl SecurityRepo for MockSecurityRepo {
+             row,
+             "duplicate approval request id",
+         )
+     }
+ 
+     async fn insert_approval_response(
+         &mut self,
+         response: NewApprovalResponse,
+     ) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        check_literal(
++            "approval_responses.decision",
++            &response.decision,
++            &["approve", "deny"],
++        )?;
+         if !state.approval_requests.contains_key(&response.request_id) {
+             return Err(failed_precondition(
+                 "approval response references a missing request",
+             ));
+         }
+         let row = ApprovalResponseRow {
+             request_id: response.request_id,
+             request_digest: response.request_digest,
+             decision: response.decision,
+             device_id: response.device_id,
+@@ -1312,20 +1416,30 @@ impl ConfigRead for MockConfigRepo {
+ 
+     async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>> {
+         Ok(lock(&self.state)?.active_config.clone())
+     }
+ }
+ 
+ #[async_trait]
+ impl ConfigRepo for MockConfigRepo {
+     async fn insert_generation(&mut self, generation: NewConfigGeneration) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        check_literal(
++            "config_generations.validation_state",
++            &generation.validation_state,
++            &["proposed", "validated", "rejected"],
++        )?;
++        check_literal(
++            "config_generations.test_state",
++            &generation.test_state,
++            &["untested", "passed", "failed"],
++        )?;
+         if state
+             .config_generations
+             .values()
+             .any(|row| row.digest == generation.digest)
+         {
+             return Err(conflict("duplicate config generation digest"));
+         }
+         let row = ConfigGenerationRow {
+             generation_id: generation.generation_id,
+             digest: generation.digest,
+@@ -1393,52 +1507,76 @@ impl WorkspaceRepo for MockWorkspaceRepo {
+         };
+         insert_unique(
+             &mut lock(&self.state)?.workspaces,
+             row.workspace_id,
+             row,
+             "duplicate workspace id",
+         )
+     }
+ 
+     async fn insert_lease(&mut self, lease: NewWorkspaceLease) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if !state.workspaces.contains_key(&lease.workspace_id) {
++            return Err(failed_precondition("lease references a missing workspace"));
++        }
++        if !state.runs.contains_key(&lease.owner_run_id) {
++            return Err(failed_precondition("lease references a missing owner run"));
++        }
++        check_exclusive_lease(
++            &state,
++            lease.workspace_id,
++            lease.mode,
++            lease.enforcement_state,
++            None,
++        )?;
+         let row = WorkspaceLeaseRow {
+             lease_id: lease.lease_id,
+             workspace_id: lease.workspace_id,
+             owner_run_id: lease.owner_run_id,
+             mode: lease.mode,
+             lease_epoch: lease.lease_epoch,
+             enforcement_state: lease.enforcement_state,
+             delegated_from: lease.delegated_from,
+             created_at_ms: lease.created_at_ms,
+             updated_at_ms: lease.created_at_ms,
+         };
+-        insert_unique(
+-            &mut lock(&self.state)?.leases,
+-            row.lease_id,
+-            row,
+-            "duplicate lease id",
+-        )
++        insert_unique(&mut state.leases, row.lease_id, row, "duplicate lease id")
+     }
+ 
+     async fn cas_lease(
+         &mut self,
+         id: LeaseId,
+         expect_epoch: u64,
+         patch: LeasePatch,
+     ) -> errors::Result<bool> {
+         let mut state = lock(&self.state)?;
+-        let Some(lease) = state.leases.get_mut(&id) else {
++        let Some(lease) = state.leases.get(&id).cloned() else {
+             return Ok(false);
+         };
+         if lease.lease_epoch != expect_epoch {
+             return Ok(false);
+         }
++        let mode = patch.mode.unwrap_or(lease.mode);
++        let enforcement_state = patch.enforcement_state.unwrap_or(lease.enforcement_state);
++        if let Some(owner) = patch.owner_run_id
++            && !state.runs.contains_key(&owner)
++        {
++            return Err(failed_precondition("lease references a missing owner run"));
++        }
++        check_exclusive_lease(
++            &state,
++            lease.workspace_id,
++            mode,
++            enforcement_state,
++            Some(id),
++        )?;
++        let lease = state.leases.get_mut(&id).expect("lease checked above");
+         if let Some(value) = patch.enforcement_state {
+             lease.enforcement_state = value;
+         }
+         if let Some(value) = patch.owner_run_id {
+             lease.owner_run_id = value;
+         }
+         if let Some(value) = patch.mode {
+             lease.mode = value;
+         }
+         if let Some(value) = patch.delegated_from {
+@@ -1500,20 +1638,25 @@ impl AdapterRepo for MockAdapterRepo {
+                 row.version.clone(),
+                 row.bundle_digest.clone(),
+             ),
+             row,
+             "duplicate adapter registration",
+         )
+     }
+ 
+     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        check_literal(
++            "adapter_instances.state",
++            &instance.state,
++            &["starting", "ready", "exited", "failed"],
++        )?;
+         let key = (
+             instance.adapter_id,
+             instance.adapter_version.clone(),
+             instance.bundle_digest.clone(),
+         );
+         if !state.registrations.contains_key(&key) {
+             return Err(failed_precondition(
+                 "adapter instance references a missing registration",
+             ));
+         }
+@@ -1539,46 +1682,62 @@ impl AdapterRepo for MockAdapterRepo {
+         )
+     }
+ 
+     async fn cas_instance_state(
+         &mut self,
+         id: AdapterInstanceId,
+         expect_state: &str,
+         patch: AdapterInstanceStatePatch,
+     ) -> errors::Result<bool> {
+         let mut state = lock(&self.state)?;
+-        let Some(instance) = state.instances.get_mut(&id) else {
++        let Some(instance) = state.instances.get(&id) else {
+             return Ok(false);
+         };
+         if instance.state != expect_state {
+             return Ok(false);
+         }
++        if let Some(value) = &patch.state {
++            check_literal(
++                "adapter_instances.state",
++                value,
++                &["starting", "ready", "exited", "failed"],
++            )?;
++        }
++        let instance = state
++            .instances
++            .get_mut(&id)
++            .expect("instance checked above");
+         if let Some(value) = patch.state {
+             instance.state = value;
+         }
+         if let Some(value) = patch.exit_reason {
+             instance.exit_reason = Some(value);
+         }
+         if let Some(value) = patch.last_heartbeat_ms {
+             instance.last_heartbeat_ms = Some(value);
+         }
+         if let Some(value) = patch.ended_at_ms {
+             instance.ended_at_ms = Some(value);
+         }
+         Ok(true)
+     }
+ 
+     async fn insert_conformance_report(
+         &mut self,
+         report: NewConformanceReport,
+     ) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        check_literal(
++            "conformance_reports.result",
++            &report.result,
++            &["pass", "fail"],
++        )?;
+         let key = (
+             report.adapter_id,
+             report.adapter_version.clone(),
+             report.bundle_digest.clone(),
+         );
+         if !state.registrations.contains_key(&key) {
+             return Err(failed_precondition(
+                 "conformance report references a missing registration",
+             ));
+         }
+@@ -1618,20 +1777,28 @@ impl ArtifactRead for MockArtifactRepo {
+             .get(uri)
+             .and_then(|id| state.artifacts_by_id.get(id))
+             .cloned())
+     }
+ }
+ 
+ #[async_trait]
+ impl ArtifactRepo for MockArtifactRepo {
+     async fn insert(&mut self, artifact: NewArtifact) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        if !state.runs.contains_key(&artifact.origin_run_id) {
++            return Err(failed_precondition("artifact references a missing run"));
++        }
++        if let Some(effect) = artifact.origin_effect_id
++            && !state.effects.contains_key(&effect)
++        {
++            return Err(failed_precondition("artifact references a missing effect"));
++        }
+         if state.artifacts_by_uri.contains_key(&artifact.uri) {
+             return Err(conflict("duplicate artifact uri"));
+         }
+         let row = ArtifactRow {
+             artifact_id: artifact.artifact_id,
+             uri: artifact.uri,
+             digest: artifact.digest,
+             media_type: artifact.media_type,
+             size_bytes: artifact.size_bytes,
+             origin_run_id: artifact.origin_run_id,
+@@ -1664,59 +1831,85 @@ impl LoopRead for MockLoopRepo {
+         run: RunId,
+         decision: DecisionId,
+     ) -> errors::Result<Option<DecisionRow>> {
+         Ok(lock(&self.state)?.decisions.get(&(run, decision)).cloned())
+     }
+ }
+ 
+ #[async_trait]
+ impl LoopRepo for MockLoopRepo {
+     async fn insert_turn(&mut self, turn: NewLoopTurn) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        check_literal(
++            "loop_turns.state",
++            &turn.state,
++            &["issued", "accepted", "stale"],
++        )?;
++        if !state.runs.contains_key(&turn.run_id) {
++            return Err(failed_precondition("turn references a missing run"));
++        }
+         let row = LoopTurnRow {
+             turn_id: turn.turn_id,
+             run_id: turn.run_id,
+             run_revision: turn.run_revision,
+             loop_epoch: turn.loop_epoch,
+             step_sequence: turn.step_sequence,
+             input_event_cursor: turn.input_event_cursor,
+             state: turn.state,
+             issued_at_ms: turn.issued_at_ms,
+         };
+-        insert_unique(
+-            &mut lock(&self.state)?.turns,
+-            row.turn_id,
+-            row,
+-            "duplicate turn id",
+-        )
++        insert_unique(&mut state.turns, row.turn_id, row, "duplicate turn id")
+     }
+ 
+     async fn cas_turn(
+         &mut self,
+         id: TurnId,
+         expect_state: &str,
+         patch: LoopTurnPatch,
+     ) -> errors::Result<bool> {
+         let mut state = lock(&self.state)?;
+-        let Some(turn) = state.turns.get_mut(&id) else {
++        let Some(turn) = state.turns.get(&id) else {
+             return Ok(false);
+         };
+         if turn.state != expect_state {
+             return Ok(false);
+         }
++        if let Some(value) = &patch.state {
++            check_literal("loop_turns.state", value, &["issued", "accepted", "stale"])?;
++        }
++        let turn = state.turns.get_mut(&id).expect("turn checked above");
+         if let Some(value) = patch.state {
+             turn.state = value;
+         }
+         Ok(true)
+     }
+ 
+     async fn insert_decision(&mut self, decision: NewDecision) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
++        check_literal(
++            "decisions.decision_type",
++            &decision.decision_type,
++            &[
++                "Complete",
++                "Fail",
++                "Wait",
++                "SpawnAgent",
++                "InvokeEffect",
++                "RequestApproval",
++            ],
++        )?;
++        if !state.runs.contains_key(&decision.run_id) {
++            return Err(failed_precondition("decision references a missing run"));
++        }
++        if !state.turns.contains_key(&decision.turn_id) {
++            return Err(failed_precondition("decision references a missing turn"));
++        }
+         if state
+             .decisions
+             .contains_key(&(decision.run_id, decision.decision_id))
+         {
+             return Err(conflict("duplicate decision for run"));
+         }
+         let row = DecisionRow {
+             decision_id: decision.decision_id,
+             run_id: decision.run_id,
+             turn_id: decision.turn_id,
+diff --git a/agent-os/crates/testkit/tests/store_mock.rs b/agent-os/crates/testkit/tests/store_mock.rs
+index 2e95470..48c513e 100644
+--- a/agent-os/crates/testkit/tests/store_mock.rs
++++ b/agent-os/crates/testkit/tests/store_mock.rs
+@@ -1,28 +1,40 @@
+ //! Contract test for the in-memory `KernelStore` mock.
+ //!
+ //! The mock is the second implementation of the port. These tests prove the
+ //! contract is implementable: atomic visibility on commit, no residue on drop,
+ //! CAS conditions that reject stale expectations, idempotency replay,
+ //! contiguous stream allocation, and the daemon-epoch assertion at write begin.
+ 
+ use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
+ use domain::ids::{
+-    ActorId, AdapterId, CommandId, DaemonInstanceId, DecisionId, EffectId, EventCursor, EventId,
+-    EventStreamKey, IdempotencyKey, PrincipalId, RunId, SessionId, TaskId,
++    ActorId, AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
++    CommandId, ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId,
++    EffectId, EventCursor, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, RunId,
++    SessionId, TaskId, TimerId, TurnId, WorkspaceId,
++};
++use domain::resource::{
++    DependencyCondition, LeaseEnforcementState, TimerState, WorkspaceAccessMode,
+ };
+ use domain::run::{RecoveryDisposition, RunState};
+-use domain::security::{RetentionClass, SensitivityClass};
+-use errors::codes::ErrorCode;
++use domain::security::{
++    ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState,
++};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::{
+-    EffectPatch, KernelStore, NewEffect, NewIdempotencyRecord, NewOutboxEvent, NewRun, NewSession,
+-    NewTask, RunCas, RunPatch, TxContext,
++    AdapterInstanceStatePatch, EffectPatch, KernelStore, LeasePatch, LoopTurnPatch,
++    NewAdapterInstance, NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse,
++    NewArtifact, NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision,
++    NewDelegationHop, NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewRun,
++    NewRunDependency, NewSession, NewTask, NewTimer, NewWorkspace, NewWorkspaceLease, RunCas,
++    RunPatch, TxContext,
+ };
+ use testkit::ids::DeterministicIds;
+ use testkit::store::MockStore;
+ 
+ const SEED_MS: i64 = 1_700_000_000_000;
+ 
+ fn context(ids: &DeterministicIds) -> TxContext {
+     TxContext {
+         daemon_epoch: 1,
+         principal_id: PrincipalId::new(ids),
+@@ -614,10 +626,589 @@ async fn fence_acquisition_invalidates_in_flight_write() {
+     txn.rollback().await.expect("rollback");
+ 
+     let current = store
+         .current_fence()
+         .await
+         .expect("current fence")
+         .expect("the new fence must survive the failed commit");
+     assert_eq!(current.epoch.0, 2);
+     assert_eq!(current.instance_id, instance);
+ }
++
++fn assert_error(error: KernelError, code: ErrorCode) {
++    assert_eq!(error.code(), code);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++}
++
++async fn seed_base(f: &Fixture) {
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    txn.sessions()
++        .insert(new_session(f))
++        .await
++        .expect("session");
++    txn.tasks().insert(new_task(f)).await.expect("task");
++    txn.runs().insert(new_run(f)).await.expect("run");
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn graph_dependency_cycles_are_rejected() {
++    let f = fixture();
++    seed_base(&f).await;
++    let second = RunId::new(&f.ids);
++    let third = RunId::new(&f.ids);
++    let dependency = |source: RunId, target: RunId| NewRunDependency {
++        dependency_id: DependencyId::new(&f.ids),
++        task_id: f.task_id,
++        source_run_id: source,
++        target_run_id: target,
++        dependency_condition: DependencyCondition::CompletedSuccessfully,
++        created_at_ms: SEED_MS,
++    };
++
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    for run in [second, third] {
++        txn.runs()
++            .insert(NewRun {
++                run_id: run,
++                ..new_run(&f)
++            })
++            .await
++            .expect("extra run");
++    }
++    txn.graph().ensure_head(f.task_id).await.expect("head");
++    txn.graph()
++        .insert_dependency(dependency(f.run_id, second), 0)
++        .await
++        .expect("first edge");
++    txn.graph()
++        .insert_dependency(dependency(second, third), 1)
++        .await
++        .expect("second edge");
++
++    let back_edge = txn
++        .graph()
++        .insert_dependency(dependency(third, f.run_id), 2)
++        .await
++        .expect_err("a back edge must be rejected");
++    assert_error(back_edge, ErrorCode::Conflict);
++    let self_edge = txn
++        .graph()
++        .insert_dependency(dependency(f.run_id, f.run_id), 2)
++        .await
++        .expect_err("a self edge must be rejected");
++    assert_error(self_edge, ErrorCode::Conflict);
++
++    let head = txn
++        .graph()
++        .get_head(f.task_id)
++        .await
++        .expect("head")
++        .expect("head row");
++    assert_eq!(head.graph_revision, 2, "rejected cycles must not advance");
++    assert_eq!(
++        txn.graph()
++            .list_dependencies(f.task_id)
++            .await
++            .expect("list")
++            .len(),
++        2
++    );
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn active_exclusive_workspace_leases_conflict() {
++    let f = fixture();
++    seed_base(&f).await;
++    let workspace = WorkspaceId::new(&f.ids);
++    let first = LeaseId::new(&f.ids);
++    let second = LeaseId::new(&f.ids);
++    let lease = |id: LeaseId, enforcement_state: LeaseEnforcementState| NewWorkspaceLease {
++        lease_id: id,
++        workspace_id: workspace,
++        owner_run_id: f.run_id,
++        mode: WorkspaceAccessMode::ExclusiveWrite,
++        lease_epoch: 1,
++        enforcement_state,
++        delegated_from: vec![],
++        created_at_ms: SEED_MS,
++    };
++
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    txn.workspaces()
++        .insert_workspace(NewWorkspace {
++            workspace_id: workspace,
++            kind: "git".to_owned(),
++            base_revision: None,
++            parent_workspace_id: None,
++            created_at_ms: SEED_MS,
++        })
++        .await
++        .expect("workspace");
++    txn.workspaces()
++        .insert_lease(lease(first, LeaseEnforcementState::Active))
++        .await
++        .expect("first lease");
++    let duplicate = txn
++        .workspaces()
++        .insert_lease(lease(second, LeaseEnforcementState::Active))
++        .await
++        .expect_err("a second active exclusive lease must conflict");
++    assert_error(duplicate, ErrorCode::Conflict);
++    txn.workspaces()
++        .insert_lease(lease(second, LeaseEnforcementState::Revoked))
++        .await
++        .expect("a revoked exclusive lease may coexist");
++    txn.commit().await.expect("commit");
++
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    let activate = txn
++        .workspaces()
++        .cas_lease(
++            second,
++            1,
++            LeasePatch {
++                enforcement_state: Some(LeaseEnforcementState::Active),
++                ..LeasePatch::default()
++            },
++        )
++        .await
++        .expect_err("activating a second exclusive lease must conflict");
++    assert_error(activate, ErrorCode::Conflict);
++    txn.rollback().await.expect("rollback");
++}
++
++#[tokio::test]
++async fn loop_turn_and_decision_literals_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let turn = TurnId::new(&f.ids);
++    let turn_fields = |state: &str| NewLoopTurn {
++        turn_id: turn,
++        run_id: f.run_id,
++        run_revision: 0,
++        loop_epoch: 0,
++        step_sequence: 0,
++        input_event_cursor: cursor(f.run_id),
++        state: state.to_owned(),
++        issued_at_ms: SEED_MS,
++    };
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++
++    let bad_state = txn
++        .loop_turns()
++        .insert_turn(turn_fields("bogus"))
++        .await
++        .expect_err("an unknown turn state must fail");
++    assert_error(bad_state, ErrorCode::FailedPrecondition);
++    let missing_run = txn
++        .loop_turns()
++        .insert_turn(NewLoopTurn {
++            run_id: RunId::new(&f.ids),
++            ..turn_fields("issued")
++        })
++        .await
++        .expect_err("a turn must reference an existing run");
++    assert_error(missing_run, ErrorCode::FailedPrecondition);
++    txn.loop_turns()
++        .insert_turn(turn_fields("issued"))
++        .await
++        .expect("turn");
++    let bad_patch = txn
++        .loop_turns()
++        .cas_turn(
++            turn,
++            "issued",
++            LoopTurnPatch {
++                state: Some("bogus".to_owned()),
++            },
++        )
++        .await
++        .expect_err("an unknown turn patch state must fail");
++    assert_error(bad_patch, ErrorCode::FailedPrecondition);
++
++    let decision = |decision_type: &str, turn_id: TurnId| NewDecision {
++        decision_id: DecisionId::new(&f.ids),
++        run_id: f.run_id,
++        turn_id,
++        decision_type: decision_type.to_owned(),
++        decision_digest: "decision-digest".to_owned(),
++        decision_bytes: vec![1],
++        run_revision: 0,
++        loop_epoch: 0,
++        step_sequence: 0,
++        input_event_cursor: cursor(f.run_id),
++        accepted_at_ms: SEED_MS,
++    };
++    let bad_type = txn
++        .loop_turns()
++        .insert_decision(decision("Bogus", turn))
++        .await
++        .expect_err("an unknown decision type must fail");
++    assert_error(bad_type, ErrorCode::FailedPrecondition);
++    let missing_turn = txn
++        .loop_turns()
++        .insert_decision(decision("InvokeEffect", TurnId::new(&f.ids)))
++        .await
++        .expect_err("a decision must reference an existing turn");
++    assert_error(missing_turn, ErrorCode::FailedPrecondition);
++    let missing_run = txn
++        .loop_turns()
++        .insert_decision(NewDecision {
++            run_id: RunId::new(&f.ids),
++            ..decision("InvokeEffect", turn)
++        })
++        .await
++        .expect_err("a decision must reference an existing run");
++    assert_error(missing_run, ErrorCode::FailedPrecondition);
++    txn.loop_turns()
++        .insert_decision(decision("InvokeEffect", turn))
++        .await
++        .expect("decision");
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn adapter_instance_and_conformance_literals_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let adapter = AdapterId::new(&f.ids);
++    let instance_id = AdapterInstanceId::new(&f.ids);
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    txn.adapters()
++        .insert_registration(NewAdapterRegistration {
++            adapter_id: adapter,
++            version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            manifest_digest: "manifest-1".to_owned(),
++            runtime_type: "process".to_owned(),
++            implemented_ports: vec![],
++            capabilities: vec![],
++            trust_state: TrustState::Trusted,
++            conformance_state: ConformanceState::Untested,
++            created_at_ms: SEED_MS,
++        })
++        .await
++        .expect("registration");
++
++    let instance = |state: &str| NewAdapterInstance {
++        adapter_instance_id: instance_id,
++        adapter_id: adapter,
++        adapter_version: "1.0.0".to_owned(),
++        bundle_digest: "bundle-1".to_owned(),
++        daemon_instance_id: DaemonInstanceId::new(&f.ids),
++        pid: None,
++        process_start_identity: None,
++        state: state.to_owned(),
++        exit_reason: None,
++        last_heartbeat_ms: None,
++        started_at_ms: SEED_MS,
++        ended_at_ms: None,
++    };
++    let bad_state = txn
++        .adapters()
++        .insert_instance(instance("bogus"))
++        .await
++        .expect_err("an unknown instance state must fail");
++    assert_error(bad_state, ErrorCode::FailedPrecondition);
++    let missing_registration = txn
++        .adapters()
++        .insert_instance(NewAdapterInstance {
++            adapter_id: AdapterId::new(&f.ids),
++            ..instance("starting")
++        })
++        .await
++        .expect_err("an instance must reference an existing registration");
++    assert_error(missing_registration, ErrorCode::FailedPrecondition);
++    txn.adapters()
++        .insert_instance(instance("starting"))
++        .await
++        .expect("instance");
++    let bad_patch = txn
++        .adapters()
++        .cas_instance_state(
++            instance_id,
++            "starting",
++            AdapterInstanceStatePatch {
++                state: Some("bogus".to_owned()),
++                ..AdapterInstanceStatePatch::default()
++            },
++        )
++        .await
++        .expect_err("an unknown instance patch state must fail");
++    assert_error(bad_patch, ErrorCode::FailedPrecondition);
++
++    let bad_result = txn
++        .adapters()
++        .insert_conformance_report(NewConformanceReport {
++            adapter_id: adapter,
++            adapter_version: "1.0.0".to_owned(),
++            bundle_digest: "bundle-1".to_owned(),
++            report_digest: "report-1".to_owned(),
++            harness_version: "0.1.0".to_owned(),
++            result: "bogus".to_owned(),
++            run_at_ms: SEED_MS,
++            details: None,
++        })
++        .await
++        .expect_err("an unknown conformance result must fail");
++    assert_error(bad_result, ErrorCode::FailedPrecondition);
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn config_generation_literals_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    let generation = |validation_state: &str, test_state: &str| NewConfigGeneration {
++        generation_id: ConfigGenerationId::new(&f.ids),
++        digest: format!("digest-{validation_state}-{test_state}"),
++        document: vec![7],
++        validation_state: validation_state.to_owned(),
++        test_state: test_state.to_owned(),
++        created_by_actor_id: ActorId::new(&f.ids),
++        created_at_ms: SEED_MS,
++    };
++    let bad_validation = txn
++        .config()
++        .insert_generation(generation("bogus", "untested"))
++        .await
++        .expect_err("an unknown validation state must fail");
++    assert_error(bad_validation, ErrorCode::FailedPrecondition);
++    let bad_test_state = txn
++        .config()
++        .insert_generation(generation("proposed", "bogus"))
++        .await
++        .expect_err("an unknown test state must fail");
++    assert_error(bad_test_state, ErrorCode::FailedPrecondition);
++    txn.config()
++        .insert_generation(generation("proposed", "untested"))
++        .await
++        .expect("generation");
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn approval_response_decision_literal_is_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let request = ApprovalRequestId::new(&f.ids);
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    txn.security()
++        .insert_approval_request(NewApprovalRequest {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            principal_id: f.principal_id,
++            actor_id: ActorId::new(&f.ids),
++            run_id: Some(f.run_id),
++            operation: "write-file".to_owned(),
++            target_resource: None,
++            capability_ids: vec![1],
++            extension_bundle_digest: None,
++            config_generation_digest: None,
++            expires_at_ms: SEED_MS,
++            nonce: "nonce-1".to_owned(),
++            state: ApprovalState::Pending,
++            created_at_ms: SEED_MS,
++            resolved_at_ms: None,
++        })
++        .await
++        .expect("approval request");
++    let bad_decision = txn
++        .security()
++        .insert_approval_response(NewApprovalResponse {
++            request_id: request,
++            request_digest: "request-digest".to_owned(),
++            decision: "maybe".to_owned(),
++            device_id: domain::ids::DeviceId::new(&f.ids),
++            responder_principal_id: f.principal_id,
++            responded_at_ms: SEED_MS,
++        })
++        .await
++        .expect_err("an unknown approval decision must fail");
++    assert_error(bad_decision, ErrorCode::FailedPrecondition);
++    txn.rollback().await.expect("rollback");
++}
++
++#[tokio::test]
++async fn artifact_references_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let artifact = |origin_run_id: RunId, origin_effect_id: Option<EffectId>| NewArtifact {
++        artifact_id: ArtifactId::new(&f.ids),
++        uri: format!("artifact://{}", ArtifactId::new(&f.ids)),
++        digest: "digest-1".to_owned(),
++        media_type: "application/octet-stream".to_owned(),
++        size_bytes: 1,
++        origin_run_id,
++        origin_effect_id,
++        sensitivity: SensitivityClass::Internal,
++        retention: RetentionClass::Audit,
++        locator: "file:///var/artifacts/1".to_owned(),
++        created_at_ms: SEED_MS,
++    };
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    let missing_run = txn
++        .artifacts()
++        .insert(artifact(RunId::new(&f.ids), None))
++        .await
++        .expect_err("an artifact must reference an existing run");
++    assert_error(missing_run, ErrorCode::FailedPrecondition);
++    let missing_effect = txn
++        .artifacts()
++        .insert(artifact(f.run_id, Some(EffectId::new(&f.ids))))
++        .await
++        .expect_err("an artifact must reference an existing effect");
++    assert_error(missing_effect, ErrorCode::FailedPrecondition);
++    txn.effects().insert(new_effect(&f)).await.expect("effect");
++    txn.artifacts()
++        .insert(artifact(f.run_id, Some(f.effect_id)))
++        .await
++        .expect("artifact");
++    txn.commit().await.expect("commit");
++}
++
++#[tokio::test]
++async fn timer_and_lease_references_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let workspace = WorkspaceId::new(&f.ids);
++    let lease = |owner_run_id: RunId| NewWorkspaceLease {
++        lease_id: LeaseId::new(&f.ids),
++        workspace_id: workspace,
++        owner_run_id,
++        mode: WorkspaceAccessMode::ExclusiveWrite,
++        lease_epoch: 1,
++        enforcement_state: LeaseEnforcementState::Active,
++        delegated_from: vec![],
++        created_at_ms: SEED_MS,
++    };
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    let missing_run = txn
++        .timers()
++        .insert(NewTimer {
++            timer_id: TimerId::new(&f.ids),
++            run_id: Some(RunId::new(&f.ids)),
++            timer_kind: "deadline".to_owned(),
++            payload: vec![4, 5],
++            due_at_ms: 100,
++            state: TimerState::Scheduled,
++            version: 0,
++            created_at_ms: SEED_MS,
++        })
++        .await
++        .expect_err("a timer must reference an existing run");
++    assert_error(missing_run, ErrorCode::FailedPrecondition);
++    let missing_workspace = txn
++        .workspaces()
++        .insert_lease(lease(f.run_id))
++        .await
++        .expect_err("a lease must reference an existing workspace");
++    assert_error(missing_workspace, ErrorCode::FailedPrecondition);
++    txn.workspaces()
++        .insert_workspace(NewWorkspace {
++            workspace_id: workspace,
++            kind: "git".to_owned(),
++            base_revision: None,
++            parent_workspace_id: None,
++            created_at_ms: SEED_MS,
++        })
++        .await
++        .expect("workspace");
++    let missing_owner = txn
++        .workspaces()
++        .insert_lease(lease(RunId::new(&f.ids)))
++        .await
++        .expect_err("a lease must reference an existing owner run");
++    assert_error(missing_owner, ErrorCode::FailedPrecondition);
++    txn.rollback().await.expect("rollback");
++}
++
++#[tokio::test]
++async fn grant_and_hop_references_are_validated() {
++    let f = fixture();
++    seed_base(&f).await;
++    let mut txn = f
++        .store
++        .begin_write(context(&f.ids))
++        .await
++        .expect("begin write");
++    let grant = |run_id: Option<RunId>, parent: Option<CapabilityGrantId>| NewCapabilityGrant {
++        grant_id: CapabilityGrantId::new(&f.ids),
++        principal_id: f.principal_id,
++        actor_id: ActorId::new(&f.ids),
++        run_id,
++        capability_id: "filesystem.write".to_owned(),
++        scope: vec![1, 2],
++        delegated_from_grant_id: parent,
++        expires_at_ms: None,
++        revoked_at_ms: None,
++        created_at_ms: SEED_MS,
++    };
++    let missing_run = txn
++        .security()
++        .insert_grant(grant(Some(RunId::new(&f.ids)), None))
++        .await
++        .expect_err("a grant must reference an existing run");
++    assert_error(missing_run, ErrorCode::FailedPrecondition);
++    let missing_parent = txn
++        .security()
++        .insert_grant(grant(Some(f.run_id), Some(CapabilityGrantId::new(&f.ids))))
++        .await
++        .expect_err("a grant must reference an existing parent grant");
++    assert_error(missing_parent, ErrorCode::FailedPrecondition);
++    let hop = txn
++        .security()
++        .insert_delegation_hop(NewDelegationHop {
++            chain_id: DelegationChainId::new(&f.ids),
++            hop_index: 0,
++            principal_or_actor_id: "principal-a".to_owned(),
++            run_id: Some(RunId::new(&f.ids)),
++            capability_grant_ids: vec![1],
++        })
++        .await
++        .expect_err("a hop must reference an existing run");
++    assert_error(hop, ErrorCode::FailedPrecondition);
++    txn.rollback().await.expect("rollback");
++}

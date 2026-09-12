@@ -47,7 +47,7 @@
 - FND-001 intentionally declared minimal per-crate dependencies; the persistence module needs more, and no other task may edit manifests.
 - Required edits (use `.workspace = true` where the dependency is already in `[workspace.dependencies]`; add workspace entries only if missing):
   - `kernel-store`: add `async-trait`.
-  - `kernel-store-sqlite`: add `kernel-store`, `domain`, `errors`, `sqlx` with `sqlite` and `runtime-tokio` features, `tokio` with `rt`, `async-trait`, `observability`; dev-dependencies `testkit`, `tempfile`, `proptest`, `tokio` with `macros` and `rt-multi-thread`.
+  - `kernel-store-sqlite`: add `kernel-store`, `domain`, `errors`, `sqlx` with `sqlite` and `runtime-tokio` features, `tokio` with `rt`, `async-trait`; dev-dependencies `testkit`, `tempfile`, `proptest`, `tokio` with `macros` and `rt-multi-thread`.
   - `testkit`: add `kernel-store`, `errors`, `async-trait`; dev-dependency `tokio` with `macros` and `rt-multi-thread`.
   - `identity`: add `kernel-store`, `domain`, `errors`.
   - `events`: add `kernel-store`, `domain`, `errors`.
