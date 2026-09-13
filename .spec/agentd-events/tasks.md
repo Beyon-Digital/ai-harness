@@ -1,0 +1,302 @@
+# Tasks — agentd-events
+
+**Date:** 2026-09-11
+**Requirements:** `requirements.md` (approved)
+**Design:** `design.md` (approved)
+
+## Global constraints
+
+- All Rust lives under `agent-os/`; the only pack edits are EVT-G0's approved reconciliation.
+- From `agent-os/`: `cargo check --workspace`, `cargo test --workspace`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`.
+- From the repo root: both pack validators and `bash agent-os/scripts/check-contract-mirror.sh`.
+- No `unwrap()`/`expect()` outside tests; no payload bytes in errors or logs; no wall-clock
+  sleeps in tests; parameterized SQL only in the SQLite crates.
+- Commit per task with the task id; retry `git commit` on `index.lock` after two seconds.
+
+## Execution contract for subagents
+
+1. Claim before writing: `python3 "$SPECFLOW" claim agentd-events TASK_ID AGENT_ID` then `start`.
+2. Stay inside the task's `files:` lease; `block` and report if another file is needed.
+3. `depends_on` interfaces are contracts from `design.md`; do not redesign them.
+4. Test first where the task says so; run the focused test, then the affected suite once.
+5. Report `DONE` · `DONE_WITH_CONCERNS` · `BLOCKED` · `NEEDS_CONTEXT` honestly.
+6. Never dispatch your own reviewer.
+7. Commit scoped to your files, then `review`, then write
+   `.spec/agentd-events/reports/task-TASK_ID.md`.
+
+---
+
+### Task EVT-000: Declare events-module dependencies
+
+- status: pending
+- owner: -
+- depends_on: none
+- files: `agent-os/crates/events/Cargo.toml`, `agent-os/crates/event-journal/Cargo.toml`, `agent-os/crates/event-journal-sqlite/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`
+- requirements: N3, G1, G2
+- scope: small
+- model: cheap
+
+**Objective:** Every events task compiles against declared dependencies.
+
+**Context the implementer cannot infer:**
+
+- `events`: add `tokio` (sync, rt, time), `serde`, `serde_yaml` (catalog parsing); dev-dependencies `kernel-store-sqlite`, `testkit`, `tempfile`, `tokio` (macros, rt-multi-thread). Existing deps `domain`, `errors`, `kernel-store` stay.
+- `event-journal`: add `domain`, `errors`, `async-trait`.
+- `event-journal-sqlite`: add `event-journal`, `domain`, `errors`, `sqlx`, `tokio`, `async-trait`; dev-dependency `tempfile`.
+- `agentd`: add `events`, `kernel-store`, `errors` (existing `observability`, `tokio` stay).
+- All names exist in `[workspace.dependencies]`; `.workspace = true`, append only.
+
+**Steps:**
+
+- [ ] Edit the four manifests; resolve the lock with `cargo check --workspace`
+- [ ] Run `cargo test --workspace --no-run`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`
+- [ ] Commit: `chore(workspace): declare events module dependencies [EVT-000]`
+
+**Acceptance criteria:**
+
+- [ ] All four crates resolve their needs; lock updated
+- [ ] G1/G2 — workspace gates and pack validators pass
+- [ ] N3 — no contract, schema, or pack file changed
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo check --workspace && cargo test --workspace --no-run` exits 0
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
+
+---
+
+### Task EVT-G0: Reconcile the classification vocabulary
+
+- status: pending
+- owner: -
+- depends_on: EVT-000
+- files: `agent-os-microkernel-mvp-buildpack/contracts/events/event.proto`, `agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql`, `agent-os-microkernel-mvp-buildpack/contract-lock.sha256`, `agent-os-microkernel-mvp-buildpack/MANIFEST.json`, `agent-os/proto/events/event.proto`, `agent-os/schema/kernel_store.sql`, `agent-os/crates/domain/src/security.rs`, `agent-os/crates/events/src/outbox.rs`, `agent-os/crates/command-coordinator/tests/coordinator.rs`, `agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs`, `agent-os/crates/kernel-store-sqlite/tests/outbox.rs`, `agent-os/crates/kernel-store-sqlite/tests/props.rs`
+- requirements: R1.5, N3, G2
+- scope: medium
+- model: standard
+
+**Objective:** One spelling per classification value: sensitivity 1-4 (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `SECRET`) and retention 1-3 (`EPHEMERAL`, `STANDARD`, `AUDIT`), consistent across the proto, domain mirror, catalog, schema, and every Rust usage.
+
+**Context the implementer cannot infer:**
+
+- Pack proto: rename `PRIVATE` to `CONFIDENTIAL`; retention becomes `EPHEMERAL=1, STANDARD=2, AUDIT=3` (rename `SESSION` to `STANDARD`, remove `DURABLE`).
+- Pack schema: the outbox `retention` CHECK narrows from `BETWEEN 1 AND 4` to `BETWEEN 1 AND 3`, and the comment block that names the literals updates to the new names. The `sensitivity` CHECK stays 1-4 with updated comments.
+- Mirror refresh: copy the edited proto and schema into `agent-os/proto/events/event.proto` and `agent-os/schema/kernel_store.sql` (verbatim).
+- Domain: rename `SensitivityClass::Private` to `Confidential`; `RetentionClass` becomes `Ephemeral = 1, Standard = 2, Audit = 3` (rename `Session`, remove `Durable`). Update the module tests accordingly.
+- Rust usages: replace `SensitivityClass::Private` with `Confidential` and `RetentionClass::Durable`/`Session` with `Standard` in the listed files.
+- Regenerate the lock and manifest with the validator flags (`--update-lock`, `--write-manifest`) as the last step, then confirm `validate_buildpack.py` prints `BUILD PACK OK` and the mirror check passes.
+- The event catalog is already correct; do not edit it.
+
+**Steps:**
+
+- [ ] Edit the pack contract and schema, refresh the mirror
+- [ ] Rename the domain variants and update every listed usage; run `cargo test --workspace`
+- [ ] Regenerate lock and manifest; run both validators and the mirror check
+- [ ] Commit: `docs(contracts): reconcile event classification vocabulary [EVT-G0]`
+
+**Acceptance criteria:**
+
+- [ ] R1.5 — proto, domain, catalog, and schema use identical names and ranges
+- [ ] N3/G2 — pack validator `BUILD PACK OK`, repo validator `OK`, mirror check clean, workspace gates green
+- [ ] No stale reference to `PRIVATE`, `SESSION`, or `DURABLE` remains in code or the pack
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] `grep -rn "PRIVATE\|DURABLE" agent-os-microkernel-mvp-buildpack/contracts agent-os/proto agent-os/crates --include="*.proto" --include="*.rs"` prints nothing
+- [ ] From `agent-os/`: `cargo test --workspace` passes
+- [ ] `python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py` prints `BUILD PACK OK`; `bash agent-os/scripts/check-contract-mirror.sh` exits 0
+
+---
+
+### Task EVT-001: Event primitives
+
+- status: pending
+- owner: -
+- depends_on: EVT-G0
+- files: `agent-os/crates/events/src/stream.rs`, `agent-os/crates/events/src/cursor.rs`, `agent-os/crates/events/src/envelope.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/primitives.rs`
+- requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, N1
+- scope: large
+- model: capable
+
+**Objective:** Canonical stream keys, cursor wiring, and a validated event builder whose classification floor comes from the embedded catalog.
+
+**Context the implementer cannot infer:**
+
+- Exact signatures are in `design.md` Interfaces (`stream.rs`, `cursor.rs`, `envelope.rs`). `domain::ids::EventCursor` already parses and formats `v1:{stream_key}:{sequence}`; `cursor.rs` re-exports it plus the `for_event` constructor.
+- Stream key forms are fixed by `specs/event-pipeline.md:8-18`; parsing rejects unknown prefixes and empty segments.
+- `CatalogClassificationPolicy::embedded()` parses `../../proto/events/catalog.yaml` via `include_str!` and `serde_yaml`; the YAML shape has an `events` list with `id` and `default_sensitivity`. Unknown event types have no floor.
+- `EventEnvelope` mirrors `contracts/events/event.proto` exactly; `to_bytes`/`from_bytes` use the prost type from `domain::generated::contract` and must round-trip field for field.
+- `EventBuilder::build` requires type, version, stream key, sequence, occurred time, classification, and payload; the classification floor check rejects downgrades with `FailedPrecondition`, `Never`.
+- Tests: `tests/primitives.rs` covers every stream kind round trip, malformed cursors, builder rejection cases, downgrade rejection, and envelope round trip.
+
+**Steps:**
+
+- [ ] Write the failing primitives tests first; confirm RED
+- [ ] Implement `stream.rs`, `cursor.rs`, `envelope.rs`, wire `lib.rs` (keep the existing `outbox` module)
+- [ ] Run `cargo test -p events --test primitives` to GREEN
+- [ ] Run `cargo test -p events`, clippy, fmt
+- [ ] Commit: `feat(events): validated envelopes, stream keys, and cursors [EVT-001]`
+
+**Acceptance criteria:**
+
+- [ ] R1.1–R1.4 — construction and validation rules enforced, downgrade rejected
+- [ ] R1.5 — the builder's floor comes from the embedded catalog, not a hard-coded table
+- [ ] R1.6 — envelope round trip preserves every field
+- [ ] N1 — payload bytes never appear in error messages
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo test -p events` passes
+- [ ] `cargo clippy -p events --all-targets -- -D warnings` clean
+
+---
+
+### Task EVT-002: Event Journal port and SQLite journal
+
+- status: pending
+- owner: -
+- depends_on: EVT-001
+- files: `agent-os/crates/event-journal/src/lib.rs`, `agent-os/crates/event-journal-sqlite/src/lib.rs`, `agent-os/crates/event-journal-sqlite/tests/journal.rs`
+- requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, N1, P2
+- scope: large
+- model: capable
+
+**Objective:** A separate `events.db` that accepts each stream position exactly once with idempotent duplicates, conflicts, gap rejection, and ordered reads.
+
+**Context the implementer cannot infer:**
+
+- Port types (`AppendResult`, `ReadResult`, `EventJournalPort`) are in `design.md`; `append` takes the stream key, expected sequence, and a batch; `read_stream` takes from-sequence and limit.
+- The SQLite journal embeds `agent-os/schema/event_journal.sql` verbatim (`include_str!`), creates the file `0600` in a `0700` directory, applies `busy_timeout`, and uses `BEGIN IMMEDIATE` for appends. `expected_sequence` is the head before the batch; a mismatch is `FailedPrecondition` (`Never`).
+- Identical `(event_id, stream_key, sequence)` already present → idempotent success. Same position with a different event id → `Conflict`. Batch sequences must be contiguous from `expected_sequence + 1`.
+- `read_stream` returns events with `sequence > from_sequence` in order up to the limit and sets `retention_gap: false`.
+- Races: the unique `(stream_key, sequence)` constraint is the authority; map constraint violations through the persistence `mapping` conventions (unique → `Conflict`).
+- Tests: append/read; exact duplicate idempotent; conflicting duplicate; gap rejection; read past head empty; concurrent same-position appends produce one winner (barrier, no sleeps).
+
+**Steps:**
+
+- [ ] Write the failing journal tests first; confirm RED
+- [ ] Implement the port crate and the SQLite journal; GREEN
+- [ ] Run `cargo test -p event-journal -p event-journal-sqlite`, clippy, fmt
+- [ ] Commit: `feat(journal): sqlite event journal with exact append rules [EVT-002]`
+
+**Acceptance criteria:**
+
+- [ ] R2.1–R2.4 — expected-sequence, idempotent duplicates, conflicts, ordered reads with the retention flag
+- [ ] R2.5 — a separate database file; no canonical table touched
+- [ ] R2.6 / P2 — concurrent appends to one position yield exactly one winner; sequences contiguous
+- [ ] N1 — file mode `0600`; payload bytes never in errors
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo test -p event-journal -p event-journal-sqlite` passes
+- [ ] `cargo clippy -p event-journal -p event-journal-sqlite --all-targets -- -D warnings` clean
+
+---
+
+### Task EVT-003: Journal-first dispatcher and outbox worker
+
+- status: pending
+- owner: -
+- depends_on: EVT-002
+- files: `agent-os/crates/events/src/dispatcher.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/dispatcher.rs`, `agent-os/crates/agentd/src/workers/outbox.rs`
+- requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, P1, P2, N2
+- scope: large
+- model: capable
+
+**Objective:** Committed outbox rows become durable journal history in per-stream order, then live events, surviving crashes and duplicate work.
+
+**Context the implementer cannot infer:**
+
+- `design.md` fixes `AFTER_JOURNAL_APPEND`, `DispatchOutcome`, and `EventDispatcher::dispatch_once(limit)`.
+- Scan via `KernelStore::begin_read` and `StreamRepo::scan_unpublished(limit)`; group rows per stream; `expected_sequence = first_row.sequence - 1` (0 for sequence 1). Append the batch, then call `inject(AFTER_JOURNAL_APPEND)`; on true, return `Unavailable` before marking so recovery re-appends idempotently. Then `StreamRepo::mark_published(event_id, Journal)` in a short fenced write transaction using the current fence epoch, then `LiveBus::publish` per event.
+- `mark_published` needs a `TxContext`; do not depend on the command-core `FenceProvider` type. Instead the dispatcher takes `daemon_epoch: u64` per `dispatch_once` call from the worker (which holds the fence), so tests pass a fixed epoch and create a matching fence via the store.
+- Tests: crash re-append (arm `AFTER_JOURNAL_APPEND`, first iteration fails, journal has rows, marks absent; second iteration completes with no duplicate rows), journal unavailable (a closed/failing journal stub → backlog grows and the store still commits commands), per-stream order (multi-row batches), journal-first (bus receives only after rows exist).
+- The `agentd` worker is a thin loop: `interval(poll_ms)` around `dispatch_once`, with capped exponential backoff on `Unavailable`; cancellation through a `tokio::sync::watch` or `CancellationToken`-style flag local to the file. Keep it small and untested at the process level.
+- No sleeps in tests: call `dispatch_once` directly.
+
+**Steps:**
+
+- [ ] Write the failing dispatcher tests first; confirm RED
+- [ ] Implement the dispatcher, wire `lib.rs`, fill the worker
+- [ ] Run `cargo test -p events --test dispatcher` to GREEN; then `cargo test --workspace`
+- [ ] Run clippy and fmt
+- [ ] Commit: `feat(events): journal-first dispatcher and outbox worker [EVT-003]`
+
+**Acceptance criteria:**
+
+- [ ] R3.1–R3.5 — ordered scan, mark-after-append, crash re-append, backlog on failure, per-stream order
+- [ ] R3.6 / P3 — no bus delivery before journal acceptance
+- [ ] P1 — exactly one journal row per event across the crash point
+- [ ] N2 — deterministic iterations; no sleeps
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo test -p events` passes
+- [ ] `cargo clippy -p events -p agentd --all-targets -- -D warnings` clean
+
+---
+
+### Task EVT-004: Live bus with explicit lag
+
+- status: pending
+- owner: -
+- depends_on: EVT-003
+- files: `agent-os/crates/events/src/live_bus.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/live_bus.rs`
+- requirements: R4.1, R4.2, R4.3, R4.4, R4.5, P3, N2
+- scope: medium
+- model: standard
+
+**Objective:** Bounded in-process durable delivery that disconnects slow subscribers with a resumable cursor, plus a separate lossy ephemeral channel.
+
+**Context the implementer cannot infer:**
+
+- Signatures are in `design.md`: `LiveBus::new(capacity)`, `publish`, `subscribe`, `subscriber_count`; `LiveSubscription::next() -> LiveItem` where `LiveItem::Event` carries the envelope and `Lagged { resume_from }` carries the last journal-backed cursor the subscription delivered.
+- Track the last delivered cursor inside the subscription; on `tokio::sync::broadcast` `RecvError::Lagged`, return `Lagged` once and end the subscription (subsequent `next` panics or returns a terminal state — make it explicit and tested).
+- Ephemeral channel: fixed capacity, `try_publish` drops and increments a counter when full; never touches durable cursors.
+- Tests: fill a small capacity without consuming, publish past it, assert the slow subscriber gets `Lagged` with the last delivered cursor while a second subscriber continues; resume through `EventJournalPort::read_stream` from that cursor and assert no gap or duplicate; ephemeral overflow increments `dropped` and durable subscribers are unaffected; no sleeps — use `try_recv` style APIs or `tokio::time::timeout` only around real receipt, not sleeps.
+- Wire `pub mod live_bus;` in `lib.rs` and re-export `LiveItem`.
+
+**Steps:**
+
+- [ ] Write the failing live-bus tests first; confirm RED
+- [ ] Implement `live_bus.rs` and wire `lib.rs`; GREEN
+- [ ] Run `cargo test -p events --test live_bus`, then `cargo test --workspace`, clippy, fmt
+- [ ] Commit: `feat(events): bounded live bus with explicit lag [EVT-004]`
+
+**Acceptance criteria:**
+
+- [ ] R4.1–R4.3 — ordered delivery, explicit lag with resume cursor, resumable with no gap or duplicate
+- [ ] R4.4 — ephemeral drops counted, durable delivery unaffected
+- [ ] R4.5 / P3 — no cursor advancement for undelivered events
+- [ ] N2 — deterministic capacity-driven lag; no sleeps
+- [ ] No file outside `files:` changed
+
+**Verification:**
+
+- [ ] From `agent-os/`: `cargo test -p events` passes
+- [ ] `cargo clippy -p events --all-targets -- -D warnings` and `cargo fmt --check` clean
+
+---
+
+## Checkpoints
+
+| After wave | Check | Command |
+|---|---|---|
+| 1 | Dependencies resolved | From `agent-os/`: `cargo check --workspace` |
+| 2 | Vocabulary single-sourced; validators and mirror green | `python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py`; `bash agent-os/scripts/check-contract-mirror.sh` |
+| 3-4 | Primitives and journal green | From `agent-os/`: `cargo test -p events -p event-journal -p event-journal-sqlite` |
+| 5-6 | Public gates | From `agent-os/`: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; from the repo root: both validators |
+
+## Rulings
+
+| # | Ruling | Why | Cost if wrong |
+|---|---|---|---|
+| 1 | Retention classes narrow to three (1-3); `DURABLE` is removed | Ends the catalog/proto divergence the foundation deferred | A future durable-forever class would need a new value and CHECK |
+| 2 | `dispatch_once` is the testable unit; the worker owns timing | Deterministic tests with no sleeps | Worker-level timing remains untested at process scale |
+| 3 | The dispatcher takes the daemon epoch per call rather than depending on command-core | Keeps crate dependencies clean | Callers must thread the epoch |

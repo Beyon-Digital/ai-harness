@@ -1,0 +1,8 @@
+{
+  "feature": "agentd-events",
+  "phase": "implement",
+  "gates": {
+    "implement": "2026-09-13T01:37:42Z"
+  },
+  "created": "2026-09-13T01:30:33Z"
+}
