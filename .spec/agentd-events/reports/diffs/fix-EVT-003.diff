@@ -1,0 +1,355 @@
+diff --git a/agent-os/crates/agentd/src/workers/outbox.rs b/agent-os/crates/agentd/src/workers/outbox.rs
+index 81cdd3d..918a0a2 100644
+--- a/agent-os/crates/agentd/src/workers/outbox.rs
++++ b/agent-os/crates/agentd/src/workers/outbox.rs
+@@ -1,21 +1,19 @@
+ //! Outbox dispatch worker.
+ //!
+ //! A thin interval loop around the journal-first dispatcher: one
+ //! [`EventDispatcher::dispatch_once`] per tick, with capped exponential
+ //! backoff while the journal reports `Unavailable` and prompt cancellation
+ //! through a `tokio::sync::watch` flag.
+ //!
+ //! The composition root wires this worker in a later task, so its items are
+-//! not yet reachable from `main`; the local allow keeps `-D warnings` honest
+-//! about everything else until then.
+-#![allow(dead_code)]
++//! not yet reachable from `main`.
+ 
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+ use errors::codes::ErrorCode;
+ use events::dispatcher::EventDispatcher;
+ use tokio::sync::watch;
+ use tokio::time::{MissedTickBehavior, interval, sleep};
+ 
+ /// Rows scanned per dispatch iteration.
+@@ -33,36 +31,38 @@ pub trait EpochSource: Send + Sync {
+ 
+ /// Thin interval loop around the journal-first dispatcher.
+ pub struct OutboxWorker {
+     dispatcher: Arc<EventDispatcher>,
+     epoch: Arc<dyn EpochSource>,
+     poll: Duration,
+ }
+ 
+ impl OutboxWorker {
+     /// Creates a worker that polls the outbox every `poll`.
++    #[allow(dead_code)]
+     pub fn new(
+         dispatcher: Arc<EventDispatcher>,
+         epoch: Arc<dyn EpochSource>,
+         poll: Duration,
+     ) -> Self {
+         Self {
+             dispatcher,
+             epoch,
+             poll,
+         }
+     }
+ 
+     /// Dispatches until `shutdown` requests a stop.
+     ///
+     /// Availability failures back off exponentially up to [`MAX_BACKOFF`];
+     /// success and every other failure resume the normal `poll` cadence.
++    #[allow(dead_code)]
+     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+         let mut ticker = interval(self.poll);
+         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+         let mut backoff = INITIAL_BACKOFF;
+         loop {
+             tokio::select! {
+                 _ = ticker.tick() => {}
+                 changed = shutdown.changed() => {
+                     if changed.is_err() || *shutdown.borrow() {
+                         return;
+diff --git a/agent-os/crates/events/src/dispatcher.rs b/agent-os/crates/events/src/dispatcher.rs
+index 4ecb1c8..5c0b009 100644
+--- a/agent-os/crates/events/src/dispatcher.rs
++++ b/agent-os/crates/events/src/dispatcher.rs
+@@ -73,24 +73,28 @@ impl EventDispatcher {
+             faults,
+             clock,
+             ids,
+             system_principal,
+         }
+     }
+ 
+     /// Runs one deterministic iteration: scan, append per stream, mark, publish.
+     ///
+     /// The expected sequence is the first scanned row's sequence minus one
+-    /// (D7). After every successful append the `outbox.after_journal_append`
+-    /// fault point is consulted; when it fires the iteration reports
+-    /// `Unavailable`/`Safe` before any mark is written, so recovery re-appends
+-    /// the same batch idempotently.
++    /// (D7). Before appending, the stream's already-recorded prefix is read
++    /// back, so a batch that spans a crash (recorded rows plus newly committed
++    /// rows) appends only its unrecorded suffix from the recorded head; a
++    /// position that already holds a different event is a `Conflict`. After
++    /// every successful append the `outbox.after_journal_append` fault point is
++    /// consulted; when it fires the iteration reports `Unavailable`/`Safe`
++    /// before any mark is written, so recovery re-appends the same batch
++    /// idempotently.
+     pub async fn dispatch_once(
+         &self,
+         limit: u32,
+         daemon_epoch: u64,
+     ) -> errors::Result<DispatchOutcome> {
+         let rows = self.scan(limit, daemon_epoch).await?;
+ 
+         let mut groups: Vec<(StreamKey, Vec<EventEnvelope>)> = Vec::new();
+         for row in &rows {
+             let key = StreamKey::from_str(row.stream_key.as_str()).map_err(|_| {
+@@ -103,29 +107,41 @@ impl EventDispatcher {
+             let envelope = envelope_from_row(row, key.clone());
+             match groups.last_mut() {
+                 Some((existing, batch)) if *existing == key => batch.push(envelope),
+                 _ => groups.push((key, vec![envelope])),
+             }
+         }
+ 
+         let mut envelopes: Vec<EventEnvelope> = Vec::with_capacity(rows.len());
+         for (stream_key, batch) in &groups {
+             let expected_sequence = batch[0].sequence.saturating_sub(1);
+-            self.journal
+-                .append(stream_key, expected_sequence, batch)
++            let recorded = self
++                .journal
++                .read_stream(stream_key, expected_sequence, batch_limit(batch.len()))
+                 .await?;
+-            if self.faults.inject(AFTER_JOURNAL_APPEND) {
+-                return Err(KernelError::new(
+-                    ErrorCode::Unavailable,
+-                    RetryClass::Safe,
+-                    "outbox.after_journal_append fault point fired after a journal append",
+-                ));
++            let matched = recorded_prefix(&recorded.events, batch)?;
++            if matched < batch.len() {
++                let append_from = if matched == 0 {
++                    expected_sequence
++                } else {
++                    batch[matched - 1].sequence
++                };
++                self.journal
++                    .append(stream_key, append_from, &batch[matched..])
++                    .await?;
++                if self.faults.inject(AFTER_JOURNAL_APPEND) {
++                    return Err(KernelError::new(
++                        ErrorCode::Unavailable,
++                        RetryClass::Safe,
++                        "outbox.after_journal_append fault point fired after a journal append",
++                    ));
++                }
+             }
+             envelopes.extend(batch.iter().cloned());
+         }
+ 
+         if !rows.is_empty() {
+             let mut txn = self
+                 .store
+                 .begin_write(self.write_context(daemon_epoch))
+                 .await?;
+             for row in &rows {
+@@ -160,20 +176,50 @@ impl EventDispatcher {
+     fn write_context(&self, daemon_epoch: u64) -> TxContext {
+         TxContext {
+             daemon_epoch,
+             principal_id: self.system_principal,
+             command_id: CommandId::new(&*self.ids),
+             correlation_id: Some(format!("outbox.dispatch.{}", self.clock.now_unix_ms())),
+         }
+     }
+ }
+ 
++fn batch_limit(len: usize) -> u32 {
++    u32::try_from(len).unwrap_or(u32::MAX)
++}
++
++/// Length of the batch prefix already recorded in the journal.
++///
++/// Events are compared position by position in sequence order and the scan
++/// stops at the first difference. A recorded position holding a different
++/// event (another id, or different bytes under the same id) is a `Conflict`,
++/// matching the journal's own replay rules.
++fn recorded_prefix(recorded: &[EventEnvelope], batch: &[EventEnvelope]) -> errors::Result<usize> {
++    let mut matched = 0;
++    while matched < recorded.len() && matched < batch.len() {
++        let existing = &recorded[matched];
++        let pending = &batch[matched];
++        if existing.sequence != pending.sequence {
++            break;
++        }
++        if existing.event_id != pending.event_id || existing.to_bytes() != pending.to_bytes() {
++            return Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "recorded journal prefix diverges from the outbox batch",
++            ));
++        }
++        matched += 1;
++    }
++    Ok(matched)
++}
++
+ fn envelope_from_row(row: &OutboxEventRow, stream_key: StreamKey) -> EventEnvelope {
+     EventEnvelope {
+         event_id: row.event_id,
+         event_type: row.event_type.clone(),
+         event_version: row.event_version,
+         stream_key,
+         sequence: row.sequence,
+         occurred_unix_ms: row.occurred_at_ms,
+         run_id: row.run_id,
+         task_id: row.task_id,
+diff --git a/agent-os/crates/events/tests/dispatcher.rs b/agent-os/crates/events/tests/dispatcher.rs
+index 055c377..d96d616 100644
+--- a/agent-os/crates/events/tests/dispatcher.rs
++++ b/agent-os/crates/events/tests/dispatcher.rs
+@@ -279,20 +279,27 @@ impl EventJournalPort for MemoryJournal {
+         stream_key: &'life1 StreamKey,
+         from_sequence: u64,
+         limit: u32,
+     ) -> Pin<Box<dyn Future<Output = errors::Result<ReadResult>> + Send + 'async_trait>>
+     where
+         'life0: 'async_trait,
+         'life1: 'async_trait,
+         Self: 'async_trait,
+     {
+         Box::pin(async move {
++            if self.failing.load(Ordering::SeqCst) {
++                return Err(KernelError::new(
++                    ErrorCode::Unavailable,
++                    RetryClass::Safe,
++                    "test journal is unavailable",
++                ));
++            }
+             let rows = self.rows.lock().expect("journal lock is not poisoned");
+             let events = rows
+                 .get(stream_key.as_str())
+                 .map(|stored| {
+                     stored
+                         .iter()
+                         .filter(|row| row.sequence > from_sequence)
+                         .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                         .cloned()
+                         .collect()
+@@ -497,20 +504,118 @@ async fn crash_after_append_reappends_without_duplicates() {
+         3,
+         "idempotent re-append adds no duplicate rows"
+     );
+     assert_eq!(sink.delivered().len(), 3, "recovery publishes every event");
+     assert!(
+         unpublished(&store, epoch, principal).await.is_empty(),
+         "recovery marks every row"
+     );
+ }
+ 
++#[tokio::test]
++async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream_a = run_stream(RUN_A);
++    let stream_b = run_stream(RUN_B);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_a,
++        &[(event_id(0x70), vec![1]), (event_id(0x71), vec![2])],
++    )
++    .await;
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_b,
++        &[(event_id(0x74), vec![4])],
++    )
++    .await;
++
++    faults.arm(AFTER_JOURNAL_APPEND);
++    let error = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect_err("the armed fault aborts after stream A");
++    assert_unavailable(&error);
++    assert_eq!(
++        journal.rows_for(&stream_a).len(),
++        2,
++        "stream A is recorded before the fault"
++    );
++    assert!(
++        journal.rows_for(&stream_b).is_empty(),
++        "stream B is not reached before the fault"
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_a,
++        &[(event_id(0x72), vec![3])],
++    )
++    .await;
++
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("mixed-batch recovery succeeds");
++    assert_eq!(
++        outcome,
++        DispatchOutcome {
++            scanned: 4,
++            published: 4,
++            backlog: 0,
++        }
++    );
++
++    let rows_a = journal.rows_for(&stream_a);
++    assert_eq!(
++        rows_a.iter().map(|row| row.sequence).collect::<Vec<_>>(),
++        vec![1, 2, 3],
++        "stream A stays contiguous"
++    );
++    assert_eq!(
++        rows_a.iter().map(|row| row.event_id).collect::<Vec<_>>(),
++        vec![event_id(0x70), event_id(0x71), event_id(0x72)],
++        "the recorded prefix is not re-appended"
++    );
++    let rows_b = journal.rows_for(&stream_b);
++    assert_eq!(
++        rows_b.iter().map(|row| row.sequence).collect::<Vec<_>>(),
++        vec![1],
++        "stream B is not blocked by stream A's recovery"
++    );
++    assert_eq!(journal.total_rows(), 4, "no duplicate journal rows");
++    assert!(
++        unpublished(&store, epoch, principal).await.is_empty(),
++        "every row is marked after recovery"
++    );
++    assert_eq!(sink.delivered().len(), 4);
++}
++
+ #[tokio::test]
+ async fn unavailable_journal_grows_the_backlog_and_commands_still_commit() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(

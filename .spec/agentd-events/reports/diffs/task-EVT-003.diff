@@ -1,0 +1,1264 @@
+diff --git a/agent-os/crates/agentd/src/workers/outbox.rs b/agent-os/crates/agentd/src/workers/outbox.rs
+index 7d46f64..81cdd3d 100644
+--- a/agent-os/crates/agentd/src/workers/outbox.rs
++++ b/agent-os/crates/agentd/src/workers/outbox.rs
+@@ -1 +1,94 @@
+ //! Outbox dispatch worker.
++//!
++//! A thin interval loop around the journal-first dispatcher: one
++//! [`EventDispatcher::dispatch_once`] per tick, with capped exponential
++//! backoff while the journal reports `Unavailable` and prompt cancellation
++//! through a `tokio::sync::watch` flag.
++//!
++//! The composition root wires this worker in a later task, so its items are
++//! not yet reachable from `main`; the local allow keeps `-D warnings` honest
++//! about everything else until then.
++#![allow(dead_code)]
++
++use std::sync::Arc;
++use std::time::Duration;
++
++use errors::codes::ErrorCode;
++use events::dispatcher::EventDispatcher;
++use tokio::sync::watch;
++use tokio::time::{MissedTickBehavior, interval, sleep};
++
++/// Rows scanned per dispatch iteration.
++const BATCH_LIMIT: u32 = 64;
++/// First backoff after an unavailable iteration.
++const INITIAL_BACKOFF: Duration = Duration::from_millis(50);
++/// Upper bound on the dispatch backoff.
++const MAX_BACKOFF: Duration = Duration::from_secs(2);
++
++/// Supplies the daemon fencing epoch the worker dispatches under.
++pub trait EpochSource: Send + Sync {
++    /// Returns the epoch currently held by the daemon.
++    fn epoch(&self) -> u64;
++}
++
++/// Thin interval loop around the journal-first dispatcher.
++pub struct OutboxWorker {
++    dispatcher: Arc<EventDispatcher>,
++    epoch: Arc<dyn EpochSource>,
++    poll: Duration,
++}
++
++impl OutboxWorker {
++    /// Creates a worker that polls the outbox every `poll`.
++    pub fn new(
++        dispatcher: Arc<EventDispatcher>,
++        epoch: Arc<dyn EpochSource>,
++        poll: Duration,
++    ) -> Self {
++        Self {
++            dispatcher,
++            epoch,
++            poll,
++        }
++    }
++
++    /// Dispatches until `shutdown` requests a stop.
++    ///
++    /// Availability failures back off exponentially up to [`MAX_BACKOFF`];
++    /// success and every other failure resume the normal `poll` cadence.
++    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
++        let mut ticker = interval(self.poll);
++        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
++        let mut backoff = INITIAL_BACKOFF;
++        loop {
++            tokio::select! {
++                _ = ticker.tick() => {}
++                changed = shutdown.changed() => {
++                    if changed.is_err() || *shutdown.borrow() {
++                        return;
++                    }
++                    continue;
++                }
++            }
++            match self
++                .dispatcher
++                .dispatch_once(BATCH_LIMIT, self.epoch.epoch())
++                .await
++            {
++                Ok(_) => backoff = INITIAL_BACKOFF,
++                Err(error) if error.code() == ErrorCode::Unavailable => {
++                    tokio::select! {
++                        _ = sleep(backoff) => {}
++                        changed = shutdown.changed() => {
++                            if changed.is_err() || *shutdown.borrow() {
++                                return;
++                            }
++                        }
++                    }
++                    backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
++                }
++                Err(_) => {}
++            }
++        }
++    }
++}
+diff --git a/agent-os/crates/event-journal/src/lib.rs b/agent-os/crates/event-journal/src/lib.rs
+index c9ca86c..1cc2ad5 100644
+--- a/agent-os/crates/event-journal/src/lib.rs
++++ b/agent-os/crates/event-journal/src/lib.rs
+@@ -1,67 +1,9 @@
+ //! Event journal port.
+ //!
+-//! The journal is the durable, per-stream ordered history of accepted events.
+-//! It is a downstream projection with its own database file; callers append
+-//! batches under the exact expected stream head and read history forward from
+-//! a sequence. Implementations own all persistence details; the port fixes
+-//! only the append and read contracts.
++//! The port types live in `events::journal`, the lower-vocabulary crate that
++//! the SQLite journal already consumes, and are re-exported here so existing
++//! `event_journal::{...}` imports keep compiling.
+ 
+ #![forbid(unsafe_code)]
+ 
+-use async_trait::async_trait;
+-use events::{EventEnvelope, StreamKey};
+-
+-/// Outcome of a successful append.
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-pub struct AppendResult {
+-    /// Position of the last event in the appended batch.
+-    ///
+-    /// For an idempotent duplicate append this is the last position of the
+-    /// batch, which is already at or before the current stream head.
+-    pub final_sequence: u64,
+-}
+-
+-/// A forward page of journal history for one stream.
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-pub struct ReadResult {
+-    /// Events with `sequence > from_sequence`, ascending, up to the limit.
+-    pub events: Vec<EventEnvelope>,
+-    /// Whether the journal dropped history before `from_sequence`.
+-    ///
+-    /// The inception journal never drops history, so implementations that do
+-    /// not retain gaps report `false`.
+-    pub retention_gap: bool,
+-}
+-
+-/// Durable per-stream event history.
+-#[async_trait]
+-pub trait EventJournalPort: Send + Sync {
+-    /// Appends `batch` when the stream head is exactly `expected_sequence`.
+-    ///
+-    /// `batch` sequences must be contiguous from `expected_sequence + 1`, and
+-    /// every envelope must belong to `stream_key`.
+-    ///
+-    /// * `expected_sequence` not matching the head and no already-recorded
+-    ///   batch to replay is a failed precondition.
+-    /// * A batch already recorded exactly (same event id, position, and
+-    ///   bytes) is an idempotent success with no write.
+-    /// * A recorded position holding a different event id is a conflict.
+-    async fn append(
+-        &self,
+-        stream_key: &StreamKey,
+-        expected_sequence: u64,
+-        batch: &[EventEnvelope],
+-    ) -> errors::Result<AppendResult>;
+-
+-    /// Reads events with `sequence > from_sequence` in ascending order.
+-    ///
+-    /// Fewer than `limit` events are returned when the stream ends or the
+-    /// stream has no events past `from_sequence`; reading past the head is an
+-    /// empty success, not an error.
+-    async fn read_stream(
+-        &self,
+-        stream_key: &StreamKey,
+-        from_sequence: u64,
+-        limit: u32,
+-    ) -> errors::Result<ReadResult>;
+-}
++pub use events::journal::{AppendResult, EventJournalPort, ReadResult};
+diff --git a/agent-os/crates/events/src/dispatcher.rs b/agent-os/crates/events/src/dispatcher.rs
+new file mode 100644
+index 0000000..4ecb1c8
+--- /dev/null
++++ b/agent-os/crates/events/src/dispatcher.rs
+@@ -0,0 +1,188 @@
++//! Journal-first outbox dispatcher (EVT-003).
++//!
++//! One [`EventDispatcher::dispatch_once`] iteration scans the unpublished
++//! outbox in `(stream_key, sequence)` order, appends each stream's contiguous
++//! batch to the durable journal, marks journal publication in a short fenced
++//! write transaction, and only then hands the events to the live sink. The
++//! journal append is idempotent, so a crash between append and mark replays
++//! safely on the next iteration with no duplicate rows (R3.1-R3.6, D1, D7).
++
++use std::str::FromStr;
++use std::sync::Arc;
++
++use domain::faults::FaultInjector;
++use domain::ids::{CommandId, PrincipalId};
++use domain::provider::IdProvider;
++use domain::time::Clock;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::OutboxEventRow;
++use kernel_store::repositories::PublishKind;
++use kernel_store::{KernelStore, TxContext};
++
++use crate::envelope::EventEnvelope;
++use crate::journal::EventJournalPort;
++use crate::stream::StreamKey;
++
++/// Fault point consulted after a journal append and before publication marks.
++pub const AFTER_JOURNAL_APPEND: &str = "outbox.after_journal_append";
++
++/// One dispatch iteration's scan and publication counts.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct DispatchOutcome {
++    /// Outbox rows returned by the ordered scan.
++    pub scanned: usize,
++    /// Rows journaled, marked, and handed to the live sink.
++    pub published: usize,
++    /// Rows scanned but left unpublished by this iteration.
++    pub backlog: usize,
++}
++
++/// Synchronous hand-off seam to the live event bus (EVT-004).
++pub trait LiveSink: Send + Sync {
++    /// Hands an already-journaled event to live subscribers.
++    fn publish(&self, event: &EventEnvelope);
++}
++
++/// Journal-first dispatcher over the kernel outbox.
++pub struct EventDispatcher {
++    store: Arc<dyn KernelStore>,
++    journal: Arc<dyn EventJournalPort>,
++    sink: Arc<dyn LiveSink>,
++    faults: Arc<dyn FaultInjector>,
++    clock: Arc<dyn Clock>,
++    ids: Arc<dyn IdProvider>,
++    system_principal: PrincipalId,
++}
++
++impl EventDispatcher {
++    /// Wires the dispatcher to its persistence, journal, sink, and test seams.
++    pub fn new(
++        store: Arc<dyn KernelStore>,
++        journal: Arc<dyn EventJournalPort>,
++        sink: Arc<dyn LiveSink>,
++        faults: Arc<dyn FaultInjector>,
++        clock: Arc<dyn Clock>,
++        ids: Arc<dyn IdProvider>,
++        system_principal: PrincipalId,
++    ) -> Self {
++        Self {
++            store,
++            journal,
++            sink,
++            faults,
++            clock,
++            ids,
++            system_principal,
++        }
++    }
++
++    /// Runs one deterministic iteration: scan, append per stream, mark, publish.
++    ///
++    /// The expected sequence is the first scanned row's sequence minus one
++    /// (D7). After every successful append the `outbox.after_journal_append`
++    /// fault point is consulted; when it fires the iteration reports
++    /// `Unavailable`/`Safe` before any mark is written, so recovery re-appends
++    /// the same batch idempotently.
++    pub async fn dispatch_once(
++        &self,
++        limit: u32,
++        daemon_epoch: u64,
++    ) -> errors::Result<DispatchOutcome> {
++        let rows = self.scan(limit, daemon_epoch).await?;
++
++        let mut groups: Vec<(StreamKey, Vec<EventEnvelope>)> = Vec::new();
++        for row in &rows {
++            let key = StreamKey::from_str(row.stream_key.as_str()).map_err(|_| {
++                KernelError::new(
++                    ErrorCode::Internal,
++                    RetryClass::Never,
++                    "outbox row stream key is not canonical",
++                )
++            })?;
++            let envelope = envelope_from_row(row, key.clone());
++            match groups.last_mut() {
++                Some((existing, batch)) if *existing == key => batch.push(envelope),
++                _ => groups.push((key, vec![envelope])),
++            }
++        }
++
++        let mut envelopes: Vec<EventEnvelope> = Vec::with_capacity(rows.len());
++        for (stream_key, batch) in &groups {
++            let expected_sequence = batch[0].sequence.saturating_sub(1);
++            self.journal
++                .append(stream_key, expected_sequence, batch)
++                .await?;
++            if self.faults.inject(AFTER_JOURNAL_APPEND) {
++                return Err(KernelError::new(
++                    ErrorCode::Unavailable,
++                    RetryClass::Safe,
++                    "outbox.after_journal_append fault point fired after a journal append",
++                ));
++            }
++            envelopes.extend(batch.iter().cloned());
++        }
++
++        if !rows.is_empty() {
++            let mut txn = self
++                .store
++                .begin_write(self.write_context(daemon_epoch))
++                .await?;
++            for row in &rows {
++                txn.streams()
++                    .mark_published(row.event_id, PublishKind::Journal)
++                    .await?;
++            }
++            txn.commit().await?;
++        }
++
++        for event in &envelopes {
++            self.sink.publish(event);
++        }
++
++        Ok(DispatchOutcome {
++            scanned: rows.len(),
++            published: envelopes.len(),
++            backlog: rows.len().saturating_sub(envelopes.len()),
++        })
++    }
++
++    async fn scan(&self, limit: u32, daemon_epoch: u64) -> errors::Result<Vec<OutboxEventRow>> {
++        let mut txn = self
++            .store
++            .begin_write(self.write_context(daemon_epoch))
++            .await?;
++        let rows = txn.streams().scan_unpublished(limit).await?;
++        txn.rollback().await?;
++        Ok(rows)
++    }
++
++    fn write_context(&self, daemon_epoch: u64) -> TxContext {
++        TxContext {
++            daemon_epoch,
++            principal_id: self.system_principal,
++            command_id: CommandId::new(&*self.ids),
++            correlation_id: Some(format!("outbox.dispatch.{}", self.clock.now_unix_ms())),
++        }
++    }
++}
++
++fn envelope_from_row(row: &OutboxEventRow, stream_key: StreamKey) -> EventEnvelope {
++    EventEnvelope {
++        event_id: row.event_id,
++        event_type: row.event_type.clone(),
++        event_version: row.event_version,
++        stream_key,
++        sequence: row.sequence,
++        occurred_unix_ms: row.occurred_at_ms,
++        run_id: row.run_id,
++        task_id: row.task_id,
++        session_id: row.session_id,
++        effect_id: row.effect_id,
++        causation_id: row.causation_id.map(|id| id.to_hyphenated()),
++        correlation_id: row.correlation_id.clone(),
++        sensitivity: row.sensitivity,
++        retention: row.retention,
++        payload: row.payload.clone(),
++    }
++}
+diff --git a/agent-os/crates/events/src/journal.rs b/agent-os/crates/events/src/journal.rs
+new file mode 100644
+index 0000000..7de3b55
+--- /dev/null
++++ b/agent-os/crates/events/src/journal.rs
+@@ -0,0 +1,81 @@
++//! Event journal port.
++//!
++//! The journal is the durable, per-stream ordered history of accepted events.
++//! It is a downstream projection with its own database file; callers append
++//! batches under the exact expected stream head and read history forward from
++//! a sequence. Implementations own all persistence details; the port fixes
++//! only the append and read contracts.
++//!
++//! The methods carry the exact signature `#[async_trait::async_trait]`
++//! generates for `async fn` declarations, so implementations written against
++//! the macro keep compiling while this crate stays free of the macro
++//! dependency (which would otherwise close a package cycle with
++//! `event-journal`).
++
++use std::future::Future;
++use std::pin::Pin;
++
++use crate::{EventEnvelope, StreamKey};
++
++/// Outcome of a successful append.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct AppendResult {
++    /// Position of the last event in the appended batch.
++    ///
++    /// For an idempotent duplicate append this is the last position of the
++    /// batch, which is already at or before the current stream head.
++    pub final_sequence: u64,
++}
++
++/// A forward page of journal history for one stream.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct ReadResult {
++    /// Events with `sequence > from_sequence`, ascending, up to the limit.
++    pub events: Vec<EventEnvelope>,
++    /// Whether the journal dropped history before `from_sequence`.
++    ///
++    /// The inception journal never drops history, so implementations that do
++    /// not retain gaps report `false`.
++    pub retention_gap: bool,
++}
++
++/// Durable per-stream event history.
++pub trait EventJournalPort: Send + Sync {
++    /// Appends `batch` when the stream head is exactly `expected_sequence`.
++    ///
++    /// `batch` sequences must be contiguous from `expected_sequence + 1`, and
++    /// every envelope must belong to `stream_key`.
++    ///
++    /// * `expected_sequence` not matching the head and no already-recorded
++    ///   batch to replay is a failed precondition.
++    /// * A batch already recorded exactly (same event id, position, and
++    ///   bytes) is an idempotent success with no write.
++    /// * A recorded position holding a different event id is a conflict.
++    fn append<'life0, 'life1, 'life2, 'async_trait>(
++        &'life0 self,
++        stream_key: &'life1 StreamKey,
++        expected_sequence: u64,
++        batch: &'life2 [EventEnvelope],
++    ) -> Pin<Box<dyn Future<Output = errors::Result<AppendResult>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        'life1: 'async_trait,
++        'life2: 'async_trait,
++        Self: 'async_trait;
++
++    /// Reads events with `sequence > from_sequence` in ascending order.
++    ///
++    /// Fewer than `limit` events are returned when the stream ends or the
++    /// stream has no events past `from_sequence`; reading past the head is an
++    /// empty success, not an error.
++    fn read_stream<'life0, 'life1, 'async_trait>(
++        &'life0 self,
++        stream_key: &'life1 StreamKey,
++        from_sequence: u64,
++        limit: u32,
++    ) -> Pin<Box<dyn Future<Output = errors::Result<ReadResult>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        'life1: 'async_trait,
++        Self: 'async_trait;
++}
+diff --git a/agent-os/crates/events/src/lib.rs b/agent-os/crates/events/src/lib.rs
+index 50281f7..72a1416 100644
+--- a/agent-os/crates/events/src/lib.rs
++++ b/agent-os/crates/events/src/lib.rs
+@@ -1,13 +1,16 @@
+ //! Event envelope, sequence and cursor helpers, and the live event bus.
+ #![forbid(unsafe_code)]
+ 
+ pub mod cursor;
++pub mod dispatcher;
+ pub mod envelope;
++pub mod journal;
+ pub mod outbox;
+ pub mod stream;
+ 
+ pub use cursor::{EventCursor, EventCursorExt};
+ pub use envelope::{
+     CatalogClassificationPolicy, ClassificationPolicy, EventBuilder, EventEnvelope,
+ };
++pub use journal::{AppendResult, EventJournalPort, ReadResult};
+ pub use stream::{StreamKey, StreamKind};
+diff --git a/agent-os/crates/events/tests/dispatcher.rs b/agent-os/crates/events/tests/dispatcher.rs
+new file mode 100644
+index 0000000..055c377
+--- /dev/null
++++ b/agent-os/crates/events/tests/dispatcher.rs
+@@ -0,0 +1,781 @@
++//! EVT-003 dispatcher integration tests.
++//!
++//! The dispatcher runs against a real `SqliteKernelStore` in a temp runtime
++//! root, a test-local in-memory journal with the idempotent append semantics
++//! of the SQLite journal, and a recorder `LiveSink`. Iterations are driven by
++//! direct `dispatch_once` calls; there are no sleeps.
++
++use std::collections::HashMap;
++use std::future::Future;
++use std::pin::Pin;
++use std::str::FromStr;
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::sync::{Arc, Mutex};
++
++use domain::ids::{CommandId, DaemonInstanceId, EventId, EventStreamKey, PrincipalId, RunId};
++use domain::provider::SystemIdProvider;
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::dispatcher::{AFTER_JOURNAL_APPEND, DispatchOutcome, EventDispatcher, LiveSink};
++use events::journal::{AppendResult, EventJournalPort, ReadResult};
++use events::outbox::DraftEvent;
++use events::{EventEnvelope, StreamKey};
++use kernel_store::models::OutboxEventRow;
++use kernel_store::{KernelStore, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use tempfile::TempDir;
++use testkit::clock::TestClock;
++use testkit::faults::ArmedFaults;
++use testkit::ids::DeterministicIds;
++
++const NOW_MS: i64 = 1_700_000_000_000;
++const EVENT_TYPE: &str = "dispatcher.spec.recorded";
++const RUN_A: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70";
++const RUN_B: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71";
++
++fn event_id(byte: u8) -> EventId {
++    EventId::from_str(&format!("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e{byte:02x}"))
++        .expect("sample event id is canonical")
++}
++
++fn run_stream(seed: &str) -> StreamKey {
++    StreamKey::run(RunId::from_str(seed).expect("sample run id is canonical"))
++}
++
++fn stream_key(stream: &StreamKey) -> EventStreamKey {
++    EventStreamKey::new(stream.as_str()).expect("stream key text is valid")
++}
++
++fn tx_context(epoch: u64, principal: PrincipalId) -> TxContext {
++    TxContext {
++        daemon_epoch: epoch,
++        principal_id: principal,
++        command_id: CommandId::new(&SystemIdProvider),
++        correlation_id: None,
++    }
++}
++
++async fn open_store(dir: &TempDir) -> (Arc<SqliteKernelStore>, u64) {
++    let store = SqliteKernelStore::open(StoreConfig {
++        path: dir.path().join("kernel.db"),
++        pool_max_connections: 1,
++        busy_timeout_ms: 5_000,
++    })
++    .await
++    .expect("store opens");
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&SystemIdProvider))
++        .await
++        .expect("daemon fence is acquired");
++    (Arc::new(store), fence.epoch.0)
++}
++
++async fn stage_events(
++    store: &SqliteKernelStore,
++    epoch: u64,
++    principal: PrincipalId,
++    stream: &StreamKey,
++    events: &[(EventId, Vec<u8>)],
++) {
++    let mut txn = store
++        .begin_write(tx_context(epoch, principal))
++        .await
++        .expect("write transaction opens");
++    for (id, payload) in events {
++        events::outbox::stage(
++            &mut *txn,
++            DraftEvent {
++                event_id: *id,
++                stream_key: stream_key(stream),
++                event_type: EVENT_TYPE.to_owned(),
++                payload: payload.clone(),
++                sensitivity: SensitivityClass::Internal,
++                retention: RetentionClass::Standard,
++                correlation_id: None,
++                causation_id: None,
++            },
++        )
++        .await
++        .expect("outbox stage succeeds");
++    }
++    txn.commit().await.expect("write transaction commits");
++}
++
++async fn unpublished(
++    store: &SqliteKernelStore,
++    epoch: u64,
++    principal: PrincipalId,
++) -> Vec<OutboxEventRow> {
++    let mut txn = store
++        .begin_write(tx_context(epoch, principal))
++        .await
++        .expect("scan transaction opens");
++    let rows = txn
++        .streams()
++        .scan_unpublished(u32::MAX)
++        .await
++        .expect("scan succeeds");
++    txn.rollback().await.expect("scan transaction rolls back");
++    rows
++}
++
++fn dispatcher(
++    store: &Arc<SqliteKernelStore>,
++    journal: Arc<MemoryJournal>,
++    sink: Arc<dyn LiveSink>,
++    faults: Arc<ArmedFaults>,
++    principal: PrincipalId,
++) -> EventDispatcher {
++    EventDispatcher::new(
++        Arc::clone(store) as Arc<dyn KernelStore>,
++        journal,
++        sink,
++        faults,
++        Arc::new(TestClock::new(NOW_MS)),
++        Arc::new(DeterministicIds::new(NOW_MS)),
++        principal,
++    )
++}
++
++fn assert_unavailable(error: &KernelError) {
++    assert_eq!(error.code(), ErrorCode::Unavailable);
++    assert_eq!(error.retry_class(), RetryClass::Safe);
++}
++
++/// Test-local journal with the SQLite journal's exact append semantics.
++#[derive(Default)]
++struct MemoryJournal {
++    rows: Mutex<HashMap<String, Vec<EventEnvelope>>>,
++    failing: AtomicBool,
++}
++
++impl MemoryJournal {
++    fn new() -> Self {
++        Self::default()
++    }
++
++    fn set_failing(&self, failing: bool) {
++        self.failing.store(failing, Ordering::SeqCst);
++    }
++
++    fn rows_for(&self, stream: &StreamKey) -> Vec<EventEnvelope> {
++        self.rows
++            .lock()
++            .expect("journal lock is not poisoned")
++            .get(stream.as_str())
++            .cloned()
++            .unwrap_or_default()
++    }
++
++    fn total_rows(&self) -> usize {
++        self.rows
++            .lock()
++            .expect("journal lock is not poisoned")
++            .values()
++            .map(Vec::len)
++            .sum()
++    }
++
++    fn contains(&self, event: &EventEnvelope) -> bool {
++        self.rows
++            .lock()
++            .expect("journal lock is not poisoned")
++            .get(event.stream_key.as_str())
++            .is_some_and(|rows| {
++                rows.iter().any(|row| {
++                    row.event_id == event.event_id
++                        && row.sequence == event.sequence
++                        && row.to_bytes() == event.to_bytes()
++                })
++            })
++    }
++}
++
++#[allow(clippy::type_complexity)]
++impl EventJournalPort for MemoryJournal {
++    fn append<'life0, 'life1, 'life2, 'async_trait>(
++        &'life0 self,
++        stream_key: &'life1 StreamKey,
++        expected_sequence: u64,
++        batch: &'life2 [EventEnvelope],
++    ) -> Pin<Box<dyn Future<Output = errors::Result<AppendResult>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        'life1: 'async_trait,
++        'life2: 'async_trait,
++        Self: 'async_trait,
++    {
++        Box::pin(async move {
++            if self.failing.load(Ordering::SeqCst) {
++                return Err(KernelError::new(
++                    ErrorCode::Unavailable,
++                    RetryClass::Safe,
++                    "test journal is unavailable",
++                ));
++            }
++            if batch.is_empty() {
++                return Err(KernelError::new(
++                    ErrorCode::InvalidArgument,
++                    RetryClass::Never,
++                    "test journal append batch is empty",
++                ));
++            }
++            let mut next = expected_sequence + 1;
++            for event in batch {
++                if event.stream_key != *stream_key {
++                    return Err(KernelError::new(
++                        ErrorCode::InvalidArgument,
++                        RetryClass::Never,
++                        "test journal batch belongs to a different stream",
++                    ));
++                }
++                if event.sequence != next {
++                    return Err(KernelError::new(
++                        ErrorCode::InvalidArgument,
++                        RetryClass::Never,
++                        "test journal batch is not contiguous",
++                    ));
++                }
++                next += 1;
++            }
++            let final_sequence = next - 1;
++
++            let mut rows = self.rows.lock().expect("journal lock is not poisoned");
++            let recorded = rows.entry(stream_key.as_str().to_owned()).or_default();
++            let head = recorded.last().map(|row| row.sequence).unwrap_or(0);
++            if head == expected_sequence {
++                recorded.extend(batch.iter().cloned());
++            } else {
++                for event in batch {
++                    match recorded.iter().find(|row| row.sequence == event.sequence) {
++                        None => {
++                            return Err(KernelError::new(
++                                ErrorCode::FailedPrecondition,
++                                RetryClass::Never,
++                                "test journal expected sequence does not match the head",
++                            ));
++                        }
++                        Some(existing) => {
++                            if existing.event_id != event.event_id
++                                || existing.to_bytes() != event.to_bytes()
++                            {
++                                return Err(KernelError::new(
++                                    ErrorCode::Conflict,
++                                    RetryClass::Never,
++                                    "test journal position holds a different event",
++                                ));
++                            }
++                        }
++                    }
++                }
++            }
++            Ok(AppendResult { final_sequence })
++        })
++    }
++
++    fn read_stream<'life0, 'life1, 'async_trait>(
++        &'life0 self,
++        stream_key: &'life1 StreamKey,
++        from_sequence: u64,
++        limit: u32,
++    ) -> Pin<Box<dyn Future<Output = errors::Result<ReadResult>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        'life1: 'async_trait,
++        Self: 'async_trait,
++    {
++        Box::pin(async move {
++            let rows = self.rows.lock().expect("journal lock is not poisoned");
++            let events = rows
++                .get(stream_key.as_str())
++                .map(|stored| {
++                    stored
++                        .iter()
++                        .filter(|row| row.sequence > from_sequence)
++                        .take(usize::try_from(limit).unwrap_or(usize::MAX))
++                        .cloned()
++                        .collect()
++                })
++                .unwrap_or_default();
++            Ok(ReadResult {
++                events,
++                retention_gap: false,
++            })
++        })
++    }
++}
++
++#[derive(Default)]
++struct RecorderSink {
++    delivered: Mutex<Vec<EventEnvelope>>,
++}
++
++impl RecorderSink {
++    fn delivered(&self) -> Vec<EventEnvelope> {
++        self.delivered
++            .lock()
++            .expect("sink lock is not poisoned")
++            .clone()
++    }
++}
++
++impl LiveSink for RecorderSink {
++    fn publish(&self, event: &EventEnvelope) {
++        self.delivered
++            .lock()
++            .expect("sink lock is not poisoned")
++            .push(event.clone());
++    }
++}
++
++/// Sink that fails if any delivered event is not already durable in the journal.
++struct JournalCheckingSink {
++    journal: Arc<MemoryJournal>,
++    delivered: AtomicUsize,
++    missing: AtomicUsize,
++}
++
++impl JournalCheckingSink {
++    fn new(journal: Arc<MemoryJournal>) -> Self {
++        Self {
++            journal,
++            delivered: AtomicUsize::new(0),
++            missing: AtomicUsize::new(0),
++        }
++    }
++}
++
++impl LiveSink for JournalCheckingSink {
++    fn publish(&self, event: &EventEnvelope) {
++        if !self.journal.contains(event) {
++            self.missing.fetch_add(1, Ordering::SeqCst);
++        }
++        self.delivered.fetch_add(1, Ordering::SeqCst);
++    }
++}
++
++#[tokio::test]
++async fn happy_path_appends_marks_and_delivers_in_order() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream = run_stream(RUN_A);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[
++            (event_id(0x70), vec![1]),
++            (event_id(0x71), vec![2]),
++            (event_id(0x72), vec![3]),
++        ],
++    )
++    .await;
++
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("dispatch succeeds");
++
++    assert_eq!(
++        outcome,
++        DispatchOutcome {
++            scanned: 3,
++            published: 3,
++            backlog: 0,
++        }
++    );
++
++    let rows = journal.rows_for(&stream);
++    let sequences: Vec<u64> = rows.iter().map(|row| row.sequence).collect();
++    let ids: Vec<EventId> = rows.iter().map(|row| row.event_id).collect();
++    assert_eq!(sequences, vec![1, 2, 3], "journal rows keep sequence order");
++    assert_eq!(
++        ids,
++        vec![event_id(0x70), event_id(0x71), event_id(0x72)],
++        "journal rows keep staging order"
++    );
++
++    let delivered: Vec<EventId> = sink
++        .delivered()
++        .iter()
++        .map(|event| event.event_id)
++        .collect();
++    assert_eq!(delivered, ids, "sink receives the published order");
++
++    assert!(
++        unpublished(&store, epoch, principal).await.is_empty(),
++        "successful append is followed by journal publication marks"
++    );
++    assert!(
++        !faults.is_triggered(AFTER_JOURNAL_APPEND),
++        "no fault fired on the happy path"
++    );
++}
++
++#[tokio::test]
++async fn crash_after_append_reappends_without_duplicates() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream = run_stream(RUN_A);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[
++            (event_id(0x70), vec![1]),
++            (event_id(0x71), vec![2]),
++            (event_id(0x72), vec![3]),
++        ],
++    )
++    .await;
++
++    faults.arm(AFTER_JOURNAL_APPEND);
++    let error = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect_err("the armed fault aborts the iteration");
++    assert_unavailable(&error);
++    assert!(faults.is_triggered(AFTER_JOURNAL_APPEND));
++
++    assert_eq!(
++        journal.total_rows(),
++        3,
++        "journal rows are durable before the crash point"
++    );
++    assert_eq!(
++        sink.delivered().len(),
++        0,
++        "nothing is delivered before publication marks"
++    );
++    assert_eq!(
++        unpublished(&store, epoch, principal).await.len(),
++        3,
++        "the crash point leaves every row unmarked"
++    );
++
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("recovery dispatch succeeds");
++    assert_eq!(
++        outcome,
++        DispatchOutcome {
++            scanned: 3,
++            published: 3,
++            backlog: 0,
++        }
++    );
++    assert_eq!(
++        journal.total_rows(),
++        3,
++        "idempotent re-append adds no duplicate rows"
++    );
++    assert_eq!(sink.delivered().len(), 3, "recovery publishes every event");
++    assert!(
++        unpublished(&store, epoch, principal).await.is_empty(),
++        "recovery marks every row"
++    );
++}
++
++#[tokio::test]
++async fn unavailable_journal_grows_the_backlog_and_commands_still_commit() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream = run_stream(RUN_A);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[(event_id(0x70), vec![1])],
++    )
++    .await;
++    journal.set_failing(true);
++
++    let error = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect_err("an unavailable journal surfaces");
++    assert_unavailable(&error);
++    assert_eq!(
++        sink.delivered().len(),
++        0,
++        "no delivery without journal rows"
++    );
++    assert_eq!(unpublished(&store, epoch, principal).await.len(), 1);
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[(event_id(0x71), vec![2])],
++    )
++    .await;
++    assert_eq!(
++        unpublished(&store, epoch, principal).await.len(),
++        2,
++        "commands keep committing, so the backlog grows"
++    );
++    assert_eq!(journal.total_rows(), 0);
++
++    journal.set_failing(false);
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("recovery dispatch succeeds");
++    assert_eq!(
++        outcome,
++        DispatchOutcome {
++            scanned: 2,
++            published: 2,
++            backlog: 0,
++        }
++    );
++    assert_eq!(journal.total_rows(), 2, "each event has exactly one row");
++    assert_eq!(sink.delivered().len(), 2);
++    assert!(unpublished(&store, epoch, principal).await.is_empty());
++}
++
++#[tokio::test]
++async fn multi_stream_backlog_keeps_per_stream_order() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream_a = run_stream(RUN_A);
++    let stream_b = run_stream(RUN_B);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_a,
++        &[(event_id(0x70), vec![1])],
++    )
++    .await;
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_b,
++        &[(event_id(0x71), vec![2])],
++    )
++    .await;
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_a,
++        &[(event_id(0x72), vec![3])],
++    )
++    .await;
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream_b,
++        &[(event_id(0x73), vec![4])],
++    )
++    .await;
++
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("dispatch succeeds");
++    assert_eq!(outcome.scanned, 4);
++    assert_eq!(outcome.published, 4);
++
++    let rows_a = journal.rows_for(&stream_a);
++    let rows_b = journal.rows_for(&stream_b);
++    assert_eq!(
++        rows_a.iter().map(|row| row.event_id).collect::<Vec<_>>(),
++        vec![event_id(0x70), event_id(0x72)],
++        "stream A keeps sequence order"
++    );
++    assert_eq!(
++        rows_b.iter().map(|row| row.event_id).collect::<Vec<_>>(),
++        vec![event_id(0x71), event_id(0x73)],
++        "stream B keeps sequence order"
++    );
++    assert_eq!(
++        rows_a.iter().map(|row| row.sequence).collect::<Vec<_>>(),
++        vec![1, 2]
++    );
++    assert_eq!(
++        rows_b.iter().map(|row| row.sequence).collect::<Vec<_>>(),
++        vec![1, 2]
++    );
++
++    let delivered: Vec<EventId> = sink
++        .delivered()
++        .iter()
++        .map(|event| event.event_id)
++        .collect();
++    assert_eq!(
++        delivered,
++        vec![
++            event_id(0x70),
++            event_id(0x72),
++            event_id(0x71),
++            event_id(0x73)
++        ],
++        "sink delivery follows the ordered scan"
++    );
++    assert!(unpublished(&store, epoch, principal).await.is_empty());
++}
++
++#[tokio::test]
++async fn no_sink_delivery_precedes_journal_acceptance() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream = run_stream(RUN_A);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(JournalCheckingSink::new(Arc::clone(&journal)));
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[(event_id(0x70), vec![1]), (event_id(0x71), vec![2])],
++    )
++    .await;
++
++    dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("dispatch succeeds");
++
++    assert_eq!(sink.delivered.load(Ordering::SeqCst), 2);
++    assert_eq!(
++        sink.missing.load(Ordering::SeqCst),
++        0,
++        "every delivered event is already durable in the journal"
++    );
++}
++
++#[tokio::test]
++async fn empty_outbox_is_a_no_op() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    let outcome = dispatcher
++        .dispatch_once(16, epoch)
++        .await
++        .expect("an empty scan succeeds");
++    assert_eq!(
++        outcome,
++        DispatchOutcome {
++            scanned: 0,
++            published: 0,
++            backlog: 0,
++        }
++    );
++    assert_eq!(journal.total_rows(), 0);
++    assert_eq!(sink.delivered().len(), 0);
++}
++
++#[tokio::test]
++async fn stale_epoch_rejects_the_iteration_before_any_append() {
++    let dir = TempDir::new().expect("temp dir");
++    let (store, epoch) = open_store(&dir).await;
++    let principal = PrincipalId::new(&SystemIdProvider);
++    let stream = run_stream(RUN_A);
++    let journal = Arc::new(MemoryJournal::new());
++    let sink = Arc::new(RecorderSink::default());
++    let faults = Arc::new(ArmedFaults::new());
++    let dispatcher = dispatcher(
++        &store,
++        Arc::clone(&journal),
++        Arc::clone(&sink) as Arc<dyn LiveSink>,
++        Arc::clone(&faults),
++        principal,
++    );
++
++    stage_events(
++        &store,
++        epoch,
++        principal,
++        &stream,
++        &[(event_id(0x70), vec![1])],
++    )
++    .await;
++
++    let error = dispatcher
++        .dispatch_once(16, epoch + 1)
++        .await
++        .expect_err("a stale epoch is rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(journal.total_rows(), 0);
++    assert_eq!(sink.delivered().len(), 0);
++    assert_eq!(unpublished(&store, epoch, principal).await.len(), 1);
++}

@@ -38,3 +38,13 @@
 - 2026-09-13T04:38:31Z EVT-002 -> review (@agent-evt002)
 - 2026-09-13T04:59:13Z EVT-002 -> done (@agent-evt002)
 - 2026-09-13T04:59:14Z EVT-002 approved after one fix round (sleep removed, crash bootstrap repaired, byte-equality pinned). Design amended: dispatcher takes daemon_epoch per call, system principal + IdProvider for mark transactions, LiveSink seam for EVT-004. 4/6 done.
+- 2026-09-13T04:59:42Z EVT-003 -> claimed (@agent-evt003)
+- 2026-09-13T04:59:43Z EVT-003 -> in_progress (@agent-evt003)
+- 2026-09-13T05:05:57Z EVT-003 -> blocked (@agent-evt003) — need agent-os/crates/events/Cargo.toml: tests/dispatcher.rs must build a real SqliteEventJournal, so events needs a dev-dependency on event-journal-sqlite (Cargo-legal dev edge; verified in a scratch workspace), and the manifest is outside the lease. need agent-os/crates/event-journal/src/lib.rs: design fixes the dispatcher journal as Arc<dyn event_journal::EventJournalPort> in events/src/dispatcher.rs, but a normal events -> event-journal edge is an impossible cycle because event-journal normal-depends on events (verified: cargo 'cyclic package dependency'). Minimal repair: define EventJournalPort/AppendResult/ReadResult in events (lower vocabulary crate, same signatures) and make event-journal re-export them, so event-journal-sqlite and its consumers keep compiling unchanged; events needs no normal dependency. Alternative ruling: keep the port where it is and give events/src/dispatcher.rs a local port trait with test-only adapters over SqliteEventJournal (larger deviation from the authoritative block).
+- 2026-09-13T05:06:25Z EVT-003 -> pending (@agent-evt003)
+- 2026-09-13T05:07:29Z Ruling: the journal port moves into events/src/journal.rs with event-journal re-exporting it, resolving the events<->event-journal cycle; dispatcher tests use a test-local in-memory journal rather than a dev-dependency. Cost if wrong: the port's home differs from the crate map's description ('event-journal owns the journal port'), but the trait identity and consumer imports are unchanged.
+- 2026-09-13T05:07:40Z EVT-003 -> claimed (@agent-evt003b)
+- 2026-09-13T05:07:46Z EVT-003 -> in_progress (@agent-evt003b)
+- 2026-09-13T06:16:56Z EVT-003 -> review (@agent-evt003b)
+- 2026-09-13T06:50:36Z EVT-003 -> done (@agent-evt003b)
+- 2026-09-13T06:50:37Z EVT-003 approved after one fix round (mixed-batch recovery suffix append). 5/6 done; EVT-004 dispatched.

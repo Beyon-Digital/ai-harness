@@ -202,20 +202,22 @@
 
 ### Task EVT-003: Journal-first dispatcher and outbox worker
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-evt003b
 - depends_on: EVT-002
-- files: `agent-os/crates/events/src/dispatcher.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/dispatcher.rs`, `agent-os/crates/agentd/src/workers/outbox.rs`
+- files: `agent-os/crates/events/src/journal.rs`, `agent-os/crates/events/src/dispatcher.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/dispatcher.rs`, `agent-os/crates/event-journal/src/lib.rs`, `agent-os/crates/agentd/src/workers/outbox.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, P1, P2, N2
 - scope: large
 - model: capable
+- blocked_reason: need agent-os/crates/events/Cargo.toml: tests/dispatcher.rs must build a real SqliteEventJournal, so events needs a dev-dependency on event-journal-sqlite (Cargo-legal dev edge; verified in a scratch workspace), and the manifest is outside the lease. need agent-os/crates/event-journal/src/lib.rs: design fixes the dispatcher journal as Arc<dyn event_journal::EventJournalPort> in events/src/dispatcher.rs, but a normal events -> event-journal edge is an impossible cycle because event-journal normal-depends on events (verified: cargo 'cyclic package dependency'). Minimal repair: define EventJournalPort/AppendResult/ReadResult in events (lower vocabulary crate, same signatures) and make event-journal re-export them, so event-journal-sqlite and its consumers keep compiling unchanged; events needs no normal dependency. Alternative ruling: keep the port where it is and give events/src/dispatcher.rs a local port trait with test-only adapters over SqliteEventJournal (larger deviation from the authoritative block).
 
 **Objective:** Committed outbox rows become durable journal history in per-stream order, then live events, surviving crashes and duplicate work.
 
 **Context the implementer cannot infer:**
 
-- `design.md` fixes `AFTER_JOURNAL_APPEND`, `DispatchOutcome`, and `EventDispatcher::dispatch_once(limit)`.
-- Scan via `KernelStore::begin_read` and `StreamRepo::scan_unpublished(limit)`; group rows per stream; `expected_sequence = first_row.sequence - 1` (0 for sequence 1). Append the batch, then call `inject(AFTER_JOURNAL_APPEND)`; on true, return `Unavailable` before marking so recovery re-appends idempotently. Then `StreamRepo::mark_published(event_id, Journal)` in a short fenced write transaction using the current fence epoch, then `LiveBus::publish` per event.
+- `design.md` fixes `AFTER_JOURNAL_APPEND`, `DispatchOutcome`, `LiveSink`, and `EventDispatcher::dispatch_once(limit, daemon_epoch)`; the constructor takes store, journal port, `LiveSink`, faults, clock, `IdProvider`, and a system principal.
+- **Port placement (cycle repair):** define `EventJournalPort`, `AppendResult`, and `ReadResult` in `events/src/journal.rs` and re-export them from `event-journal/src/lib.rs`; the dispatcher consumes `events::journal::EventJournalPort`. Dispatcher tests use a test-local in-memory journal implementing the port with EVT-002's idempotent semantics; do not add a dev-dependency on `event-journal-sqlite`.
+- Scan via `KernelStore::begin_read` and `StreamRepo::scan_unpublished(limit)`; group rows per stream; `expected_sequence = first_row.sequence - 1` (0 for sequence 1). Append the batch, then call `inject(AFTER_JOURNAL_APPEND)`; on true, return `Unavailable` before marking so recovery re-appends idempotently. Then `StreamRepo::mark_published(event_id, Journal)` in a short fenced write transaction built from the passed epoch, the system principal, and a fresh command id; then `LiveSink::publish` per event.
 - `mark_published` needs a `TxContext`; do not depend on the command-core `FenceProvider` type. Instead the dispatcher takes `daemon_epoch: u64` per `dispatch_once` call from the worker (which holds the fence), so tests pass a fixed epoch and create a matching fence via the store.
 - Tests: crash re-append (arm `AFTER_JOURNAL_APPEND`, first iteration fails, journal has rows, marks absent; second iteration completes with no duplicate rows), journal unavailable (a closed/failing journal stub → backlog grows and the store still commits commands), per-stream order (multi-row batches), journal-first (bus receives only after rows exist).
 - The `agentd` worker is a thin loop: `interval(poll_ms)` around `dispatch_once`, with capped exponential backoff on `Unavailable`; cancellation through a `tokio::sync::watch` or `CancellationToken`-style flag local to the file. Keep it small and untested at the process level.
