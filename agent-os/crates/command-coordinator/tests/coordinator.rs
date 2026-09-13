@@ -32,6 +32,8 @@ use testkit::ids::DeterministicIds;
 const SEED_MS: i64 = 1_700_000_000_000;
 const DB_FILE: &str = "kernel.db";
 const TEST_COMMAND: &str = "session.create";
+const FAILING_COMMAND: &str = "session.fail";
+const PAYLOAD_MARKER: &str = "do-not-echo-payload-marker-7c1f";
 
 fn session_id_of(command_id: CommandId) -> SessionId {
     SessionId::from_uuid_v7(*command_id.as_uuid_v7())
@@ -101,6 +103,57 @@ impl CommandHandler for TestHandler {
             code: OutcomeCode::Ok,
             payload: b"created".to_vec(),
         })
+    }
+}
+
+/// Failing handler: stages a session and one outbox event, then returns
+/// `Internal` so the coordinator's early `?` path must roll everything back.
+struct FailingHandler;
+
+#[async_trait]
+impl CommandHandler for FailingHandler {
+    async fn handle(
+        &self,
+        ctx: &CommandContext,
+        txn: &mut dyn KernelTxn,
+        payload: Vec<u8>,
+    ) -> errors::Result<CommandOutcome> {
+        let session_id = session_id_of(ctx.command_id);
+        txn.sessions()
+            .insert(NewSession {
+                session_id,
+                principal_id: ctx.principal_id,
+                created_at_ms: 0,
+                metadata: None,
+            })
+            .await?;
+        let event_id = EventId::from_uuid_v7(*ctx.command_id.as_uuid_v7());
+        let stream_key = EventStreamKey::new(format!("session/{session_id}")).map_err(|_| {
+            KernelError::new(
+                ErrorCode::Internal,
+                RetryClass::Never,
+                "failing handler built an invalid stream key",
+            )
+        })?;
+        stage(
+            txn,
+            DraftEvent {
+                event_id,
+                stream_key,
+                event_type: "session.failed".to_owned(),
+                payload,
+                sensitivity: SensitivityClass::Private,
+                retention: RetentionClass::Durable,
+                correlation_id: ctx.correlation_id.clone(),
+                causation_id: None,
+            },
+        )
+        .await?;
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            RetryClass::Never,
+            "failing handler aborted after staging work",
+        ))
     }
 }
 
@@ -179,6 +232,9 @@ async fn harness() -> Harness {
     let handler = Arc::new(TestHandler::new(clock.clone()));
     let mut registry = CommandRegistry::new();
     registry.register(TEST_COMMAND, handler.clone()).unwrap();
+    registry
+        .register(FAILING_COMMAND, Arc::new(FailingHandler))
+        .unwrap();
     let coordinator = CommandCoordinator::new(
         store.clone(),
         Arc::new(registry),
@@ -211,7 +267,7 @@ fn envelope(command_type: &str, request_digest: RequestDigest) -> CommandEnvelop
         causation_id: None,
         deadline_unix_ms: None,
         command_type: command_type.to_owned(),
-        payload: b"payload-bytes".to_vec(),
+        payload: PAYLOAD_MARKER.as_bytes().to_vec(),
     }
 }
 
@@ -243,7 +299,11 @@ async fn fresh_command_commits_rows_outbox_and_idempotency() {
     assert_eq!(record.created_at_ms, harness.clock.now_unix_ms());
     assert_eq!(observed.unpublished.len(), 1);
     assert_eq!(observed.unpublished[0].event_type, "session.created");
-    assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
+    assert_eq!(
+        observed.unpublished[0].payload,
+        PAYLOAD_MARKER.as_bytes(),
+        "staged event must carry the envelope payload"
+    );
     assert_eq!(harness.handler.calls(), 1);
 }
 
@@ -362,6 +422,35 @@ async fn post_commit_fault_reports_unavailable_then_replay_returns_the_outcome()
 }
 
 #[tokio::test]
+async fn handler_error_rolls_back_every_staged_write() {
+    let harness = harness().await;
+    let envelope = envelope(FAILING_COMMAND, digest(0x9a));
+
+    let error = harness
+        .coordinator
+        .execute(envelope.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), ErrorCode::Internal);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+    assert!(
+        !error.message().contains(PAYLOAD_MARKER),
+        "handler error must not echo the payload: {}",
+        error.message()
+    );
+    assert_eq!(
+        harness.observe(&envelope).await,
+        Observation {
+            session: None,
+            idempotency: None,
+            unpublished: Vec::new(),
+        },
+        "handler error must roll back sessions, outbox events, and idempotency"
+    );
+}
+
+#[tokio::test]
 async fn stale_fence_rejects_without_rows() {
     let harness = harness().await;
     let provider = DeterministicIds::new(SEED_MS + 1);
@@ -406,6 +495,11 @@ async fn unknown_command_type_rejects_without_rows() {
         "message must name the unregistered command_type: {}",
         error.message()
     );
+    assert!(
+        !error.message().contains(PAYLOAD_MARKER),
+        "rejection must not echo the payload: {}",
+        error.message()
+    );
     assert_eq!(harness.handler.calls(), 0);
     let observed = harness.observe(&envelope).await;
     assert!(observed.session.is_none());
@@ -426,6 +520,11 @@ async fn duplicate_registration_is_a_conflict() {
 
     assert_eq!(error.code(), ErrorCode::Conflict);
     assert_eq!(error.retry_class(), RetryClass::Never);
+    assert!(
+        !error.message().contains(PAYLOAD_MARKER),
+        "rejection must not echo the payload: {}",
+        error.message()
+    );
     assert_eq!(registry.len(), 1);
     assert!(registry.get(TEST_COMMAND).is_some());
 }
@@ -443,6 +542,11 @@ async fn malformed_digest_is_rejected() {
         let error = RequestDigest::from_str(&case).unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert_eq!(error.retry_class(), RetryClass::Never);
+        assert!(
+            !error.message().contains(PAYLOAD_MARKER),
+            "rejection must not echo the payload: {}",
+            error.message()
+        );
     }
 }
 
@@ -460,6 +564,11 @@ async fn past_deadline_is_rejected_without_rows() {
 
     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
     assert_eq!(error.retry_class(), RetryClass::Never);
+    assert!(
+        !error.message().contains(PAYLOAD_MARKER),
+        "rejection must not echo the payload: {}",
+        error.message()
+    );
     assert_eq!(harness.handler.calls(), 0);
     let observed = harness.observe(&envelope).await;
     assert!(observed.session.is_none());

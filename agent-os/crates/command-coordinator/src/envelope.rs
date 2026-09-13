@@ -56,7 +56,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 /// Everything a command submission carries across the coordinator boundary.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CommandEnvelope {
     /// Identity of this submission, recorded on the transaction.
     pub command_id: CommandId,
@@ -82,6 +82,27 @@ pub struct CommandEnvelope {
     pub command_type: String,
     /// Serialized command payload; never logged or echoed in errors.
     pub payload: Vec<u8>,
+}
+
+/// Renders every routing field but only the payload length, so payload bytes
+/// cannot leak through logs or panic messages (N1).
+impl fmt::Debug for CommandEnvelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandEnvelope")
+            .field("command_id", &self.command_id)
+            .field("idempotency_key", &self.idempotency_key)
+            .field("principal_id", &self.principal_id)
+            .field("actor_id", &self.actor_id)
+            .field("device_id", &self.device_id)
+            .field("delegation_chain_id", &self.delegation_chain_id)
+            .field("request_digest", &self.request_digest)
+            .field("correlation_id", &self.correlation_id)
+            .field("causation_id", &self.causation_id)
+            .field("deadline_unix_ms", &self.deadline_unix_ms)
+            .field("command_type", &self.command_type)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl CommandEnvelope {
@@ -120,9 +141,31 @@ impl CommandEnvelope {
 mod tests {
     use std::str::FromStr;
 
-    use errors::codes::ErrorCode;
+    use domain::ids::{ActorId, CommandId, IdempotencyKey, PrincipalId};
+    use errors::codes::{ErrorCode, RetryClass};
+    use testkit::ids::DeterministicIds;
 
-    use super::RequestDigest;
+    use super::{CommandEnvelope, RequestDigest};
+
+    const PAYLOAD_MARKER: &str = "do-not-echo-payload-marker-7c1f";
+
+    fn envelope() -> CommandEnvelope {
+        let provider = DeterministicIds::new(1_700_000_000_000);
+        CommandEnvelope {
+            command_id: CommandId::new(&provider),
+            idempotency_key: IdempotencyKey::new("command-1").expect("valid idempotency key"),
+            principal_id: PrincipalId::new(&provider),
+            actor_id: ActorId::new(&provider),
+            device_id: None,
+            delegation_chain_id: None,
+            request_digest: RequestDigest::from_str(&"a1".repeat(32)).expect("valid digest"),
+            correlation_id: None,
+            causation_id: None,
+            deadline_unix_ms: None,
+            command_type: "session.create".to_owned(),
+            payload: Vec::new(),
+        }
+    }
 
     #[test]
     fn canonical_digests_round_trip_through_lowercase_hex() {
@@ -151,5 +194,44 @@ mod tests {
             };
             assert_eq!(error.code(), ErrorCode::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn empty_command_type_is_rejected_by_validate() {
+        let mut envelope = envelope();
+        envelope.command_type = String::new();
+
+        let error = envelope.validate(0).unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        assert_eq!(error.retry_class(), RetryClass::Never);
+        assert_eq!(error.message(), "command_type must not be empty");
+    }
+
+    #[test]
+    fn whitespace_only_idempotency_key_is_rejected_by_validate() {
+        let mut envelope = envelope();
+        envelope.idempotency_key =
+            IdempotencyKey::new("   ").expect("whitespace-only key is structurally valid");
+
+        let error = envelope.validate(0).unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        assert_eq!(error.retry_class(), RetryClass::Never);
+        assert_eq!(error.message(), "idempotency_key must not be empty");
+    }
+
+    #[test]
+    fn debug_renders_payload_length_instead_of_bytes() {
+        let mut envelope = envelope();
+        envelope.payload = PAYLOAD_MARKER.as_bytes().to_vec();
+
+        let rendered = format!("{envelope:?}");
+
+        assert!(rendered.contains(&format!("payload_len: {}", PAYLOAD_MARKER.len())));
+        assert!(
+            !rendered.contains(PAYLOAD_MARKER),
+            "payload bytes leaked through Debug: {rendered}"
+        );
     }
 }

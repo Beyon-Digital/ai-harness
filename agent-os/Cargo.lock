@@ -188,7 +188,6 @@ dependencies = [
  "async-trait",
  "domain",
  "errors",
- "event-journal",
  "events",
  "kernel-store",
  "kernel-store-sqlite",

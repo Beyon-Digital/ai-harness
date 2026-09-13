@@ -8,7 +8,6 @@ publish.workspace = true
 [dependencies]
 domain.workspace = true
 errors.workspace = true
-event-journal.workspace = true
 events.workspace = true
 kernel-store.workspace = true
 async-trait.workspace = true

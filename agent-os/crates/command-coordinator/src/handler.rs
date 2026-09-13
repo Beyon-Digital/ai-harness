@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fmt;
 use std::sync::Arc;
 
 use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, PrincipalId};
@@ -61,12 +62,23 @@ impl OutcomeCode {
 }
 
 /// Result of a handler run: outcome code plus callback payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     /// Persisted outcome code.
     pub code: OutcomeCode,
     /// Serialized outcome payload; never logged.
     pub payload: Vec<u8>,
+}
+
+/// Renders the outcome code but only the payload length, so outcome bytes
+/// cannot leak through logs or panic messages (N1).
+impl fmt::Debug for CommandOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandOutcome")
+            .field("code", &self.code)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 /// Command implementation bound to one command type.
@@ -206,5 +218,22 @@ mod tests {
         };
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn outcome_debug_redacts_payload_bytes() {
+        const PAYLOAD: &[u8] = b"secret-outcome-payload";
+        let outcome = CommandOutcome {
+            code: OutcomeCode::Ok,
+            payload: PAYLOAD.to_vec(),
+        };
+
+        let rendered = format!("{outcome:?}");
+
+        assert!(rendered.contains(&format!("payload_len: {}", PAYLOAD.len())));
+        assert!(
+            !rendered.contains("secret-outcome-payload"),
+            "outcome payload bytes leaked through Debug: {rendered}"
+        );
     }
 }
