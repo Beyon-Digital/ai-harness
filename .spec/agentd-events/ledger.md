@@ -58,3 +58,4 @@
 - 2026-09-13T07:33:46Z EVT-004 -> review (@agent-evt004b)
 - 2026-09-13T11:10:10Z EVT-004 -> done (@agent-evt004b)
 - 2026-09-13T11:10:10Z EVT-004 approved after one fix round (optional cold-start cursor, BusClosed). 6/6 tasks done. Final checkpoint running.
+- 2026-09-13T11:31:16Z Final fixes re-reviewed: all addressed. Module complete: 6/6 tasks done, gates green (86 suites / 224 tests), final review approved. Deferred: live marker, ephemeral consumer, scan write-lock, worker wiring/logging, canonical spec/ vocabulary note recorded.

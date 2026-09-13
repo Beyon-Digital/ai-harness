@@ -1,0 +1,669 @@
+diff --git a/.spec/agentd-events/design.md b/.spec/agentd-events/design.md
+index d50e9c2..965cdc4 100644
+--- a/.spec/agentd-events/design.md
++++ b/.spec/agentd-events/design.md
+@@ -12,21 +12,21 @@
+                                                         │  after ack             │ read/resume
+                                                         ▼                        ▼
+                                                    LiveBus ──▶ subscribers ──▶ EventCursor
+                                                         │
+                                                         └──▶ EphemeralBus (lossy, non-durable)
+ ```
+ 
+ | Component | Responsibility | New or existing | Path |
+ |---|---|---|---|
+ | Primitives | Envelope builder, stream keys, cursors, classification policy | new fill of stubs | `agent-os/crates/events/src/{envelope,stream,cursor}.rs` |
+-| Journal port | Append/read contract with expected-sequence semantics | new fill | `agent-os/crates/event-journal/src/lib.rs` |
++| Journal port | Append/read contract with expected-sequence semantics | new fill | `agent-os/crates/events/src/journal.rs`; `agent-os/crates/event-journal/src/lib.rs` re-exports it |
+ | Journal SQLite | `events.db` bootstrap, append rules, reads | new fill | `agent-os/crates/event-journal-sqlite/src/lib.rs` |
+ | Dispatcher | Outbox scan, journal-first append, publication marks, bus hand-off | new | `agent-os/crates/events/src/dispatcher.rs` |
+ | Live bus | Bounded durable delivery with explicit lag; lossy ephemeral channel | new | `agent-os/crates/events/src/live_bus.rs` |
+ | Outbox worker | Interval loop around one dispatch iteration | new fill | `agent-os/crates/agentd/src/workers/outbox.rs` |
+ 
+ ## Data flow
+ 
+ **Happy path — outbox to subscriber**
+ 
+ 1. A command transaction has already committed outbox rows with contiguous `(stream_key, sequence)` positions.
+@@ -40,21 +40,21 @@
+ 
+ **Crash path — append succeeded, mark missing**
+ 
+ 1. The journal contains the events but the outbox rows remain unpublished.
+ 2. After restart the dispatcher re-appends the same batch; the journal returns idempotent success for identical `(event_id, stream, sequence)`.
+ 3. The publication mark is written, and no duplicate history exists (P1).
+ 
+ **Failure path — journal unavailable**
+ 
+ 1. `append` returns `Unavailable` with retry-safe classification.
+-2. The dispatcher records the failure and returns an outcome with a non-zero backlog; no mark and no live delivery.
++2. The dispatcher returns the error; no mark and no live delivery, and the unpublished outbox rows remain visible as the backlog in the store.
+ 3. The worker retries with capped backoff; commands continue committing because they never touch the journal.
+ 
+ **Failure path — slow subscriber**
+ 
+ 1. The broadcast buffer overflows for one subscriber.
+ 2. The subscription receives `RecvError::Lagged`, reports `LiveItem::Lagged { resume_from }` with the last journal-backed cursor it had delivered, and ends.
+ 3. The client resumes through `EventJournalPort::read_stream` from that cursor; no cursor is fabricated.
+ 
+ ## Interfaces
+ 
+@@ -117,21 +117,21 @@ impl EventBuilder {
+ }
+ 
+ pub struct EventEnvelope { /* mirrors contracts/events/event.proto exactly */ }
+ impl EventEnvelope {
+     pub fn to_bytes(&self) -> Vec⟨u8⟩;
+     pub fn from_bytes(bytes: &[u8]) -> errors::Result⟨Self⟩;
+     pub fn cursor(&self) -> EventCursor;
+ }
+ ```
+ 
+-### event-journal port
++### events :: journal.rs (journal port)
+ 
+ ```rust
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct AppendResult { pub final_sequence: u64 }
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct ReadResult { pub events: Vec⟨events::EventEnvelope⟩, pub retention_gap: bool }
+ 
+ #[async_trait::async_trait]
+ pub trait EventJournalPort: Send + Sync {
+@@ -333,21 +333,22 @@ Paths relative to `agent-os/` unless the pack path is explicit.
+ | `agent-os-microkernel-mvp-buildpack/contracts/events/event.proto` | modify | rename sensitivity/retention values | EVT-G0 |
+ | `agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql` | modify | retention CHECK 1-3 and comments | EVT-G0 |
+ | `agent-os-microkernel-mvp-buildpack/contract-lock.sha256`, `MANIFEST.json` | regenerate | lock and manifest | EVT-G0 |
+ | `proto/events/event.proto`, `schema/kernel_store.sql` | modify | mirror refresh | EVT-G0 |
+ | `crates/domain/src/security.rs` | modify | variant renames | EVT-G0 |
+ | `crates/events/src/outbox.rs`, `crates/command-coordinator/tests/coordinator.rs`, `crates/kernel-store-sqlite/tests/{repos_remaining,outbox,props}.rs` | modify | usage updates for renamed variants | EVT-G0 |
+ | `crates/events/src/stream.rs`, `cursor.rs` | create | stream keys and cursor wiring | EVT-001 |
+ | `crates/events/src/envelope.rs` | create | builder, policy, envelope codec | EVT-001 |
+ | `crates/events/src/lib.rs` | modify | module declarations and re-exports | EVT-001, EVT-003, EVT-004 |
+ | `crates/events/tests/primitives.rs` | create | round trips and validation tests | EVT-001 |
+-| `crates/event-journal/src/lib.rs` | create | port types and trait | EVT-002 |
++| `crates/events/src/journal.rs` | create | port types and trait | EVT-002 |
++| `crates/event-journal/src/lib.rs` | create | re-export of the port types and trait from `events` | EVT-002 |
+ | `crates/event-journal-sqlite/src/lib.rs` | create | SQLite journal | EVT-002 |
+ | `crates/event-journal-sqlite/tests/journal.rs` | create | append/read suite | EVT-002 |
+ | `crates/events/src/dispatcher.rs` | create | dispatcher | EVT-003 |
+ | `crates/events/tests/dispatcher.rs` | create | crash, backlog, order tests | EVT-003 |
+ | `crates/agentd/src/workers/outbox.rs` | modify | interval worker | EVT-003 |
+ | `crates/events/src/live_bus.rs` | create | live and ephemeral buses | EVT-004 |
+ | `crates/events/tests/live_bus.rs` | create | lag and resume tests | EVT-004 |
+ 
+ ---
+ 
+diff --git a/agent-os-microkernel-mvp-buildpack/MANIFEST.json b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+index 922c1c8..b304aca 100644
+--- a/agent-os-microkernel-mvp-buildpack/MANIFEST.json
++++ b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+@@ -38,42 +38,42 @@
+       "bytes": 4481,
+       "sha256": "51f8463f924d9647f309c8d8a8106bd72df8027bc9df509f6d8099f8789dabde"
+     },
+     {
+       "path": "SCOPE.md",
+       "bytes": 1835,
+       "sha256": "27982e9d3b862c1ddd0b7fb10ab1ea726166475402ce9599be7751e33635595e"
+     },
+     {
+       "path": "SOURCE_CORRECTIONS.md",
+-      "bytes": 2944,
+-      "sha256": "3c281280b66ed70f12be267eb50e3ddc4bfd967afca70078384b141307236d6d"
++      "bytes": 3613,
++      "sha256": "ab58f89f22fddde7092d046425da6e36901c5c007e6b3b474a8acdf550159061"
+     },
+     {
+       "path": "TASK_STATUS.yaml",
+       "bytes": 5515,
+       "sha256": "7becb848d7985f20221135ccf1c42e32452a9ec57077e8b57806363c3dc35ede"
+     },
+     {
+       "path": "architecture/README.md",
+       "bytes": 3416,
+       "sha256": "fa46b1a1a4a88ae3e69a4fcb557fccc2bb7ec4f772397e5fcdfe0bdf7d2cc69c"
+     },
+     {
+       "path": "architecture/concurrency.md",
+       "bytes": 1162,
+       "sha256": "2f2dbc61cb4869c0677c090c519942608eb6e11541fab962cd783a94ddbb36ec"
+     },
+     {
+       "path": "architecture/crate-map.md",
+-      "bytes": 3272,
+-      "sha256": "bb90a6d7a7d9fc5e69035d6ec2f7477e7d757885533cec3ac48eb00d49e490fd"
++      "bytes": 3321,
++      "sha256": "1dd04166ad9cc916bc793da5a8377746b9f9eb3a50f9a083807aecc024a11f53"
+     },
+     {
+       "path": "architecture/failure-model.md",
+       "bytes": 1244,
+       "sha256": "50dc06ba397447371089aeefe72b74d6c5a7df91c0d36d856712e02d19b5831d"
+     },
+     {
+       "path": "architecture/persistence.md",
+       "bytes": 1691,
+       "sha256": "b51563374e3c5c4a57ff6efdb7dc4b2434664066b06a7d35bce50b95d38f2856"
+diff --git a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+index 5142af0..8dd8a72 100644
+--- a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
++++ b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+@@ -29,10 +29,24 @@ protoc rejects duplicate value names within one package. The `agentos.spec.v1` s
+ - Added `AgentRun.output_ref = 13` and `AgentRun.current_turn_id = 14` in `contracts/domain/core.proto` so loop output can be persisted on the run.
+ - Replaced the `EventEnvelope` subscription stream element with `EventStreamFrame` (an `EventEnvelope` or a `LagNotice`) in `contracts/control-api/mvp_control.proto` so a lagging subscriber receives a resumable cursor (design D15).
+ 
+ The following snapshot files existed but were previously undocumented:
+ 
+ - `contracts/control-api/mvp_control.proto`;
+ - `contracts/domain/entities.proto`;
+ - `contracts/protocols/adapter_frames.proto`.
+ 
+ The repo-root canonical sources under `spec/` are unchanged.
++
++## Classification vocabulary reconciliation
++
++The inception event contract used a sensitivity value named `PRIVATE` and four
++retention values (`EPHEMERAL`, `SESSION`, `AUDIT`, `DURABLE`). This pack
++reconciles the classification vocabulary to one spelling across the proto,
++domain mirror, catalog, schema, and every Rust usage:
++
++- `Sensitivity.PRIVATE` is renamed `Sensitivity.CONFIDENTIAL`.
++- Retention narrows to three values, `EPHEMERAL` (1), `STANDARD` (2), and
++  `AUDIT` (3), removing `SESSION` and `DURABLE`.
++
++The canonical repo-root `spec/events/event.proto` intentionally keeps the old
++names for now; a future canonical-tree update should adopt this correction.
+diff --git a/agent-os-microkernel-mvp-buildpack/architecture/crate-map.md b/agent-os-microkernel-mvp-buildpack/architecture/crate-map.md
+index 6aa7bb2..360fb66 100644
+--- a/agent-os-microkernel-mvp-buildpack/architecture/crate-map.md
++++ b/agent-os-microkernel-mvp-buildpack/architecture/crate-map.md
+@@ -5,22 +5,22 @@
+ 
+ The MVP uses multiple crates for ownership and test boundaries while remaining one daemon.
+ 
+ | Crate | Owns | Must not own |
+ |---|---|---|
+ | `domain` | IDs, enums, immutable domain structs | DB/transport logic |
+ | `errors` | typed error codes/envelopes | component policy |
+ | `kernel-store` | `KernelStore` + transaction traits | SQLite details |
+ | `kernel-store-sqlite` | SQLite schema/repositories/transactions | runtime policy |
+ | `command-coordinator` | linearization/idempotency/atomic command orchestration | AI behavior |
+-| `events` | event envelope, sequence/cursor helpers, live bus | persistent backend |
+-| `event-journal` | journal port | SQLite details |
++| `events` | event envelope, sequence/cursor helpers, journal port, live bus | persistent backend |
++| `event-journal` | re-export of the journal port owned by `events` | SQLite details |
+ | `event-journal-sqlite` | SQLite event projection | canonical runtime truth |
+ | `message-queue` | queue port + in-memory adapter | canonical runtime truth |
+ | `runtime` | run state machine, run fencing, recovery disposition | graph storage |
+ | `run-graph` | graph mutation/readiness/cancellation epoch logic | workflow AI policy |
+ | `effects` | effect contracts/state/leases/reconciliation coordinator | vendor-specific calls |
+ | `resources` | reservations, budgets, delegation | scheduler timing |
+ | `scheduler` | durable timers/claim/fire/cancel | workflow planning |
+ | `identity` | principal/actor/delegation types | permission policy |
+ | `permissions` | capability evaluation | secret storage |
+ | `approvals` | immutable approval request/response validation | UI |
+diff --git a/agent-os/crates/agentd/src/workers/outbox.rs b/agent-os/crates/agentd/src/workers/outbox.rs
+index 918a0a2..b347078 100644
+--- a/agent-os/crates/agentd/src/workers/outbox.rs
++++ b/agent-os/crates/agentd/src/workers/outbox.rs
+@@ -80,15 +80,15 @@ impl OutboxWorker {
+                     tokio::select! {
+                         _ = sleep(backoff) => {}
+                         changed = shutdown.changed() => {
+                             if changed.is_err() || *shutdown.borrow() {
+                                 return;
+                             }
+                         }
+                     }
+                     backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                 }
+-                Err(_) => {}
++                Err(_) => backoff = INITIAL_BACKOFF,
+             }
+         }
+     }
+ }
+diff --git a/agent-os/crates/events/src/journal.rs b/agent-os/crates/events/src/journal.rs
+index 7de3b55..1ddc767 100644
+--- a/agent-os/crates/events/src/journal.rs
++++ b/agent-os/crates/events/src/journal.rs
+@@ -43,21 +43,22 @@ pub struct ReadResult {
+ pub trait EventJournalPort: Send + Sync {
+     /// Appends `batch` when the stream head is exactly `expected_sequence`.
+     ///
+     /// `batch` sequences must be contiguous from `expected_sequence + 1`, and
+     /// every envelope must belong to `stream_key`.
+     ///
+     /// * `expected_sequence` not matching the head and no already-recorded
+     ///   batch to replay is a failed precondition.
+     /// * A batch already recorded exactly (same event id, position, and
+     ///   bytes) is an idempotent success with no write.
+-    /// * A recorded position holding a different event id is a conflict.
++    /// * A recorded position holding a different event id, or different bytes
++    ///   under the same event id, is a conflict.
+     fn append<'life0, 'life1, 'life2, 'async_trait>(
+         &'life0 self,
+         stream_key: &'life1 StreamKey,
+         expected_sequence: u64,
+         batch: &'life2 [EventEnvelope],
+     ) -> Pin<Box<dyn Future<Output = errors::Result<AppendResult>> + Send + 'async_trait>>
+     where
+         'life0: 'async_trait,
+         'life1: 'async_trait,
+         'life2: 'async_trait,
+diff --git a/agent-os/crates/events/tests/dispatcher.rs b/agent-os/crates/events/tests/dispatcher.rs
+index d96d616..2b12869 100644
+--- a/agent-os/crates/events/tests/dispatcher.rs
++++ b/agent-os/crates/events/tests/dispatcher.rs
+@@ -1,29 +1,31 @@
+ //! EVT-003 dispatcher integration tests.
+ //!
+ //! The dispatcher runs against a real `SqliteKernelStore` in a temp runtime
+-//! root, a test-local in-memory journal with the idempotent append semantics
+-//! of the SQLite journal, and a recorder `LiveSink`. Iterations are driven by
+-//! direct `dispatch_once` calls; there are no sleeps.
++//! root. The crash-recovery cases use a real `SqliteEventJournal`; the other
++//! cases use a test-local in-memory journal with the idempotent append
++//! semantics of the SQLite journal. Iterations are driven by direct
++//! `dispatch_once` calls; there are no sleeps.
+ 
+ use std::collections::HashMap;
+ use std::future::Future;
+ use std::pin::Pin;
+ use std::str::FromStr;
+ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ use std::sync::{Arc, Mutex};
+ 
+ use domain::ids::{CommandId, DaemonInstanceId, EventId, EventStreamKey, PrincipalId, RunId};
+ use domain::provider::SystemIdProvider;
+ use domain::security::{RetentionClass, SensitivityClass};
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
++use event_journal_sqlite::{JournalConfig, SqliteEventJournal};
+ use events::dispatcher::{AFTER_JOURNAL_APPEND, DispatchOutcome, EventDispatcher, LiveSink};
+ use events::journal::{AppendResult, EventJournalPort, ReadResult};
+ use events::outbox::DraftEvent;
+ use events::{EventEnvelope, StreamKey};
+ use kernel_store::models::OutboxEventRow;
+ use kernel_store::{KernelStore, TxContext};
+ use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
+ use tempfile::TempDir;
+ use testkit::clock::TestClock;
+ use testkit::faults::ArmedFaults;
+@@ -64,20 +66,38 @@ async fn open_store(dir: &TempDir) -> (Arc<SqliteKernelStore>, u64) {
+     })
+     .await
+     .expect("store opens");
+     let fence = store
+         .acquire_daemon_fence(DaemonInstanceId::new(&SystemIdProvider))
+         .await
+         .expect("daemon fence is acquired");
+     (Arc::new(store), fence.epoch.0)
+ }
+ 
++async fn open_journal(dir: &TempDir) -> Arc<SqliteEventJournal> {
++    let journal = SqliteEventJournal::open(JournalConfig {
++        path: dir.path().join("journal").join("events.db"),
++        busy_timeout_ms: 5_000,
++    })
++    .await
++    .expect("journal opens");
++    Arc::new(journal)
++}
++
++async fn journal_rows(journal: &dyn EventJournalPort, stream: &StreamKey) -> Vec<EventEnvelope> {
++    journal
++        .read_stream(stream, 0, u32::MAX)
++        .await
++        .expect("journal read succeeds")
++        .events
++}
++
+ async fn stage_events(
+     store: &SqliteKernelStore,
+     epoch: u64,
+     principal: PrincipalId,
+     stream: &StreamKey,
+     events: &[(EventId, Vec<u8>)],
+ ) {
+     let mut txn = store
+         .begin_write(tx_context(epoch, principal))
+         .await
+@@ -115,21 +135,21 @@ async fn unpublished(
+         .streams()
+         .scan_unpublished(u32::MAX)
+         .await
+         .expect("scan succeeds");
+     txn.rollback().await.expect("scan transaction rolls back");
+     rows
+ }
+ 
+ fn dispatcher(
+     store: &Arc<SqliteKernelStore>,
+-    journal: Arc<MemoryJournal>,
++    journal: Arc<dyn EventJournalPort>,
+     sink: Arc<dyn LiveSink>,
+     faults: Arc<ArmedFaults>,
+     principal: PrincipalId,
+ ) -> EventDispatcher {
+     EventDispatcher::new(
+         Arc::clone(store) as Arc<dyn KernelStore>,
+         journal,
+         sink,
+         faults,
+         Arc::new(TestClock::new(NOW_MS)),
+@@ -366,21 +386,21 @@ impl LiveSink for JournalCheckingSink {
+ async fn happy_path_appends_marks_and_delivers_in_order() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream,
+@@ -432,26 +452,26 @@ async fn happy_path_appends_marks_and_delivers_in_order() {
+         "no fault fired on the happy path"
+     );
+ }
+ 
+ #[tokio::test]
+ async fn crash_after_append_reappends_without_duplicates() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+-    let journal = Arc::new(MemoryJournal::new());
++    let journal = open_journal(&dir).await;
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream,
+@@ -465,21 +485,21 @@ async fn crash_after_append_reappends_without_duplicates() {
+ 
+     faults.arm(AFTER_JOURNAL_APPEND);
+     let error = dispatcher
+         .dispatch_once(16, epoch)
+         .await
+         .expect_err("the armed fault aborts the iteration");
+     assert_unavailable(&error);
+     assert!(faults.is_triggered(AFTER_JOURNAL_APPEND));
+ 
+     assert_eq!(
+-        journal.total_rows(),
++        journal_rows(&*journal, &stream).await.len(),
+         3,
+         "journal rows are durable before the crash point"
+     );
+     assert_eq!(
+         sink.delivered().len(),
+         0,
+         "nothing is delivered before publication marks"
+     );
+     assert_eq!(
+         unpublished(&store, epoch, principal).await.len(),
+@@ -492,45 +512,51 @@ async fn crash_after_append_reappends_without_duplicates() {
+         .await
+         .expect("recovery dispatch succeeds");
+     assert_eq!(
+         outcome,
+         DispatchOutcome {
+             scanned: 3,
+             published: 3,
+             backlog: 0,
+         }
+     );
++    let recovered = journal_rows(&*journal, &stream).await;
+     assert_eq!(
+-        journal.total_rows(),
++        recovered.len(),
+         3,
+         "idempotent re-append adds no duplicate rows"
+     );
++    assert_eq!(
++        recovered.iter().map(|row| row.sequence).collect::<Vec<_>>(),
++        vec![1, 2, 3],
++        "recovered journal stays contiguous"
++    );
+     assert_eq!(sink.delivered().len(), 3, "recovery publishes every event");
+     assert!(
+         unpublished(&store, epoch, principal).await.is_empty(),
+         "recovery marks every row"
+     );
+ }
+ 
+ #[tokio::test]
+ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream_a = run_stream(RUN_A);
+     let stream_b = run_stream(RUN_B);
+-    let journal = Arc::new(MemoryJournal::new());
++    let journal = open_journal(&dir).await;
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream_a,
+@@ -546,26 +572,26 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
+     )
+     .await;
+ 
+     faults.arm(AFTER_JOURNAL_APPEND);
+     let error = dispatcher
+         .dispatch_once(16, epoch)
+         .await
+         .expect_err("the armed fault aborts after stream A");
+     assert_unavailable(&error);
+     assert_eq!(
+-        journal.rows_for(&stream_a).len(),
++        journal_rows(&*journal, &stream_a).await.len(),
+         2,
+         "stream A is recorded before the fault"
+     );
+     assert!(
+-        journal.rows_for(&stream_b).is_empty(),
++        journal_rows(&*journal, &stream_b).await.is_empty(),
+         "stream B is not reached before the fault"
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream_a,
+         &[(event_id(0x72), vec![3])],
+     )
+@@ -577,57 +603,57 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
+         .expect("mixed-batch recovery succeeds");
+     assert_eq!(
+         outcome,
+         DispatchOutcome {
+             scanned: 4,
+             published: 4,
+             backlog: 0,
+         }
+     );
+ 
+-    let rows_a = journal.rows_for(&stream_a);
++    let rows_a = journal_rows(&*journal, &stream_a).await;
+     assert_eq!(
+         rows_a.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+         vec![1, 2, 3],
+         "stream A stays contiguous"
+     );
+     assert_eq!(
+         rows_a.iter().map(|row| row.event_id).collect::<Vec<_>>(),
+         vec![event_id(0x70), event_id(0x71), event_id(0x72)],
+         "the recorded prefix is not re-appended"
+     );
+-    let rows_b = journal.rows_for(&stream_b);
++    let rows_b = journal_rows(&*journal, &stream_b).await;
+     assert_eq!(
+         rows_b.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+         vec![1],
+         "stream B is not blocked by stream A's recovery"
+     );
+-    assert_eq!(journal.total_rows(), 4, "no duplicate journal rows");
++    assert_eq!(rows_a.len() + rows_b.len(), 4, "no duplicate journal rows");
+     assert!(
+         unpublished(&store, epoch, principal).await.is_empty(),
+         "every row is marked after recovery"
+     );
+     assert_eq!(sink.delivered().len(), 4);
+ }
+ 
+ #[tokio::test]
+ async fn unavailable_journal_grows_the_backlog_and_commands_still_commit() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream,
+@@ -686,21 +712,21 @@ async fn multi_stream_backlog_keeps_per_stream_order() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream_a = run_stream(RUN_A);
+     let stream_b = run_stream(RUN_B);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream_a,
+@@ -782,21 +808,21 @@ async fn multi_stream_backlog_keeps_per_stream_order() {
+ async fn no_sink_delivery_precedes_journal_acceptance() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(JournalCheckingSink::new(Arc::clone(&journal)));
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream,
+@@ -820,21 +846,21 @@ async fn no_sink_delivery_precedes_journal_acceptance() {
+ #[tokio::test]
+ async fn empty_outbox_is_a_no_op() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     let outcome = dispatcher
+         .dispatch_once(16, epoch)
+         .await
+         .expect("an empty scan succeeds");
+     assert_eq!(
+@@ -853,21 +879,21 @@ async fn empty_outbox_is_a_no_op() {
+ async fn stale_epoch_rejects_the_iteration_before_any_append() {
+     let dir = TempDir::new().expect("temp dir");
+     let (store, epoch) = open_store(&dir).await;
+     let principal = PrincipalId::new(&SystemIdProvider);
+     let stream = run_stream(RUN_A);
+     let journal = Arc::new(MemoryJournal::new());
+     let sink = Arc::new(RecorderSink::default());
+     let faults = Arc::new(ArmedFaults::new());
+     let dispatcher = dispatcher(
+         &store,
+-        Arc::clone(&journal),
++        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
+         Arc::clone(&sink) as Arc<dyn LiveSink>,
+         Arc::clone(&faults),
+         principal,
+     );
+ 
+     stage_events(
+         &store,
+         epoch,
+         principal,
+         &stream,
