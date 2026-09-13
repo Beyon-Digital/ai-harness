@@ -1,7 +1,12 @@
 //! Startup recovery acceptance tests (R6.1-R6.6, P4): enumeration of
-//! non-terminal runs, matrix classification over the real SQLite store,
+//! non-terminal runs, matrix classification over the real SQLite store for the
+//! rows the read surface reaches (effects, timers, adapter bindings),
 //! fail-closed unmapped combinations, disposition persistence, and the
 //! guarantee that an ambiguous effect never leaves a run resumable.
+//!
+//! The `WaitingHuman` expired-approval row is deferred to the approvals module
+//! (no approvals-by-run read yet); the matrix table test pins the deferred
+//! pending-approval behaviour explicitly.
 
 use std::sync::Arc;
 
@@ -619,13 +624,18 @@ async fn terminal_runs_are_never_enumerated() {
 }
 
 #[tokio::test]
-async fn classification_follows_the_recovery_matrix() {
+async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
     struct Case {
         run_state: RunState,
         effect: Option<(EffectState, ReconciliationSemantics, IdempotencySemantics)>,
         expected: RecoveryDisposition,
     }
 
+    // Coverage is complete for the rows the current read surface reaches
+    // (effects, timers, adapter bindings). The `WaitingHuman`
+    // expired-approval row is deferred to the approvals module because the
+    // port has no approvals-by-run read; the case below pins the deferred
+    // pending-approval behaviour.
     let cases = vec![
         Case {
             run_state: RunState::Created,
@@ -648,6 +658,9 @@ async fn classification_follows_the_recovery_matrix() {
             expected: RecoveryDisposition::Normal,
         },
         Case {
+            // Deferred: an expired approval must select `RequiresHumanDecision`
+            // once approvals-by-run exists; until then `WaitingHuman`
+            // classifies `Normal` (pending-approval row).
             run_state: RunState::WaitingHuman,
             effect: None,
             expected: RecoveryDisposition::Normal,

@@ -4,11 +4,15 @@
 //! [`reconstruct`] enumerates every non-terminal run under the acquired daemon
 //! epoch, loads its effects, timers, and frozen environment bindings, and
 //! assigns exactly one [`RecoveryDisposition`] per the normative recovery
-//! matrix (`specs/recovery-table.md`, R6.2). Precedence is first-match:
-//! blocked-unknown-effect, then reconciliation, then missing resource, then
-//! the ordinary run-state row (D5). A `(run state, effect state)` pair no row
-//! assigns fails closed with `Internal` before any disposition is written
-//! (R6.3, D8).
+//! matrix (`specs/recovery-table.md`, R6.2). The matrix is implemented for the
+//! rows the current read surface reaches: effects, timers, and adapter
+//! bindings. The `WaitingHuman` expired-approval row is deferred to the
+//! approvals module because the port has no approvals-by-run read, so a
+//! `WaitingHuman` run currently always classifies `Normal` (see [`matrix`]).
+//! Precedence is first-match: blocked-unknown-effect, then reconciliation,
+//! then missing resource, then the ordinary run-state row (D5). A
+//! `(run state, effect state)` pair no row assigns fails closed with
+//! `Internal` before any disposition is written (R6.3, D8).
 //!
 //! Changed dispositions are persisted with a revision-bumping patch and a
 //! catalogued `RunRecoveryDispositionChanged` event; run state is never
@@ -289,6 +293,13 @@ fn dispatched_is_unsafe(effect: &EffectRow) -> bool {
 /// enumerated, so a terminal state reaching classification is treated as
 /// unmapped rather than guessed. The `WaitingChild` arm is a placeholder that
 /// [`classify`] refines with the declared-condition check.
+///
+/// The `WaitingHuman` arm implements the pending-approval row only. The
+/// expired-approval row selects `RecoveryDisposition::RequiresHumanDecision`
+/// but is deferred to the approvals module because the port has no
+/// approvals-by-run read, so an expired approval currently classifies
+/// `Normal`. `Suspended` genuinely selects `RequiresHumanDecision` (no resume
+/// path exists, design D8) and is implemented.
 fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition> {
     use EffectClass as E;
     use RecoveryDisposition as D;
@@ -299,6 +310,8 @@ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition
         (S::Running, E::None) => D::Recovering,
         (S::WaitingTool, E::None) => D::Normal,
         (S::WaitingChild, E::None) => D::Normal,
+        // Pending-approval row only; the expired-approval `RequiresHumanDecision`
+        // row is deferred to the approvals module (no approvals-by-run read yet).
         (S::WaitingHuman, E::None) => D::Normal,
         (
             S::Suspended,
