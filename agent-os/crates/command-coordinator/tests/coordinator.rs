@@ -253,17 +253,26 @@ async fn identical_replay_returns_the_stored_outcome_without_changes() {
     let envelope = envelope(TEST_COMMAND, digest(0xa2));
 
     let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
-    let before = harness.observe(&envelope).await;
+    let mut observation = harness.observe(&envelope).await;
 
-    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
-
-    assert_eq!(replayed, first);
+    for replay_index in 0..3 {
+        let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
+        assert_eq!(
+            replayed, first,
+            "replay {replay_index} returned a different outcome"
+        );
+        let next = harness.observe(&envelope).await;
+        assert_eq!(
+            next, observation,
+            "replay {replay_index} changed persisted state"
+        );
+        observation = next;
+    }
     assert_eq!(
         harness.handler.calls(),
         1,
         "replay must not run the handler"
     );
-    assert_eq!(harness.observe(&envelope).await, before);
 }
 
 #[tokio::test]
@@ -392,6 +401,11 @@ async fn unknown_command_type_rejects_without_rows() {
 
     assert_eq!(error.code(), ErrorCode::InvalidArgument);
     assert_eq!(error.retry_class(), RetryClass::Never);
+    assert!(
+        error.message().contains("session.unknown"),
+        "message must name the unregistered command_type: {}",
+        error.message()
+    );
     assert_eq!(harness.handler.calls(), 0);
     let observed = harness.observe(&envelope).await;
     assert!(observed.session.is_none());

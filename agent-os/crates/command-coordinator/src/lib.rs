@@ -85,7 +85,10 @@ impl CommandCoordinator {
             KernelError::new(
                 ErrorCode::InvalidArgument,
                 RetryClass::Never,
-                "command_type is not registered in the coordinator",
+                format!(
+                    "command_type {:?} is not registered in the coordinator",
+                    envelope.command_type
+                ),
             )
         })?;
 
