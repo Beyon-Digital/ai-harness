@@ -1492,6 +1492,10 @@ dependencies = [
  "errors",
  "events",
  "kernel-store",
+ "kernel-store-sqlite",
+ "proptest",
+ "prost",
+ "tempfile",
  "testkit",
  "tokio",
 ]

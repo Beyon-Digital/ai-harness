@@ -10,7 +10,11 @@ domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
 events.workspace = true
+prost.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
 tokio.workspace = true
+kernel-store-sqlite.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
