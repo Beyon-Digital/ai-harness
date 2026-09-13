@@ -32,6 +32,7 @@ use domain::ids::{
     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
 };
 use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
+use domain::run::RunState;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::*;
@@ -632,6 +633,25 @@ impl RunRead for MockRunRepo {
         rows.sort_by_key(|row| row.run_id);
         Ok(rows)
     }
+
+    async fn list_active(&mut self) -> errors::Result<Vec<RunRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<RunRow> = state
+            .runs
+            .values()
+            .filter(|row| !is_terminal_state(row.state))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| (row.created_at_ms, row.run_id));
+        Ok(rows)
+    }
+}
+
+fn is_terminal_state(state: RunState) -> bool {
+    matches!(
+        state,
+        RunState::Completed | RunState::Failed | RunState::Cancelled
+    )
 }
 
 #[async_trait]
@@ -1241,6 +1261,18 @@ impl TimerRead for MockTimerRepo {
             .timers
             .values()
             .filter(|row| row.due_at_ms <= due_before_ms)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| (row.due_at_ms, row.timer_id));
+        Ok(rows)
+    }
+
+    async fn list_by_run(&mut self, run_id: RunId) -> errors::Result<Vec<TimerRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<TimerRow> = state
+            .timers
+            .values()
+            .filter(|row| row.run_id == Some(run_id))
             .cloned()
             .collect();
         rows.sort_by_key(|row| (row.due_at_ms, row.timer_id));

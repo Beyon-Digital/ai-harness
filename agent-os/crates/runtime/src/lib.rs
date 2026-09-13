@@ -6,6 +6,7 @@ pub mod agent_spec;
 pub mod cancel;
 pub mod claim;
 pub mod create_run;
+pub mod recovery;
 pub mod run;
 pub mod session;
 pub mod state;

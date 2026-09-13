@@ -4,7 +4,7 @@
 //! so a stale claim observes `false` without mutation (R3.2).
 
 use async_trait::async_trait;
-use domain::ids::TimerId;
+use domain::ids::{RunId, TimerId};
 use domain::resource::TimerState;
 use kernel_store::models::{NewTimer, TimerPatch, TimerRow};
 use kernel_store::repositories::{TimerRead, TimerRepo};
@@ -72,6 +72,17 @@ impl TimerRead for SqliteTimerRepo {
         let query = format!("{SELECT_TIMER} WHERE due_at_ms <= ?1 ORDER BY due_at_ms, timer_id");
         let rows = sqlx::query(&query)
             .bind(due_before_ms)
+            .fetch_all(guard.connection()?)
+            .await
+            .map_err(mapping::from_sqlx)?;
+        rows.iter().map(decode_timer).collect()
+    }
+
+    async fn list_by_run(&mut self, run_id: RunId) -> errors::Result<Vec<TimerRow>> {
+        let mut guard = self.conn.lock().await;
+        let query = format!("{SELECT_TIMER} WHERE run_id = ?1 ORDER BY due_at_ms, timer_id");
+        let rows = sqlx::query(&query)
+            .bind(run_id.to_string())
             .fetch_all(guard.connection()?)
             .await
             .map_err(mapping::from_sqlx)?;

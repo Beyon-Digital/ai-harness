@@ -42,6 +42,8 @@ pub enum PublishKind {
 pub trait RunRead: Send + Sync {
     async fn get(&mut self, id: RunId) -> Result<Option<RunRow>>;
     async fn list_by_task(&mut self, task: TaskId) -> Result<Vec<RunRow>>;
+    /// Runs whose state is not terminal, ordered by creation.
+    async fn list_active(&mut self) -> Result<Vec<RunRow>>;
 }
 
 #[async_trait]
@@ -169,6 +171,8 @@ pub trait ResourceRepo: ResourceRead {
 pub trait TimerRead: Send + Sync {
     async fn get(&mut self, id: TimerId) -> Result<Option<TimerRow>>;
     async fn list_due(&mut self, due_before_ms: i64) -> Result<Vec<TimerRow>>;
+    /// Timers owned by `run_id`, ordered by due time.
+    async fn list_by_run(&mut self, run_id: RunId) -> Result<Vec<TimerRow>>;
 }
 
 #[async_trait]

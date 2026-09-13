@@ -55,6 +55,26 @@ async fn fetch_runs_by_task(
     rows.iter().map(decode_run).collect()
 }
 
+async fn fetch_active_runs(
+    conn: &mut sqlx::SqliteConnection,
+    terminal_states: [i64; 3],
+) -> errors::Result<Vec<RunRow>> {
+    let rows = sqlx::query(
+        "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
+         run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
+         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
+         claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
+         updated_at_ms FROM runs WHERE state NOT IN (?1, ?2, ?3) ORDER BY created_at_ms, run_id",
+    )
+    .bind(terminal_states[0])
+    .bind(terminal_states[1])
+    .bind(terminal_states[2])
+    .fetch_all(conn)
+    .await
+    .map_err(mapping::from_sqlx)?;
+    rows.iter().map(decode_run).collect()
+}
+
 fn decode_run(row: &SqliteRow) -> errors::Result<RunRow> {
     Ok(RunRow {
         run_id: mapping::decode_id("runs.run_id", &mapping::text(row, "run_id")?)?,
@@ -124,6 +144,16 @@ impl RunRead for SqliteRunRepo {
     async fn list_by_task(&mut self, task: TaskId) -> errors::Result<Vec<RunRow>> {
         let mut guard = self.conn.lock().await;
         fetch_runs_by_task(guard.connection()?, task).await
+    }
+
+    async fn list_active(&mut self) -> errors::Result<Vec<RunRow>> {
+        let terminal_states = [
+            i64::from(RunState::Completed.to_wire()),
+            i64::from(RunState::Failed.to_wire()),
+            i64::from(RunState::Cancelled.to_wire()),
+        ];
+        let mut guard = self.conn.lock().await;
+        fetch_active_runs(guard.connection()?, terminal_states).await
     }
 }
 
