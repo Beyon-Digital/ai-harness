@@ -355,12 +355,12 @@ CREATE TABLE IF NOT EXISTS outbox_events (
   effect_id TEXT,
   causation_id TEXT,
   correlation_id TEXT,
-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
+  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
   -- 0=SENSITIVITY_UNSPECIFIED is never persisted.
   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
+  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
   -- 0=RETENTION_UNSPECIFIED is never persisted.
-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
+  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
   payload BLOB NOT NULL,
   journal_published_at_ms INTEGER,
   live_published_at_ms INTEGER,
@@ -381,10 +381,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
   size_bytes INTEGER NOT NULL,
   origin_run_id TEXT NOT NULL,
   origin_effect_id TEXT,
-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
+  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
+  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
+  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
   locator TEXT NOT NULL,
   created_at_ms INTEGER NOT NULL,
   FOREIGN KEY (origin_run_id) REFERENCES runs(run_id),

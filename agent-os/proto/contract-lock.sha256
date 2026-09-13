@@ -10,7 +10,7 @@ fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/
 41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc  ./domain/entities.proto
 924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
 33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
-eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799  ./events/event.proto
+854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f  ./events/event.proto
 819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
 92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
 16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto

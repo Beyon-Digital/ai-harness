@@ -220,14 +220,14 @@ mod prop_enums {
         assert_eq!(SensitivityClass::Unspecified.to_wire(), 0);
         assert_eq!(SensitivityClass::Public.to_wire(), 1);
         assert_eq!(SensitivityClass::Internal.to_wire(), 2);
-        assert_eq!(SensitivityClass::Private.to_wire(), 3);
+        assert_eq!(SensitivityClass::Confidential.to_wire(), 3);
         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
 
         assert_eq!(RetentionClass::Unspecified.to_wire(), 0);
         assert_eq!(RetentionClass::Ephemeral.to_wire(), 1);
-        assert_eq!(RetentionClass::Session.to_wire(), 2);
+        assert_eq!(RetentionClass::Standard.to_wire(), 2);
         assert_eq!(RetentionClass::Audit.to_wire(), 3);
-        assert_eq!(RetentionClass::Durable.to_wire(), 4);
+        assert!(RetentionClass::from_wire(4).is_err());
 
         assert_eq!(TrustState::Trusted.to_wire(), 1);
         assert_eq!(TrustState::Untrusted.to_wire(), 2);

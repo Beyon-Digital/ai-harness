@@ -896,7 +896,7 @@ async fn artifact_repo_crud() {
             origin_run_id: seeded.run,
             origin_effect_id: None,
             sensitivity: SensitivityClass::Internal,
-            retention: RetentionClass::Session,
+            retention: RetentionClass::Standard,
             locator: "file:///var/artifacts/1".to_owned(),
             created_at_ms: 20,
         })

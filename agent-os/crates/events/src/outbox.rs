@@ -109,8 +109,8 @@ mod tests {
             stream_key: stream_key("run/018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70"),
             event_type: "run.created".to_owned(),
             payload: vec![0x07, 0x08],
-            sensitivity: SensitivityClass::Private,
-            retention: RetentionClass::Durable,
+            sensitivity: SensitivityClass::Confidential,
+            retention: RetentionClass::Standard,
             correlation_id: Some("corr-1".to_owned()),
             causation_id: Some(event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71")),
         };
@@ -129,8 +129,8 @@ mod tests {
         );
         assert_eq!(event.sequence, 7);
         assert_eq!(event.occurred_at_ms, 1_700_000_000_042);
-        assert_eq!(event.sensitivity, SensitivityClass::Private);
-        assert_eq!(event.retention, RetentionClass::Durable);
+        assert_eq!(event.sensitivity, SensitivityClass::Confidential);
+        assert_eq!(event.retention, RetentionClass::Standard);
         assert_eq!(event.correlation_id.as_deref(), Some("corr-1"));
         assert_eq!(
             event.causation_id,

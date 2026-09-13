@@ -10,7 +10,7 @@ mirror_enum! {
         Unspecified = 0,
         Public = 1,
         Internal = 2,
-        Private = 3,
+        Confidential = 3,
         Secret = 4,
     }
 }
@@ -20,9 +20,8 @@ mirror_enum! {
     RetentionClass, "RetentionClass", {
         Unspecified = 0,
         Ephemeral = 1,
-        Session = 2,
+        Standard = 2,
         Audit = 3,
-        Durable = 4,
     }
 }
 
@@ -55,11 +54,14 @@ state_enum! {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalState, ConformanceState, SensitivityClass, TrustState};
+    use super::{ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState};
 
     #[test]
     fn wire_mapping_matches_the_persisted_state_order() {
+        assert_eq!(SensitivityClass::Confidential.to_wire(), 3);
         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
+        assert_eq!(RetentionClass::Standard.to_wire(), 2);
+        assert_eq!(RetentionClass::Audit.to_wire(), 3);
         assert_eq!(TrustState::Untrusted.to_wire(), 2);
         assert_eq!(ConformanceState::Passed.to_wire(), 2);
         assert_eq!(ApprovalState::Expired.to_wire(), 4);
@@ -68,6 +70,7 @@ mod tests {
     #[test]
     fn unknown_values_are_not_guessed() {
         assert!(SensitivityClass::from_wire(5).is_err());
+        assert!(RetentionClass::from_wire(4).is_err());
         assert!(TrustState::from_wire(0).is_err());
         assert!(TrustState::from_wire(3).is_err());
         assert!(ConformanceState::from_wire(4).is_err());

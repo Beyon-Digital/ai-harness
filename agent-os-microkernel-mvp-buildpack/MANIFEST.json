@@ -111,7 +111,7 @@
     {
       "path": "contracts/contract-lock.sha256",
       "bytes": 2954,
-      "sha256": "4c2799ae3d6025954b559c6d911ae8b505ac529981ca99288e499eaddccbf78b"
+      "sha256": "1afa7c848a36f8e1f350e1334989778b8cc1cd46fcbd03354f3f4502b45c89fa"
     },
     {
       "path": "contracts/control-api/commands.proto",
@@ -150,8 +150,8 @@
     },
     {
       "path": "contracts/events/event.proto",
-      "bytes": 594,
-      "sha256": "eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799"
+      "bytes": 589,
+      "sha256": "854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f"
     },
     {
       "path": "contracts/manifests/extension.schema.json",
@@ -375,8 +375,8 @@
     },
     {
       "path": "specs/kernel-store-schema.sql",
-      "bytes": 20296,
-      "sha256": "22d739d91e733d680fa0c62d6a16b459912f1c17c7d63a1f98184abde95fcc60"
+      "bytes": 20286,
+      "sha256": "42a49db9007781613db59d453e8e55df57d13f99e2538dfe3c03331730a14a03"
     },
     {
       "path": "specs/kernel-store.md",
