@@ -80,10 +80,14 @@ impl EventDispatcher {
     /// Runs one deterministic iteration: scan, append per stream, mark, publish.
     ///
     /// The expected sequence is the first scanned row's sequence minus one
-    /// (D7). After every successful append the `outbox.after_journal_append`
-    /// fault point is consulted; when it fires the iteration reports
-    /// `Unavailable`/`Safe` before any mark is written, so recovery re-appends
-    /// the same batch idempotently.
+    /// (D7). Before appending, the stream's already-recorded prefix is read
+    /// back, so a batch that spans a crash (recorded rows plus newly committed
+    /// rows) appends only its unrecorded suffix from the recorded head; a
+    /// position that already holds a different event is a `Conflict`. After
+    /// every successful append the `outbox.after_journal_append` fault point is
+    /// consulted; when it fires the iteration reports `Unavailable`/`Safe`
+    /// before any mark is written, so recovery re-appends the same batch
+    /// idempotently.
     pub async fn dispatch_once(
         &self,
         limit: u32,
@@ -110,15 +114,27 @@ impl EventDispatcher {
         let mut envelopes: Vec<EventEnvelope> = Vec::with_capacity(rows.len());
         for (stream_key, batch) in &groups {
             let expected_sequence = batch[0].sequence.saturating_sub(1);
-            self.journal
-                .append(stream_key, expected_sequence, batch)
+            let recorded = self
+                .journal
+                .read_stream(stream_key, expected_sequence, batch_limit(batch.len()))
                 .await?;
-            if self.faults.inject(AFTER_JOURNAL_APPEND) {
-                return Err(KernelError::new(
-                    ErrorCode::Unavailable,
-                    RetryClass::Safe,
-                    "outbox.after_journal_append fault point fired after a journal append",
-                ));
+            let matched = recorded_prefix(&recorded.events, batch)?;
+            if matched < batch.len() {
+                let append_from = if matched == 0 {
+                    expected_sequence
+                } else {
+                    batch[matched - 1].sequence
+                };
+                self.journal
+                    .append(stream_key, append_from, &batch[matched..])
+                    .await?;
+                if self.faults.inject(AFTER_JOURNAL_APPEND) {
+                    return Err(KernelError::new(
+                        ErrorCode::Unavailable,
+                        RetryClass::Safe,
+                        "outbox.after_journal_append fault point fired after a journal append",
+                    ));
+                }
             }
             envelopes.extend(batch.iter().cloned());
         }
@@ -165,6 +181,36 @@ impl EventDispatcher {
             correlation_id: Some(format!("outbox.dispatch.{}", self.clock.now_unix_ms())),
         }
     }
+}
+
+fn batch_limit(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+/// Length of the batch prefix already recorded in the journal.
+///
+/// Events are compared position by position in sequence order and the scan
+/// stops at the first difference. A recorded position holding a different
+/// event (another id, or different bytes under the same id) is a `Conflict`,
+/// matching the journal's own replay rules.
+fn recorded_prefix(recorded: &[EventEnvelope], batch: &[EventEnvelope]) -> errors::Result<usize> {
+    let mut matched = 0;
+    while matched < recorded.len() && matched < batch.len() {
+        let existing = &recorded[matched];
+        let pending = &batch[matched];
+        if existing.sequence != pending.sequence {
+            break;
+        }
+        if existing.event_id != pending.event_id || existing.to_bytes() != pending.to_bytes() {
+            return Err(KernelError::new(
+                ErrorCode::Conflict,
+                RetryClass::Never,
+                "recorded journal prefix diverges from the outbox batch",
+            ));
+        }
+        matched += 1;
+    }
+    Ok(matched)
 }
 
 fn envelope_from_row(row: &OutboxEventRow, stream_key: StreamKey) -> EventEnvelope {

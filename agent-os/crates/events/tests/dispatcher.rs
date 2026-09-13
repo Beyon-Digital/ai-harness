@@ -286,6 +286,13 @@ impl EventJournalPort for MemoryJournal {
         Self: 'async_trait,
     {
         Box::pin(async move {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(KernelError::new(
+                    ErrorCode::Unavailable,
+                    RetryClass::Safe,
+                    "test journal is unavailable",
+                ));
+            }
             let rows = self.rows.lock().expect("journal lock is not poisoned");
             let events = rows
                 .get(stream_key.as_str())
@@ -502,6 +509,104 @@ async fn crash_after_append_reappends_without_duplicates() {
         unpublished(&store, epoch, principal).await.is_empty(),
         "recovery marks every row"
     );
+}
+
+#[tokio::test]
+async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
+    let dir = TempDir::new().expect("temp dir");
+    let (store, epoch) = open_store(&dir).await;
+    let principal = PrincipalId::new(&SystemIdProvider);
+    let stream_a = run_stream(RUN_A);
+    let stream_b = run_stream(RUN_B);
+    let journal = Arc::new(MemoryJournal::new());
+    let sink = Arc::new(RecorderSink::default());
+    let faults = Arc::new(ArmedFaults::new());
+    let dispatcher = dispatcher(
+        &store,
+        Arc::clone(&journal),
+        Arc::clone(&sink) as Arc<dyn LiveSink>,
+        Arc::clone(&faults),
+        principal,
+    );
+
+    stage_events(
+        &store,
+        epoch,
+        principal,
+        &stream_a,
+        &[(event_id(0x70), vec![1]), (event_id(0x71), vec![2])],
+    )
+    .await;
+    stage_events(
+        &store,
+        epoch,
+        principal,
+        &stream_b,
+        &[(event_id(0x74), vec![4])],
+    )
+    .await;
+
+    faults.arm(AFTER_JOURNAL_APPEND);
+    let error = dispatcher
+        .dispatch_once(16, epoch)
+        .await
+        .expect_err("the armed fault aborts after stream A");
+    assert_unavailable(&error);
+    assert_eq!(
+        journal.rows_for(&stream_a).len(),
+        2,
+        "stream A is recorded before the fault"
+    );
+    assert!(
+        journal.rows_for(&stream_b).is_empty(),
+        "stream B is not reached before the fault"
+    );
+
+    stage_events(
+        &store,
+        epoch,
+        principal,
+        &stream_a,
+        &[(event_id(0x72), vec![3])],
+    )
+    .await;
+
+    let outcome = dispatcher
+        .dispatch_once(16, epoch)
+        .await
+        .expect("mixed-batch recovery succeeds");
+    assert_eq!(
+        outcome,
+        DispatchOutcome {
+            scanned: 4,
+            published: 4,
+            backlog: 0,
+        }
+    );
+
+    let rows_a = journal.rows_for(&stream_a);
+    assert_eq!(
+        rows_a.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "stream A stays contiguous"
+    );
+    assert_eq!(
+        rows_a.iter().map(|row| row.event_id).collect::<Vec<_>>(),
+        vec![event_id(0x70), event_id(0x71), event_id(0x72)],
+        "the recorded prefix is not re-appended"
+    );
+    let rows_b = journal.rows_for(&stream_b);
+    assert_eq!(
+        rows_b.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+        vec![1],
+        "stream B is not blocked by stream A's recovery"
+    );
+    assert_eq!(journal.total_rows(), 4, "no duplicate journal rows");
+    assert!(
+        unpublished(&store, epoch, principal).await.is_empty(),
+        "every row is marked after recovery"
+    );
+    assert_eq!(sink.delivered().len(), 4);
 }
 
 #[tokio::test]

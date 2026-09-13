@@ -6,9 +6,7 @@
 //! through a `tokio::sync::watch` flag.
 //!
 //! The composition root wires this worker in a later task, so its items are
-//! not yet reachable from `main`; the local allow keeps `-D warnings` honest
-//! about everything else until then.
-#![allow(dead_code)]
+//! not yet reachable from `main`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +38,7 @@ pub struct OutboxWorker {
 
 impl OutboxWorker {
     /// Creates a worker that polls the outbox every `poll`.
+    #[allow(dead_code)]
     pub fn new(
         dispatcher: Arc<EventDispatcher>,
         epoch: Arc<dyn EpochSource>,
@@ -56,6 +55,7 @@ impl OutboxWorker {
     ///
     /// Availability failures back off exponentially up to [`MAX_BACKOFF`];
     /// success and every other failure resume the normal `poll` cadence.
+    #[allow(dead_code)]
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = interval(self.poll);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
