@@ -37,3 +37,13 @@
 - 2026-09-13T20:13:24Z RUN-003 -> review (@agent-run003)
 - 2026-09-13T20:18:20Z RUN-003 -> done (@agent-run003)
 - 2026-09-13T20:18:21Z RUN-003 approved; the RUN-001 #[path] follow-up is closed. Deferred minors: SystemIdProvider tokens, i63 masking, no correlation on claim events. 4/6 done.
+- 2026-09-13T20:18:55Z RUN-004 -> claimed (@agent-run004)
+- 2026-09-13T20:18:56Z RUN-004 -> in_progress (@agent-run004)
+- 2026-09-13T21:07:44Z RUN-004 -> review (@agent-run004)
+- 2026-09-13T21:11:55Z RUN-004 -> pending (@agent-run004)
+- 2026-09-13T21:12:25Z Rulings for RUN-004 fixes: (1) the normative transition table is extended with Created -> Cancelled for never-started cancellation; the pack spec and SOURCE_CORRECTIONS carry the correction, avoiding a phantom Ready without a resolved environment. (2) The unleased one-line edit to RUN-003's registry-size assertion was legalized retroactively by adding runtime/tests/claim.rs to RUN-004's lease; the assertion must assert exactly 5. (3) run-graph owns epoch/walk/eligibility; runtime applies transitions (crate-cycle split) — design corrected.
+- 2026-09-13T21:13:18Z RUN-004 -> claimed (@agent-run004)
+- 2026-09-13T21:13:18Z RUN-004 -> in_progress (@agent-run004)
+- 2026-09-13T21:22:00Z RUN-004 -> review (@agent-run004)
+- 2026-09-13T21:23:38Z RUN-004 -> done (@agent-run004)
+- 2026-09-13T21:23:38Z RUN-004 approved after one fix round (direct Created->Cancelled with pack correction; strict registry guard). 5/6 done; RUN-005 dispatched.

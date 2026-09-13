@@ -1,0 +1,370 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/MANIFEST.json b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+index b304aca..4f2a416 100644
+--- a/agent-os-microkernel-mvp-buildpack/MANIFEST.json
++++ b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+@@ -40,18 +40,18 @@
+     },
+     {
+       "path": "SCOPE.md",
+       "bytes": 1835,
+       "sha256": "27982e9d3b862c1ddd0b7fb10ab1ea726166475402ce9599be7751e33635595e"
+     },
+     {
+       "path": "SOURCE_CORRECTIONS.md",
+-      "bytes": 3613,
+-      "sha256": "ab58f89f22fddde7092d046425da6e36901c5c007e6b3b474a8acdf550159061"
++      "bytes": 4215,
++      "sha256": "9d3c6f33cefaf3e8aedd4cd1215596ec7a4c877d60b59229c2603fe36a5a6d4d"
+     },
+     {
+       "path": "TASK_STATUS.yaml",
+       "bytes": 5515,
+       "sha256": "7becb848d7985f20221135ccf1c42e32452a9ec57077e8b57806363c3dc35ede"
+     },
+     {
+       "path": "architecture/README.md",
+@@ -430,18 +430,18 @@
+     },
+     {
+       "path": "specs/run-graph.md",
+       "bytes": 2147,
+       "sha256": "0c9c7b171627666f20be29c8da92ab4d4372a58f1051184e210897e80a1e07a8"
+     },
+     {
+       "path": "specs/runtime-manager.md",
+-      "bytes": 1385,
+-      "sha256": "de71ccaa4c07fab89c0712b844b473c5b6b9a667fabf317887076b272056efae"
++      "bytes": 1457,
++      "sha256": "aa33696a879783646326cee7ccc767ab987c06203c0845b045124a28da441b04"
+     },
+     {
+       "path": "specs/sandbox.md",
+       "bytes": 985,
+       "sha256": "f5ecf36faaf81585678dc6f6872deb2c277f88b1083334392ba74d5681b5279b"
+     },
+     {
+       "path": "specs/scheduler.md",
+diff --git a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+index 8dd8a72..a265610 100644
+--- a/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
++++ b/agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md
+@@ -45,8 +45,21 @@ reconciles the classification vocabulary to one spelling across the proto,
+ domain mirror, catalog, schema, and every Rust usage:
+ 
+ - `Sensitivity.PRIVATE` is renamed `Sensitivity.CONFIDENTIAL`.
+ - Retention narrows to three values, `EPHEMERAL` (1), `STANDARD` (2), and
+   `AUDIT` (3), removing `SESSION` and `DURABLE`.
+ 
+ The canonical repo-root `spec/events/event.proto` intentionally keeps the old
+ names for now; a future canonical-tree update should adopt this correction.
++
++## Transition table correction
++
++`specs/runtime-manager.md` allowed `Created -> Ready` as the only edge out of
++`Created`, but cancellation of a never-started run has no cleanup to drain and
++no persisted `ResolvedRunEnvironment`, so it must reach `Cancelled` without
++fabricating a `Ready`. The pack's state table now reads
++`Created -> Ready | Cancelled`, where `Created -> Cancelled` is
++cancellation-only.
++
++The runtime implementation and its state-machine suite mirror this correction
++(`runtime/src/state.rs`, `runtime/tests/state_machine.rs`); the repo-root
++canonical runtime-manager doc is unchanged.
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/runtime-manager.md b/agent-os-microkernel-mvp-buildpack/specs/runtime-manager.md
+index 922f4cd..bb16422 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/runtime-manager.md
++++ b/agent-os-microkernel-mvp-buildpack/specs/runtime-manager.md
+@@ -3,17 +3,17 @@
+ 
+ # Runtime Manager
+ 
+ ## State machine
+ 
+ Allowed transitions:
+ 
+ ```text
+-Created -> Ready
++Created -> Ready | Cancelled   # Cancelled is cancellation-only, for a never-started run
+ Ready -> Running | Cancelled
+ Running -> WaitingTool | WaitingChild | WaitingHuman | Suspended | Cancelling | Completed | Failed
+ WaitingTool -> Running | Cancelling | Failed
+ WaitingChild -> Running | Cancelling | Failed
+ WaitingHuman -> Running | Cancelling | Failed
+ Suspended -> Running | Cancelling | Failed
+ Cancelling -> Cancelled | Failed
+ ```
+diff --git a/agent-os/crates/run-graph/src/cancellation.rs b/agent-os/crates/run-graph/src/cancellation.rs
+index 443e735..11e2a69 100644
+--- a/agent-os/crates/run-graph/src/cancellation.rs
++++ b/agent-os/crates/run-graph/src/cancellation.rs
+@@ -66,16 +66,22 @@ pub async fn cancel_subtree(
+             eligible.push(descendant);
+         }
+     }
+     Ok(eligible)
+ }
+ 
+ /// Returns true when cancellation still has to move the run: every non-terminal
+ /// state except `Cancelling`, which is already draining (R5.2, R5.5).
++///
++/// The eligible set deliberately mirrors the cancellation edges of
++/// `runtime/src/state.rs`, which stays the transition authority and is applied
++/// by `runtime::cancel`; the mirror lives here only to respect the crate
++/// direction (`runtime` depends on `run-graph`, never the reverse), and it must
++/// move with the table's cancellation edges.
+ const fn is_eligible(state: RunState) -> bool {
+     matches!(
+         state,
+         RunState::Created
+             | RunState::Ready
+             | RunState::Running
+             | RunState::WaitingTool
+             | RunState::WaitingChild
+diff --git a/agent-os/crates/runtime/src/cancel.rs b/agent-os/crates/runtime/src/cancel.rs
+index aadd9b3..7c51204 100644
+--- a/agent-os/crates/runtime/src/cancel.rs
++++ b/agent-os/crates/runtime/src/cancel.rs
+@@ -37,22 +37,22 @@ pub struct CancellationReport {
+     /// Runs transitioned by this request, in the order they were visited.
+     pub changed: Vec<RunId>,
+ }
+ 
+ /// Advances the epoch of `run_id` and transitions its eligible subtree.
+ ///
+ /// `cancel_subtree` owns the epoch CAS, the epoch event, and the ancestry walk;
+ /// this service applies the RUN-001 table with [`transition`] so revisions and
+-/// terminal reasons stay authoritative. A `Created` run reaches `Cancelled`
+-/// through the table's only path, `Created -> Ready -> Cancelled`, because the
+-/// table does not admit `Created -> Cancelled` directly; the intermediate hop
+-/// is an artifact of that gap and stages no event of its own (D6). The
+-/// committed revision increments once per transition plus once for the epoch
+-/// advance (R5.4).
++/// terminal reasons stay authoritative. Never-started runs cancel directly:
++/// `Created -> Cancelled` is the table's cancellation-only edge (it avoids a
++/// phantom `Ready` without a resolved environment) and `Ready -> Cancelled` has
++/// always been allowed, so every changed run commits exactly one transition.
++/// The committed revision increments once per transition plus once for the
++/// epoch advance (R5.4).
+ pub async fn cancel(
+     txn: &mut dyn KernelTxn,
+     run_id: RunId,
+     reason: &str,
+     now_ms: i64,
+ ) -> errors::Result<CancellationReport> {
+     let eligible = cancel_subtree(txn, run_id, reason, now_ms).await?;
+ 
+@@ -61,38 +61,17 @@ pub async fn cancel(
+         let row = txn.runs().get(candidate).await?.ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::Internal,
+                 RetryClass::Never,
+                 "eligible run vanished during cancellation",
+             )
+         })?;
+         let (final_row, event_type) = match row.state {
+-            RunState::Created => {
+-                let ready = transition(
+-                    txn,
+-                    candidate,
+-                    row.run_revision,
+-                    RunState::Ready,
+-                    None,
+-                    now_ms,
+-                )
+-                .await?;
+-                let cancelled = transition(
+-                    txn,
+-                    candidate,
+-                    ready.run_revision,
+-                    RunState::Cancelled,
+-                    terminal_reason(reason),
+-                    now_ms,
+-                )
+-                .await?;
+-                (cancelled, "RunCancelled")
+-            }
+-            RunState::Ready => (
++            RunState::Created | RunState::Ready => (
+                 transition(
+                     txn,
+                     candidate,
+                     row.run_revision,
+                     RunState::Cancelled,
+                     terminal_reason(reason),
+                     now_ms,
+                 )
+diff --git a/agent-os/crates/runtime/src/state.rs b/agent-os/crates/runtime/src/state.rs
+index 34b272c..9976c62 100644
+--- a/agent-os/crates/runtime/src/state.rs
++++ b/agent-os/crates/runtime/src/state.rs
+@@ -14,21 +14,26 @@ pub const REASON_FAILED: &str = "failed";
+ pub const REASON_CANCELLED: &str = "cancelled";
+ /// Reason carried by the cancellation service when it requests cancellation.
+ ///
+ /// `Cancelling` is not terminal, so the transition service leaves
+ /// `terminal_reason` untouched while a run drains.
+ pub const REASON_CANCELLATION_REQUESTED: &str = "cancellation_requested";
+ 
+ /// Returns true when the normative transition table permits `from -> to`.
++///
++/// `Created -> Cancelled` is cancellation-only: a never-started run has no
++/// cleanup to drain and no resolved environment, so the cancellation service
++/// moves it straight to `Cancelled` rather than fabricating a `Ready`.
+ pub const fn allows(from: RunState, to: RunState) -> bool {
+     use RunState::*;
+     matches!(
+         (from, to),
+         (Created, Ready)
++            | (Created, Cancelled) // cancellation of a never-started run
+             | (Ready, Running)
+             | (Ready, Cancelled)
+             | (Running, WaitingTool)
+             | (Running, WaitingChild)
+             | (Running, WaitingHuman)
+             | (Running, Suspended)
+             | (Running, Cancelling)
+             | (Running, Completed)
+diff --git a/agent-os/crates/runtime/tests/cancel.rs b/agent-os/crates/runtime/tests/cancel.rs
+index 22d693a..499dac3 100644
+--- a/agent-os/crates/runtime/tests/cancel.rs
++++ b/agent-os/crates/runtime/tests/cancel.rs
+@@ -274,18 +274,18 @@ async fn cancel_transitions_the_root_and_nested_descendants() {
+         RunState::Cancelled,
+         "a never-started run"
+     );
+     assert_eq!(
+         created_row.cancellation_epoch, 0,
+         "only the root's epoch moves"
+     );
+     assert_eq!(
+-        created_row.run_revision, 2,
+-        "the table's only path to Cancelled"
++        created_row.run_revision, 1,
++        "the cancellation-only edge commits once"
+     );
+     assert_eq!(
+         created_row.terminal_reason.as_deref(),
+         Some("operator cancelled")
+     );
+ 
+     let ready_row = harness.run(ready).await.expect("ready child persists");
+     assert_eq!(ready_row.state, RunState::Cancelled);
+@@ -416,17 +416,17 @@ async fn duplicate_cancel_advances_the_epoch_and_leaves_terminals_untouched() {
+ 
+     let root_row = harness.run(root).await.expect("root persists");
+     assert_eq!(root_row.state, RunState::Cancelling);
+     assert_eq!(root_row.cancellation_epoch, 2, "the epoch advances again");
+     assert_eq!(root_row.run_revision, 3, "only the epoch CAS moves");
+ 
+     let child_row = harness.run(child).await.expect("child persists");
+     assert_eq!(child_row.state, RunState::Cancelled);
+-    assert_eq!(child_row.run_revision, 2, "terminal runs are untouched");
++    assert_eq!(child_row.run_revision, 1, "terminal runs are untouched");
+ 
+     let events = harness.events().await;
+     assert_eq!(events_of(&events, "CancellationEpochAdvanced").len(), 2);
+     assert_eq!(events_of(&events, "RunCancelled").len(), 1);
+     assert_eq!(events_of(&events, "RunStateChanged").len(), 1);
+ }
+ 
+ #[tokio::test]
+diff --git a/agent-os/crates/runtime/tests/claim.rs b/agent-os/crates/runtime/tests/claim.rs
+index 23f7c44..7586e5f 100644
+--- a/agent-os/crates/runtime/tests/claim.rs
++++ b/agent-os/crates/runtime/tests/claim.rs
+@@ -754,11 +754,11 @@ fn register_handlers_registers_claim_ready_run() {
+     runtime::register_handlers(
+         &mut registry,
+         RuntimeDeps {
+             clock: Arc::new(TestClock::new(SEED_MS)),
+             ids: Arc::new(DeterministicIds::new(SEED_MS)),
+         },
+     )
+     .expect("runtime handlers register");
+-    assert!(registry.len() >= 4);
++    assert_eq!(registry.len(), 5);
+     assert!(registry.get(CMD_CLAIM_READY_RUN).is_some());
+ }
+diff --git a/agent-os/crates/runtime/tests/state_machine.rs b/agent-os/crates/runtime/tests/state_machine.rs
+index 6aa1f4a..42b458a 100644
+--- a/agent-os/crates/runtime/tests/state_machine.rs
++++ b/agent-os/crates/runtime/tests/state_machine.rs
+@@ -50,16 +50,17 @@ const PERSISTED_STATES: [RunState; 11] = [
+ 
+ /// Independent encoding of `specs/runtime-manager.md`; the implementation table
+ /// must agree with this for every pair.
+ fn normative_allows(from: RunState, to: RunState) -> bool {
+     use RunState::*;
+     matches!(
+         (from, to),
+         (Created, Ready)
++            | (Created, Cancelled) // cancellation of a never-started run
+             | (Ready, Running)
+             | (Ready, Cancelled)
+             | (Running, WaitingTool)
+             | (Running, WaitingChild)
+             | (Running, WaitingHuman)
+             | (Running, Suspended)
+             | (Running, Cancelling)
+             | (Running, Completed)
+@@ -294,17 +295,17 @@ async fn every_allowed_pair_commits_once_and_persists_the_target() {
+                 RunState::Completed => Some(state::REASON_COMPLETED),
+                 RunState::Failed => Some(state::REASON_FAILED),
+                 RunState::Cancelled => Some(state::REASON_CANCELLED),
+                 _ => None,
+             };
+             assert_eq!(persisted.terminal_reason.as_deref(), expected_reason);
+         }
+     }
+-    assert_eq!(checked, 24, "the normative table has 24 allowed pairs");
++    assert_eq!(checked, 25, "the normative table has 25 allowed pairs");
+ }
+ 
+ #[tokio::test]
+ async fn every_forbidden_pair_conflicts_without_mutation() {
+     let harness = Harness::new().await;
+     for from in PERSISTED_STATES {
+         let run_id = RunId::new(&harness.ids);
+         harness.seed_run(run_id, from).await;
+@@ -323,16 +324,41 @@ async fn every_forbidden_pair_conflicts_without_mutation() {
+             let persisted = harness.run(run_id).await;
+             assert_eq!(persisted.state, from, "{from:?} -> {to:?} state");
+             assert_eq!(persisted.run_revision, 0, "{from:?} -> {to:?} revision");
+             assert_eq!(persisted.terminal_reason, None);
+         }
+     }
+ }
+ 
++#[tokio::test]
++async fn cancellation_moves_a_never_started_run_directly_to_cancelled() {
++    let harness = Harness::new().await;
++    let run_id = RunId::new(&harness.ids);
++    harness.seed_run(run_id, RunState::Created).await;
++
++    let updated = harness
++        .attempt(run_id, 0, RunState::Cancelled, None)
++        .await
++        .expect("Created -> Cancelled commits for cancellation");
++
++    assert_eq!(updated.state, RunState::Cancelled);
++    assert_eq!(
++        updated.run_revision, 1,
++        "the cancellation-only edge bumps the revision once"
++    );
++    let persisted = harness.run(run_id).await;
++    assert_eq!(persisted.state, RunState::Cancelled);
++    assert_eq!(persisted.run_revision, 1);
++    assert_eq!(
++        persisted.terminal_reason.as_deref(),
++        Some(state::REASON_CANCELLED)
++    );
++}
++
+ #[tokio::test]
+ async fn terminal_states_reject_further_transitions_and_keep_the_reason() {
+     let harness = Harness::new().await;
+     for (steps, terminal, expected_reason) in [
+         (
+             vec![RunState::Completed],
+             RunState::Completed,
+             state::REASON_COMPLETED,

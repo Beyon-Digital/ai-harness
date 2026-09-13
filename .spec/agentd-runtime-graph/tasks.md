@@ -183,10 +183,10 @@
 
 ### Task RUN-004: Cancellation epochs and subtree cancellation
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-run004
 - depends_on: RUN-003
-- files: `agent-os/crates/run-graph/src/cancellation.rs`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/runtime/src/cancel.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/tests/cancellation.rs`, `agent-os/crates/runtime/tests/cancel.rs`
+- files: `agent-os/crates/run-graph/src/cancellation.rs`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/runtime/src/cancel.rs`, `agent-os/crates/runtime/src/state.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/tests/cancellation.rs`, `agent-os/crates/runtime/tests/cancel.rs`, `agent-os/crates/runtime/tests/state_machine.rs`, `agent-os/crates/runtime/tests/claim.rs`, `agent-os-microkernel-mvp-buildpack/specs/runtime-manager.md`, `agent-os-microkernel-mvp-buildpack/SOURCE_CORRECTIONS.md`, `agent-os-microkernel-mvp-buildpack/MANIFEST.json`
 - requirements: R5.1, R5.2, R5.3, R5.4, R5.5, P3, N2
 - scope: large
 - model: capable

@@ -60,6 +60,9 @@
 
 ```rust
 /// True when the normative table permits this transition.
+/// Correction (RUN-004): the table is extended with `Created -> Cancelled` so a
+/// never-started run can be cancelled without transiting `Ready` (which would
+/// imply a resolved environment). Pack spec and SOURCE_CORRECTIONS record it.
 pub const fn allows(from: RunState, to: RunState) -> bool;
 pub const fn is_terminal(state: RunState) -> bool;
 
@@ -144,7 +147,10 @@ pub async fn descendants(txn: &mut dyn KernelTxn, root: RunId) -> Result⟨Vec�
 pub const fn condition_met(condition: DependencyCondition, source_state: RunState) -> bool;
 pub async fn dependencies_satisfied(txn, target: RunId) -> Result⟨bool⟩;
 
-// cancellation.rs
+// cancellation.rs — run-graph owns the epoch CAS, the `CancellationEpochAdvanced`
+// event, the descendant walk, and the eligibility set. Because `runtime` depends on
+// `run-graph`, the actual state transitions are applied by `runtime/src/cancel.rs`
+// through `runtime::run::transition` in the same transaction (crate-cycle split).
 pub async fn cancel_subtree(txn, root: RunId, reason: &str, now_ms: i64)
     -> Result⟨Vec⟨RunId⟩⟩;
 ```
