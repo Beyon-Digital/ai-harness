@@ -159,8 +159,8 @@
 
 ### Task EVT-002: Event Journal port and SQLite journal
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-evt002
 - depends_on: EVT-001
 - files: `agent-os/crates/event-journal/src/lib.rs`, `agent-os/crates/event-journal-sqlite/src/lib.rs`, `agent-os/crates/event-journal-sqlite/tests/journal.rs`
 - requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, N1, P2

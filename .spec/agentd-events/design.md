@@ -177,6 +177,7 @@ impl LiveBus {
     pub fn subscribe(&self) -> LiveSubscription;
     pub fn subscriber_count(&self) -> usize;
 }
+impl crate::dispatcher::LiveSink for LiveBus;   // the dispatcher's hand-off seam (EVT-004)
 pub struct LiveSubscription { /* receiver + last delivered cursor */ }
 impl LiveSubscription {
     pub async fn next(&mut self) -> LiveItem;
@@ -197,11 +198,23 @@ pub const AFTER_JOURNAL_APPEND: &str = "outbox.after_journal_append";
 
 pub struct DispatchOutcome { pub scanned: usize, pub published: usize, pub backlog: usize }
 
-pub struct EventDispatcher { /* store, journal, bus, faults, clock */ }
+pub struct EventDispatcher { /* store, journal, sink, faults, clock, ids, system principal */ }
+pub trait LiveSink: Send + Sync {
+    fn publish(&self, event: &events::EventEnvelope);
+}
 impl EventDispatcher {
-    pub fn new(store, journal, bus, faults, clock) -> Self;
+    pub fn new(
+        store: std::sync::Arc⟨dyn kernel_store::KernelStore⟩,
+        journal: std::sync::Arc⟨dyn event_journal::EventJournalPort⟩,
+        sink: std::sync::Arc⟨dyn LiveSink⟩,
+        faults: std::sync::Arc⟨dyn domain::faults::FaultInjector⟩,
+        clock: std::sync::Arc⟨dyn domain::time::Clock⟩,
+        ids: std::sync::Arc⟨dyn domain::provider::IdProvider⟩,
+        system_principal: domain::ids::PrincipalId,
+    ) -> Self;
     /// One deterministic iteration: scan, append per stream, mark, publish.
-    pub async fn dispatch_once(&self, limit: u32) -> errors::Result⟨DispatchOutcome⟩;
+    pub async fn dispatch_once(&self, limit: u32, daemon_epoch: u64)
+        -> errors::Result⟨DispatchOutcome⟩;
 }
 ```
 

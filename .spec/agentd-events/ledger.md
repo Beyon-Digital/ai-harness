@@ -33,3 +33,8 @@
 - 2026-09-13T04:00:14Z EVT-001 -> review (@agent-evt001d)
 - 2026-09-13T04:27:03Z EVT-001 -> done (@agent-evt001d)
 - 2026-09-13T04:27:03Z EVT-001 approved after one fix round (redacted Debug, fallible adapter keys, catalog retention defaults). 3/6 done.
+- 2026-09-13T04:27:13Z EVT-002 -> claimed (@agent-evt002)
+- 2026-09-13T04:27:21Z EVT-002 -> in_progress (@agent-evt002)
+- 2026-09-13T04:38:31Z EVT-002 -> review (@agent-evt002)
+- 2026-09-13T04:59:13Z EVT-002 -> done (@agent-evt002)
+- 2026-09-13T04:59:14Z EVT-002 approved after one fix round (sleep removed, crash bootstrap repaired, byte-equality pinned). Design amended: dispatcher takes daemon_epoch per call, system principal + IdProvider for mark transactions, LiveSink seam for EVT-004. 4/6 done.
