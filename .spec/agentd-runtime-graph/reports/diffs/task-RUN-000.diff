@@ -1,0 +1,2731 @@
+diff --git a/.spec/agentd-runtime-graph/design.md b/.spec/agentd-runtime-graph/design.md
+index 146ba01..e573bf8 100644
+--- a/.spec/agentd-runtime-graph/design.md
++++ b/.spec/agentd-runtime-graph/design.md
+@@ -284,20 +284,21 @@ No schema changes; the tables exist with CHECK constraints and triggers. Recover
+ | P1–P4 | property and race suites | test targets |
+ | G1, G2 | gates and validators | repo root and `agent-os/` |
+ 
+ ## File structure
+ 
+ Paths relative to `agent-os/`.
+ 
+ | Path | Create or modify | Responsibility | Owner task |
+ |---|---|---|---|
+ | `crates/runtime/Cargo.toml`, `crates/run-graph/Cargo.toml`, `crates/agentd/Cargo.toml`, `Cargo.lock` | modify | dependencies (incl. proptest dev) | RUN-000 |
++| `crates/kernel-store/src/repositories.rs`, `crates/kernel-store/src/txn.rs`, `crates/kernel-store-sqlite/src/txn.rs`, `crates/testkit/src/store.rs` | modify | agent-spec port trait, transaction accessors, concrete wiring, mock parity | RUN-000 |
+ | `crates/kernel-store-sqlite/src/repos/agent_specs.rs` | create | insert-only spec repository | RUN-000 |
+ | `crates/kernel-store-sqlite/src/repos/mod.rs` | modify | declare `agent_specs` | RUN-000 |
+ | `crates/runtime/src/lib.rs` | modify | modules and `register_handlers` | RUN-000, RUN-003, RUN-004 |
+ | `crates/runtime/src/{agent_spec,session,task,create_run}.rs` | create | entity handlers and services | RUN-000 |
+ | `crates/runtime/tests/entities.rs` | create | entity suite | RUN-000 |
+ | `crates/runtime/src/{state,run}.rs` | create | state machine and transition service | RUN-001 |
+ | `crates/runtime/tests/state_machine.rs` | create | table and property tests | RUN-001 |
+ | `crates/run-graph/src/lib.rs` | modify | module declarations | RUN-002, RUN-003, RUN-004 |
+ | `crates/run-graph/src/{graph,repository}.rs` | create | dependency service and queries | RUN-002 |
+ | `crates/run-graph/tests/graph.rs` | create | edge suite | RUN-002 |
+diff --git a/.spec/agentd-runtime-graph/ledger.md b/.spec/agentd-runtime-graph/ledger.md
+index 590b32c..d45f64b 100644
+--- a/.spec/agentd-runtime-graph/ledger.md
++++ b/.spec/agentd-runtime-graph/ledger.md
+@@ -1,5 +1,16 @@
+ # Ledger — agentd-runtime-graph
+ 
+ - 2026-09-13T14:53:39Z spec initialized
+ - 2026-09-13T14:55:56Z gate passed: implement
+ - 2026-09-13T14:56:05Z Plan/requirements/design authored and approved under standing instruction; 6 tasks validated across 6 waves. Implementation starting.
++- 2026-09-13T14:56:13Z RUN-000 -> claimed (@agent-run000)
++- 2026-09-13T14:56:17Z RUN-000 -> in_progress (@agent-run000)
++- 2026-09-13T14:57:51Z RUN-000 -> blocked (@agent-run000) — need agent-os/crates/kernel-store/src/repositories.rs and agent-os/crates/kernel-store/src/txn.rs: no AgentSpecRepo/AgentSpecRead trait and no agent_specs() accessor on KernelTxn/KernelReadTxn, so handlers receiving &mut dyn KernelTxn cannot persist immutable agent specs; also need agent-os/crates/kernel-store-sqlite/src/txn.rs and agent-os/crates/testkit/src/store.rs to wire/extend the new trait. Models AgentSpecRow/NewAgentSpec already exist in kernel-store/src/models.rs.
++- 2026-09-13T14:58:17Z RUN-000 -> pending (@agent-run000)
++- 2026-09-13T14:58:44Z Ruling: RUN-000's lease adds the agent-spec port trait/accessors plus SQLite and mock wiring (the design's file list assumed the port already had them). Cost if wrong: two modules edit the port, but dependency-ordered.
++- 2026-09-13T14:59:22Z RUN-000 -> claimed (@agent-run000b)
++- 2026-09-13T14:59:23Z RUN-000 -> in_progress (@agent-run000b)
++- 2026-09-13T15:59:13Z RUN-000 -> pending (@agent-run000b)
++- 2026-09-13T15:59:31Z RUN-000 -> claimed (@agent-run000c)
++- 2026-09-13T15:59:31Z RUN-000 -> in_progress (@agent-run000c)
++- 2026-09-13T16:53:23Z Recovery: RUN-000's implementing session was interrupted repeatedly after writing all files; the controller verified fmt/clippy/full workspace suite (87 targets ok, 0 failures), applied rustfmt, and committed the work for independent review.
+diff --git a/.spec/agentd-runtime-graph/tasks.md b/.spec/agentd-runtime-graph/tasks.md
+index 9eb880d..fe13cab 100644
+--- a/.spec/agentd-runtime-graph/tasks.md
++++ b/.spec/agentd-runtime-graph/tasks.md
+@@ -22,27 +22,28 @@
+ 4. Test first where the task says so; focused test, then the affected suite once.
+ 5. Report `DONE` · `DONE_WITH_CONCERNS` · `BLOCKED` · `NEEDS_CONTEXT` honestly.
+ 6. Never dispatch your own reviewer.
+ 7. Commit scoped to your files, then `review`, then write
+    `.spec/agentd-runtime-graph/reports/task-TASK_ID.md`.
+ 
+ ---
+ 
+ ### Task RUN-000: Runtime entities and creation commands
+ 
+-- status: pending
+-- owner: -
++- status: in_progress
++- owner: agent-run000c
+ - depends_on: none
+-- files: `agent-os/crates/runtime/Cargo.toml`, `agent-os/crates/run-graph/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/runtime/src/agent_spec.rs`, `agent-os/crates/runtime/src/session.rs`, `agent-os/crates/runtime/src/task.rs`, `agent-os/crates/runtime/src/create_run.rs`, `agent-os/crates/runtime/tests/entities.rs`
++- files: `agent-os/crates/runtime/Cargo.toml`, `agent-os/crates/run-graph/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/kernel-store/src/repositories.rs`, `agent-os/crates/kernel-store/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/testkit/src/store.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/runtime/src/agent_spec.rs`, `agent-os/crates/runtime/src/session.rs`, `agent-os/crates/runtime/src/task.rs`, `agent-os/crates/runtime/src/create_run.rs`, `agent-os/crates/runtime/tests/entities.rs`
+ - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, R1.7, N1, N3, G1, G2
+ - scope: large
+ - model: capable
++- blocked_reason: need agent-os/crates/kernel-store/src/repositories.rs and agent-os/crates/kernel-store/src/txn.rs: no AgentSpecRepo/AgentSpecRead trait and no agent_specs() accessor on KernelTxn/KernelReadTxn, so handlers receiving &mut dyn KernelTxn cannot persist immutable agent specs; also need agent-os/crates/kernel-store-sqlite/src/txn.rs and agent-os/crates/testkit/src/store.rs to wire/extend the new trait. Models AgentSpecRow/NewAgentSpec already exist in kernel-store/src/models.rs.
+ 
+ **Objective:** Sessions, immutable agent specs, tasks with graph heads, and `Created` runs are created atomically through the coordinator.
+ 
+ **Context the implementer cannot infer:**
+ 
+ - Dependencies: add to `runtime` — `command-coordinator`, `events`, `kernel-store`, `domain`, `errors`, `async-trait`, `prost`; dev `kernel-store-sqlite`, `testkit`, `tempfile`, `tokio` (macros, rt-multi-thread), `proptest`. To `run-graph` — `domain`, `errors`, `kernel-store`, `events`; dev `testkit`, `tokio`. To `agentd` — `runtime`. All exist in workspace dependencies; append only.
+ - Handler shapes and command type constants are in the design's `runtime :: handlers` block. Decode payloads with the prost message from `domain::generated::contract`; command type strings are the fully-qualified message names (verify against `commands.proto`).
+ - The coordinator passes `CommandContext` (principal, actor, command id, correlation) and `&mut dyn KernelTxn`; stage events with `events::outbox::stage` and the catalogued types (`SessionCreated`, `AgentSpecRevisionStored`, `TaskCreated`, `RunCreated`, `ChildRunCreated`). Use the envelope builder with the catalog policy for classification.
+ - `agent_specs` repository: insert-only; rely on the schema trigger for immutability; identical `(id, version, digest)` is idempotent, different bytes conflict. Wire it into `repos/mod.rs` and the `KernelTxn`/`KernelReadTxn` accessors if an accessor is missing — the port traits are in `kernel-store/src/repositories.rs` and `txn.rs`, both outside this lease: if an accessor is missing, block and name the file.
+ - Task creation inserts the `run_graph_heads` row in the same transaction (D16). Runs start `Created`; do not transition to `Ready`.
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index b071b2a..621fbf8 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -31,20 +31,21 @@ dependencies = [
+ ]
+ 
+ [[package]]
+ name = "agentd"
+ version = "0.1.0"
+ dependencies = [
+  "errors",
+  "events",
+  "kernel-store",
+  "observability",
++ "runtime",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "aho-corasick"
+ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+ dependencies = [
+  "memchr",
+@@ -1482,31 +1483,43 @@ dependencies = [
+  "subtle",
+  "zeroize",
+ ]
+ 
+ [[package]]
+ name = "run-graph"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
++ "events",
+  "kernel-store",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "runtime"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
++ "command-coordinator",
+  "domain",
+  "errors",
++ "events",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "proptest",
++ "prost",
+  "run-graph",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "rustix"
+ version = "1.1.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+ dependencies = [
+  "bitflags",
+  "errno",
+diff --git a/agent-os/crates/agentd/Cargo.toml b/agent-os/crates/agentd/Cargo.toml
+index e23117a..d8a1f8e 100644
+--- a/agent-os/crates/agentd/Cargo.toml
++++ b/agent-os/crates/agentd/Cargo.toml
+@@ -4,10 +4,11 @@ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ observability.workspace = true
+ tokio.workspace = true
+ errors.workspace = true
+ events.workspace = true
+ kernel-store.workspace = true
++runtime.workspace = true
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs b/agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs
+new file mode 100644
+index 0000000..48c9cce
+--- /dev/null
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs
+@@ -0,0 +1,103 @@
++//! Agent spec repository: insert-only immutable revisions.
++//!
++//! The `agent_specs` table is append-only: the schema triggers reject every
++//! update and delete, so this repository exposes no mutation beyond the first
++//! insert of a revision. Re-inserting an identical `(id, version, digest,
++//! body)` succeeds without writing; any other collision conflicts and leaves
++//! the stored revision untouched.
++
++use async_trait::async_trait;
++use domain::ids::AgentSpecId;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{AgentSpecRow, NewAgentSpec};
++use kernel_store::repositories::{AgentSpecRead, AgentSpecRepo};
++use sqlx::sqlite::SqliteRow;
++
++use crate::mapping;
++use crate::repos::SharedConn;
++
++/// SQLite view over the `agent_specs` table.
++pub(crate) struct SqliteAgentSpecRepo {
++    conn: SharedConn,
++}
++
++impl SqliteAgentSpecRepo {
++    /// Creates a repository view over a transaction connection.
++    pub(crate) fn new(conn: SharedConn) -> Self {
++        Self { conn }
++    }
++}
++
++fn decode_spec(row: &SqliteRow) -> errors::Result<AgentSpecRow> {
++    Ok(AgentSpecRow {
++        agent_spec_id: mapping::decode_id(
++            "agent_specs.agent_spec_id",
++            &mapping::text(row, "agent_spec_id")?,
++        )?,
++        version: mapping::text(row, "version")?,
++        digest: mapping::text(row, "digest")?,
++        body: mapping::blob(row, "body")?,
++        created_at_ms: mapping::int(row, "created_at_ms")?,
++    })
++}
++
++async fn fetch_spec(
++    conn: &mut sqlx::SqliteConnection,
++    id: AgentSpecId,
++    version: &str,
++) -> errors::Result<Option<AgentSpecRow>> {
++    let row = sqlx::query(
++        "SELECT agent_spec_id, version, digest, body, created_at_ms FROM agent_specs \
++         WHERE agent_spec_id = ?1 AND version = ?2",
++    )
++    .bind(id.to_string())
++    .bind(version)
++    .fetch_optional(conn)
++    .await
++    .map_err(mapping::from_sqlx)?;
++    row.as_ref().map(decode_spec).transpose()
++}
++
++#[async_trait]
++impl AgentSpecRead for SqliteAgentSpecRepo {
++    async fn get(
++        &mut self,
++        id: AgentSpecId,
++        version: &str,
++    ) -> errors::Result<Option<AgentSpecRow>> {
++        let mut guard = self.conn.lock().await;
++        fetch_spec(guard.connection()?, id, version).await
++    }
++}
++
++#[async_trait]
++impl AgentSpecRepo for SqliteAgentSpecRepo {
++    async fn insert(&mut self, spec: NewAgentSpec) -> errors::Result<()> {
++        let mut guard = self.conn.lock().await;
++        let conn = guard.connection()?;
++        if let Some(stored) = fetch_spec(conn, spec.agent_spec_id, &spec.version).await? {
++            if stored.digest == spec.digest && stored.body == spec.body {
++                return Ok(());
++            }
++            return Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "agent spec revision conflicts with the stored revision",
++            ));
++        }
++        sqlx::query(
++            "INSERT INTO agent_specs (agent_spec_id, version, digest, body, created_at_ms) \
++             VALUES (?1, ?2, ?3, ?4, ?5)",
++        )
++        .bind(spec.agent_spec_id.to_string())
++        .bind(spec.version)
++        .bind(spec.digest)
++        .bind(spec.body)
++        .bind(spec.created_at_ms)
++        .execute(conn)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        Ok(())
++    }
++}
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+index c4a9191..25bea06 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/mod.rs
+@@ -1,19 +1,21 @@
+ //! Repository implementations over a shared SQLite connection.
+ //!
+-//! The groups implemented by the SQLite store are [`adapters`], [`artifacts`],
+-//! [`config`], [`effects`], [`environments`], [`graph`], [`idempotency`],
+-//! [`loop_turns`], [`resources`], [`runs`], [`security`], [`sessions`],
+-//! [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each repository
+-//! view shares the connection owned by its transaction through [`SharedConn`].
++//! The groups implemented by the SQLite store are [`adapters`], [`agent_specs`],
++//! [`artifacts`], [`config`], [`effects`], [`environments`], [`graph`],
++//! [`idempotency`], [`loop_turns`], [`resources`], [`runs`], [`security`],
++//! [`sessions`], [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each
++//! repository view shares the connection owned by its transaction through
++//! [`SharedConn`].
+ 
+ pub(crate) mod adapters;
++pub(crate) mod agent_specs;
+ pub(crate) mod artifacts;
+ pub(crate) mod config;
+ pub(crate) mod effects;
+ pub(crate) mod environments;
+ pub(crate) mod graph;
+ pub(crate) mod idempotency;
+ pub(crate) mod loop_turns;
+ pub(crate) mod resources;
+ pub(crate) mod runs;
+ pub(crate) mod security;
+diff --git a/agent-os/crates/kernel-store-sqlite/src/txn.rs b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+index 33a3185..5029bd8 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/txn.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/txn.rs
+@@ -17,35 +17,37 @@ use domain::ids::DaemonInstanceId;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ use sqlx::Sqlite;
+ 
+ use crate::SqliteKernelStore;
+ use crate::mapping;
+ use crate::repos::{
+-    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, artifacts::SqliteArtifactRepo,
+-    config::SqliteConfigRepo, effects::SqliteEffectRepo, environments::SqliteEnvironmentRepo,
+-    graph::SqliteGraphRepo, idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo,
+-    resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
+-    sessions::SqliteSessionRepo, streams::SqliteStreamRepo, tasks::SqliteTaskRepo,
+-    timers::SqliteTimerRepo, workspaces::SqliteWorkspaceRepo,
++    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, agent_specs::SqliteAgentSpecRepo,
++    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
++    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo,
++    idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo, resources::SqliteResourceRepo,
++    runs::SqliteRunRepo, security::SqliteSecurityRepo, sessions::SqliteSessionRepo,
++    streams::SqliteStreamRepo, tasks::SqliteTaskRepo, timers::SqliteTimerRepo,
++    workspaces::SqliteWorkspaceRepo,
+ };
+ 
+ /// Write transaction guard owning its `BEGIN IMMEDIATE` connection.
+ pub(crate) struct SqliteWriteTxn {
+     ctx: TxContext,
+     conn: WriteConn,
+     runs: SqliteRunRepo,
+     tasks: SqliteTaskRepo,
+     sessions: SqliteSessionRepo,
++    agent_specs: SqliteAgentSpecRepo,
+     graph: SqliteGraphRepo,
+     environments: SqliteEnvironmentRepo,
+     effects: SqliteEffectRepo,
+     resources: SqliteResourceRepo,
+     timers: SqliteTimerRepo,
+     security: SqliteSecurityRepo,
+     config: SqliteConfigRepo,
+     workspaces: SqliteWorkspaceRepo,
+     adapters: SqliteAdapterRepo,
+     artifacts: SqliteArtifactRepo,
+@@ -57,20 +59,21 @@ pub(crate) struct SqliteWriteTxn {
+ impl SqliteWriteTxn {
+     fn new(ctx: TxContext, txn: sqlx::Transaction<'static, Sqlite>) -> Self {
+         let conn: WriteConn = Arc::new(tokio::sync::Mutex::new(Some(txn)));
+         let shared = SharedConn::Write(conn.clone());
+         Self {
+             ctx,
+             conn,
+             runs: SqliteRunRepo::new(shared.clone()),
+             tasks: SqliteTaskRepo::new(shared.clone()),
+             sessions: SqliteSessionRepo::new(shared.clone()),
++            agent_specs: SqliteAgentSpecRepo::new(shared.clone()),
+             graph: SqliteGraphRepo::new(shared.clone()),
+             environments: SqliteEnvironmentRepo::new(shared.clone()),
+             effects: SqliteEffectRepo::new(shared.clone()),
+             resources: SqliteResourceRepo::new(shared.clone()),
+             timers: SqliteTimerRepo::new(shared.clone()),
+             security: SqliteSecurityRepo::new(shared.clone()),
+             config: SqliteConfigRepo::new(shared.clone()),
+             workspaces: SqliteWorkspaceRepo::new(shared.clone()),
+             adapters: SqliteAdapterRepo::new(shared.clone()),
+             artifacts: SqliteArtifactRepo::new(shared.clone()),
+@@ -103,20 +106,24 @@ impl KernelTxn for SqliteWriteTxn {
+     }
+ 
+     fn tasks(&mut self) -> &mut dyn TaskRepo {
+         &mut self.tasks
+     }
+ 
+     fn sessions(&mut self) -> &mut dyn SessionRepo {
+         &mut self.sessions
+     }
+ 
++    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo {
++        &mut self.agent_specs
++    }
++
+     fn graph(&mut self) -> &mut dyn GraphRepo {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRepo {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRepo {
+         &mut self.effects
+@@ -171,40 +178,42 @@ impl KernelTxn for SqliteWriteTxn {
+         let txn = self.take().await?;
+         txn.rollback().await.map_err(mapping::from_sqlx)
+     }
+ }
+ 
+ /// Read transaction guard owning a plain pooled connection.
+ pub(crate) struct SqliteReadTxn {
+     runs: SqliteRunRepo,
+     tasks: SqliteTaskRepo,
+     sessions: SqliteSessionRepo,
++    agent_specs: SqliteAgentSpecRepo,
+     graph: SqliteGraphRepo,
+     environments: SqliteEnvironmentRepo,
+     effects: SqliteEffectRepo,
+     resources: SqliteResourceRepo,
+     timers: SqliteTimerRepo,
+     security: SqliteSecurityRepo,
+     config: SqliteConfigRepo,
+     workspaces: SqliteWorkspaceRepo,
+     adapters: SqliteAdapterRepo,
+     artifacts: SqliteArtifactRepo,
+     loop_turns: SqliteLoopRepo,
+ }
+ 
+ impl SqliteReadTxn {
+     fn new(conn: ReadConn) -> Self {
+         let shared = SharedConn::Read(conn);
+         Self {
+             runs: SqliteRunRepo::new(shared.clone()),
+             tasks: SqliteTaskRepo::new(shared.clone()),
+             sessions: SqliteSessionRepo::new(shared.clone()),
++            agent_specs: SqliteAgentSpecRepo::new(shared.clone()),
+             graph: SqliteGraphRepo::new(shared.clone()),
+             environments: SqliteEnvironmentRepo::new(shared.clone()),
+             effects: SqliteEffectRepo::new(shared.clone()),
+             resources: SqliteResourceRepo::new(shared.clone()),
+             timers: SqliteTimerRepo::new(shared.clone()),
+             security: SqliteSecurityRepo::new(shared.clone()),
+             config: SqliteConfigRepo::new(shared.clone()),
+             workspaces: SqliteWorkspaceRepo::new(shared.clone()),
+             adapters: SqliteAdapterRepo::new(shared.clone()),
+             artifacts: SqliteArtifactRepo::new(shared.clone()),
+@@ -220,20 +229,24 @@ impl KernelReadTxn for SqliteReadTxn {
+     }
+ 
+     fn tasks(&mut self) -> &mut dyn TaskRead {
+         &mut self.tasks
+     }
+ 
+     fn sessions(&mut self) -> &mut dyn SessionRead {
+         &mut self.sessions
+     }
+ 
++    fn agent_specs(&mut self) -> &mut dyn AgentSpecRead {
++        &mut self.agent_specs
++    }
++
+     fn graph(&mut self) -> &mut dyn GraphRead {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRead {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRead {
+         &mut self.effects
+diff --git a/agent-os/crates/kernel-store/src/repositories.rs b/agent-os/crates/kernel-store/src/repositories.rs
+index 955305c..cc946d3 100644
+--- a/agent-os/crates/kernel-store/src/repositories.rs
++++ b/agent-os/crates/kernel-store/src/repositories.rs
+@@ -1,33 +1,33 @@
+ //! Repository traits.
+ //!
+ //! Every write trait extends its read trait; read traits expose no mutation
+ //! (D3) so a read transaction cannot be given a mutating repository. All row,
+ //! insert, and patch types live in [`crate::models`] (D4).
+ 
+ use async_trait::async_trait;
+ use domain::effect::EffectState;
+ use domain::ids::{
+-    AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
++    AdapterId, AdapterInstanceId, AgentSpecId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+     ConfigGenerationId, DecisionId, DelegationChainId, EffectId, EnvironmentId, EventId,
+     EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId, TaskId,
+     TimerId, TurnId, WorkspaceId,
+ };
+ use domain::resource::{ReservationState, TimerState};
+ use errors::Result;
+ 
+ use crate::models::{
+-    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow,
++    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow, AgentSpecRow,
+     ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow, ConfigGenerationRow,
+     ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch, EffectRow,
+     IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
+-    NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse, NewArtifact,
++    NewAdapterRegistration, NewAgentSpec, NewApprovalRequest, NewApprovalResponse, NewArtifact,
+     NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
+     NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewReservation,
+     NewResolvedBinding, NewResolvedEnvironment, NewRun, NewRunDependency, NewSession, NewTask,
+     NewTimer, NewWorkspace, NewWorkspaceLease, OutboxEventRow, ReservationPatch, ReservationRow,
+     ResolvedBindingRow, ResolvedEnvironmentRow, RunCas, RunDependencyRow, RunGraphHeadRow,
+     RunPatch, RunRow, SessionRow, TaskRow, TimerPatch, TimerRow, WorkspaceLeaseRow, WorkspaceRow,
+ };
+ 
+ /// Publication phase observed by [`StreamRepo::mark_published`].
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+@@ -64,20 +64,33 @@ pub trait TaskRepo: TaskRead {
+ #[async_trait]
+ pub trait SessionRead: Send + Sync {
+     async fn get(&mut self, id: SessionId) -> Result<Option<SessionRow>>;
+ }
+ 
+ #[async_trait]
+ pub trait SessionRepo: SessionRead {
+     async fn insert(&mut self, session: NewSession) -> Result<()>;
+ }
+ 
++#[async_trait]
++pub trait AgentSpecRead: Send + Sync {
++    async fn get(&mut self, id: AgentSpecId, version: &str) -> Result<Option<AgentSpecRow>>;
++}
++
++#[async_trait]
++pub trait AgentSpecRepo: AgentSpecRead {
++    /// Inserts an immutable revision. Re-inserting the identical
++    /// `(id, version)` with the same digest and body is idempotent; any other
++    /// collision conflicts and leaves the stored revision untouched.
++    async fn insert(&mut self, spec: NewAgentSpec) -> Result<()>;
++}
++
+ #[async_trait]
+ pub trait GraphRead: Send + Sync {
+     async fn get_head(&mut self, task: TaskId) -> Result<Option<RunGraphHeadRow>>;
+     async fn list_dependencies(&mut self, task: TaskId) -> Result<Vec<RunDependencyRow>>;
+     async fn is_reachable(&mut self, from: RunId, to: RunId) -> Result<bool>;
+ }
+ 
+ #[async_trait]
+ pub trait GraphRepo: GraphRead {
+     /// Returns the task's graph head, creating it at revision `0` when absent.
+diff --git a/agent-os/crates/kernel-store/src/txn.rs b/agent-os/crates/kernel-store/src/txn.rs
+index e75f67c..c8ae7cb 100644
+--- a/agent-os/crates/kernel-store/src/txn.rs
++++ b/agent-os/crates/kernel-store/src/txn.rs
+@@ -1,39 +1,40 @@
+ //! Store and transaction traits.
+ 
+ use async_trait::async_trait;
+ use domain::ids::DaemonInstanceId;
+ 
+ use crate::repositories::{
+-    AdapterRepo, ArtifactRepo, ConfigRepo, EffectRepo, EnvironmentRepo, GraphRepo, IdempotencyRepo,
+-    LoopRepo, ResourceRepo, RunRepo, SecurityRepo, SessionRepo, StreamRepo, TaskRepo, TimerRepo,
+-    WorkspaceRepo,
++    AdapterRepo, AgentSpecRepo, ArtifactRepo, ConfigRepo, EffectRepo, EnvironmentRepo, GraphRepo,
++    IdempotencyRepo, LoopRepo, ResourceRepo, RunRepo, SecurityRepo, SessionRepo, StreamRepo,
++    TaskRepo, TimerRepo, WorkspaceRepo,
+ };
+ use crate::types::{DaemonFence, TxContext};
+ 
+ /// Opens transactions and owns the daemon fence.
+ #[async_trait]
+ pub trait KernelStore: Send + Sync {
+     async fn begin_write(&self, ctx: TxContext) -> errors::Result<Box<dyn KernelTxn + '_>>;
+     async fn begin_read(&self) -> errors::Result<Box<dyn KernelReadTxn + '_>>;
+     async fn acquire_daemon_fence(&self, instance: DaemonInstanceId)
+     -> errors::Result<DaemonFence>;
+     async fn current_fence(&self) -> errors::Result<Option<DaemonFence>>;
+ }
+ 
+ /// Write transaction exposing typed repositories and no SQL (R2.1, R2.5).
+ #[async_trait]
+ pub trait KernelTxn: Send + Sync {
+     fn context(&self) -> &TxContext;
+     fn runs(&mut self) -> &mut dyn RunRepo;
+     fn tasks(&mut self) -> &mut dyn TaskRepo;
+     fn sessions(&mut self) -> &mut dyn SessionRepo;
++    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo;
+     fn graph(&mut self) -> &mut dyn GraphRepo;
+     fn environments(&mut self) -> &mut dyn EnvironmentRepo;
+     fn effects(&mut self) -> &mut dyn EffectRepo;
+     fn resources(&mut self) -> &mut dyn ResourceRepo;
+     fn timers(&mut self) -> &mut dyn TimerRepo;
+     fn security(&mut self) -> &mut dyn SecurityRepo;
+     fn config(&mut self) -> &mut dyn ConfigRepo;
+     fn workspaces(&mut self) -> &mut dyn WorkspaceRepo;
+     fn adapters(&mut self) -> &mut dyn AdapterRepo;
+     fn artifacts(&mut self) -> &mut dyn ArtifactRepo;
+@@ -43,20 +44,21 @@ pub trait KernelTxn: Send + Sync {
+     async fn commit(self: Box<Self>) -> errors::Result<()>;
+     async fn rollback(self: Box<Self>) -> errors::Result<()>;
+ }
+ 
+ /// Read transaction exposing read repositories only (R2.2, compile-time enforced).
+ #[async_trait]
+ pub trait KernelReadTxn: Send + Sync {
+     fn runs(&mut self) -> &mut dyn crate::repositories::RunRead;
+     fn tasks(&mut self) -> &mut dyn crate::repositories::TaskRead;
+     fn sessions(&mut self) -> &mut dyn crate::repositories::SessionRead;
++    fn agent_specs(&mut self) -> &mut dyn crate::repositories::AgentSpecRead;
+     fn graph(&mut self) -> &mut dyn crate::repositories::GraphRead;
+     fn environments(&mut self) -> &mut dyn crate::repositories::EnvironmentRead;
+     fn effects(&mut self) -> &mut dyn crate::repositories::EffectRead;
+     fn resources(&mut self) -> &mut dyn crate::repositories::ResourceRead;
+     fn timers(&mut self) -> &mut dyn crate::repositories::TimerRead;
+     fn security(&mut self) -> &mut dyn crate::repositories::SecurityRead;
+     fn config(&mut self) -> &mut dyn crate::repositories::ConfigRead;
+     fn workspaces(&mut self) -> &mut dyn crate::repositories::WorkspaceRead;
+     fn adapters(&mut self) -> &mut dyn crate::repositories::AdapterRead;
+     fn artifacts(&mut self) -> &mut dyn crate::repositories::ArtifactRead;
+@@ -86,20 +88,24 @@ mod tests {
+         }
+ 
+         fn tasks(&mut self) -> &mut dyn crate::TaskRepo {
+             panic!("object-safety stub")
+         }
+ 
+         fn sessions(&mut self) -> &mut dyn crate::SessionRepo {
+             panic!("object-safety stub")
+         }
+ 
++        fn agent_specs(&mut self) -> &mut dyn crate::AgentSpecRepo {
++            panic!("object-safety stub")
++        }
++
+         fn graph(&mut self) -> &mut dyn crate::GraphRepo {
+             panic!("object-safety stub")
+         }
+ 
+         fn environments(&mut self) -> &mut dyn crate::EnvironmentRepo {
+             panic!("object-safety stub")
+         }
+ 
+         fn effects(&mut self) -> &mut dyn crate::EffectRepo {
+             panic!("object-safety stub")
+diff --git a/agent-os/crates/run-graph/Cargo.toml b/agent-os/crates/run-graph/Cargo.toml
+index 79a1664..5372716 100644
+--- a/agent-os/crates/run-graph/Cargo.toml
++++ b/agent-os/crates/run-graph/Cargo.toml
+@@ -2,10 +2,15 @@
+ name = "run-graph"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
++events.workspace = true
++
++[dev-dependencies]
++testkit.workspace = true
++tokio.workspace = true
+diff --git a/agent-os/crates/runtime/Cargo.toml b/agent-os/crates/runtime/Cargo.toml
+index 71321fd..f9cdecc 100644
+--- a/agent-os/crates/runtime/Cargo.toml
++++ b/agent-os/crates/runtime/Cargo.toml
+@@ -3,10 +3,21 @@ name = "runtime"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
+ run-graph.workspace = true
++command-coordinator.workspace = true
++events.workspace = true
++async-trait.workspace = true
++prost.workspace = true
++
++[dev-dependencies]
++kernel-store-sqlite.workspace = true
++testkit.workspace = true
++tempfile.workspace = true
++tokio.workspace = true
++proptest.workspace = true
+diff --git a/agent-os/crates/runtime/src/agent_spec.rs b/agent-os/crates/runtime/src/agent_spec.rs
+new file mode 100644
+index 0000000..6872836
+--- /dev/null
++++ b/agent-os/crates/runtime/src/agent_spec.rs
+@@ -0,0 +1,111 @@
++//! Immutable agent spec revisions: the storage service and its command handler.
++
++use async_trait::async_trait;
++use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcome, OutcomeCode};
++use domain::generated::contract;
++use domain::ids::{AgentSpecId, EventId};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::StreamKey;
++use kernel_store::KernelTxn;
++use kernel_store::models::NewAgentSpec;
++use prost::Message;
++
++use crate::{RuntimeDeps, decode_contract, optional_id, stage_catalogued};
++
++/// Stores an immutable `(id, version)` revision.
++///
++/// Re-insertion of the identical digest and body is idempotent; a differing
++/// body or digest conflicts and leaves the stored revision untouched.
++pub async fn put_agent_spec_revision(
++    txn: &mut dyn KernelTxn,
++    spec_id: Option<AgentSpecId>,
++    version: String,
++    body: Vec<u8>,
++    body_digest: String,
++    now_ms: i64,
++) -> errors::Result<()> {
++    let spec_id = spec_id
++        .unwrap_or_else(|| AgentSpecId::from_uuid_v7(*txn.context().command_id.as_uuid_v7()));
++    if version.trim().is_empty() {
++        return Err(KernelError::new(
++            ErrorCode::InvalidArgument,
++            RetryClass::Never,
++            "agent spec version is required",
++        ));
++    }
++    txn.agent_specs()
++        .insert(NewAgentSpec {
++            agent_spec_id: spec_id,
++            version,
++            digest: body_digest,
++            body,
++            created_at_ms: now_ms,
++        })
++        .await
++}
++
++/// Handler for `agentos.spec.v1.PutAgentSpecRevision`.
++pub struct PutAgentSpecRevisionHandler {
++    deps: RuntimeDeps,
++}
++
++impl PutAgentSpecRevisionHandler {
++    /// Creates the handler with its runtime dependencies.
++    pub fn new(deps: RuntimeDeps) -> Self {
++        Self { deps }
++    }
++}
++
++#[async_trait]
++impl CommandHandler for PutAgentSpecRevisionHandler {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome> {
++        let raw =
++            decode_contract::<contract::PutAgentSpecRevision>("PutAgentSpecRevision", &payload)?;
++        let spec_id = optional_id::<AgentSpecId>("agent_spec_id", &raw.agent_spec_id)?;
++        let spec_id =
++            spec_id.unwrap_or_else(|| AgentSpecId::from_uuid_v7(*ctx.command_id.as_uuid_v7()));
++        let now_ms = self.deps.now_unix_ms();
++        let already_stored = match txn.agent_specs().get(spec_id, &raw.version).await? {
++            Some(stored) => stored.digest == raw.body_digest && stored.body == raw.body_bytes,
++            None => false,
++        };
++        if !already_stored {
++            put_agent_spec_revision(
++                txn,
++                Some(spec_id),
++                raw.version.clone(),
++                raw.body_bytes.clone(),
++                raw.body_digest.clone(),
++                now_ms,
++            )
++            .await?;
++            let event = contract::AgentSpecRevision {
++                agent_spec_id: spec_id.to_string(),
++                version: raw.version,
++                digest: raw.body_digest,
++                body: raw.body_bytes,
++                created_unix_ms: now_ms,
++            };
++            stage_catalogued(
++                txn,
++                EventId::new(self.deps.ids.as_ref()),
++                "AgentSpecRevisionStored",
++                StreamKey::config_global(),
++                event.encode_to_vec(),
++                ctx.correlation_id.clone(),
++                None,
++            )
++            .await?;
++        }
++        Ok(CommandOutcome {
++            code: OutcomeCode::Ok,
++            payload: spec_id.to_string().into_bytes(),
++        })
++    }
++}
+diff --git a/agent-os/crates/runtime/src/create_run.rs b/agent-os/crates/runtime/src/create_run.rs
+new file mode 100644
+index 0000000..70fe7dc
+--- /dev/null
++++ b/agent-os/crates/runtime/src/create_run.rs
+@@ -0,0 +1,313 @@
++//! `CreateTaskRun`: task, graph head, and `Created` run in one transaction.
++
++use async_trait::async_trait;
++use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcome, OutcomeCode};
++use domain::generated::contract;
++use domain::ids::{AgentSpecId, EventCursor, EventId, EventStreamKey, RunId, SessionId, TaskId};
++use domain::provider::IdProvider;
++use domain::run::{RecoveryDisposition, RunState};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::StreamKey;
++use kernel_store::KernelTxn;
++use kernel_store::models::{NewRun, NewTask};
++use prost::Message;
++
++use crate::{RuntimeDeps, decode_contract, optional_id, required_id, stage_catalogued};
++
++/// Versioned agent spec reference validated before a run is created.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct AgentSpecRef {
++    /// Referenced agent spec.
++    pub agent_spec_id: AgentSpecId,
++    /// Referenced immutable version.
++    pub version: String,
++    /// Digest the caller expects the stored revision to carry.
++    pub digest: String,
++}
++
++/// Typed mirror of the `CreateTaskRun` contract fields.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CreateTaskRunRequest {
++    /// Task to create the run under.
++    pub task_id: TaskId,
++    /// Identifier of the run to create.
++    pub run_id: RunId,
++    /// Optional owning session.
++    pub session_id: Option<SessionId>,
++    /// Task kind persisted with a newly created task.
++    pub task_kind: String,
++    /// Task payload persisted with a newly created task.
++    pub task_payload: Vec<u8>,
++    /// Optional agent spec revision the run must reference.
++    pub agent_spec_ref: Option<AgentSpecRef>,
++    /// Optional parent run.
++    pub parent_run_id: Option<RunId>,
++    /// Cancellation epoch the caller observed on the parent run.
++    pub observed_parent_cancellation_epoch: u64,
++    /// Requested execution profile.
++    pub requested_profile: String,
++    /// Requested workspace URI.
++    pub workspace_uri: String,
++    /// Requested capabilities.
++    pub requested_capabilities: Vec<String>,
++    /// Requested budget.
++    pub requested_budget: Vec<u8>,
++}
++
++impl CreateTaskRunRequest {
++    /// Converts the decoded contract, drawing absent identifiers from `ids`.
++    pub fn from_contract(
++        raw: contract::CreateTaskRun,
++        ids: &dyn IdProvider,
++    ) -> errors::Result<Self> {
++        let task_id = match optional_id::<TaskId>("task_id", &raw.task_id)? {
++            Some(id) => id,
++            None => TaskId::new(ids),
++        };
++        let run_id = match optional_id::<RunId>("run_id", &raw.run_id)? {
++            Some(id) => id,
++            None => RunId::new(ids),
++        };
++        let session_id = optional_id::<SessionId>("session_id", &raw.session_id)?;
++        let parent_run_id = optional_id::<RunId>("parent_run_id", &raw.parent_run_id)?;
++        let agent_spec_ref = match raw.agent_spec_ref {
++            Some(reference) => {
++                if reference.id.is_empty()
++                    && reference.version.is_empty()
++                    && reference.digest.is_empty()
++                {
++                    None
++                } else {
++                    Some(AgentSpecRef {
++                        agent_spec_id: required_id::<AgentSpecId>(
++                            "agent_spec_ref.id",
++                            &reference.id,
++                        )?,
++                        version: reference.version,
++                        digest: reference.digest,
++                    })
++                }
++            }
++            None => None,
++        };
++        Ok(Self {
++            task_id,
++            run_id,
++            session_id,
++            task_kind: raw.task_kind,
++            task_payload: raw.task_payload,
++            agent_spec_ref,
++            parent_run_id,
++            observed_parent_cancellation_epoch: raw.observed_parent_cancellation_epoch,
++            requested_profile: raw.requested_profile,
++            workspace_uri: raw.workspace_uri,
++            requested_capabilities: raw.requested_capabilities,
++            requested_budget: raw.requested_budget,
++        })
++    }
++}
++
++/// Creates the task (when new) with its graph head and the run in `Created`.
++///
++/// The referenced agent spec revision must be stored with the expected digest
++/// and, when a parent is present, the observed parent cancellation epoch must
++/// equal the persisted one; otherwise the creation fails before any row is
++/// written. The run is never moved to `Ready` here.
++pub async fn create_task_run(
++    txn: &mut dyn KernelTxn,
++    request: CreateTaskRunRequest,
++    ctx: &CommandContext,
++    now_ms: i64,
++) -> errors::Result<RunId> {
++    if let Some(reference) = &request.agent_spec_ref {
++        match txn
++            .agent_specs()
++            .get(reference.agent_spec_id, &reference.version)
++            .await?
++        {
++            Some(stored) if stored.digest == reference.digest => {}
++            Some(_) => {
++                return Err(failed_precondition(
++                    "agent spec reference digest does not match the stored revision",
++                ));
++            }
++            None => {
++                return Err(failed_precondition("agent spec revision is not stored"));
++            }
++        }
++    }
++    let task_id = request.task_id;
++    let session_id = request.session_id;
++    let parent_run_id = request.parent_run_id;
++    if let Some(parent_run_id) = parent_run_id {
++        match txn.runs().get(parent_run_id).await? {
++            Some(parent)
++                if parent.cancellation_epoch == request.observed_parent_cancellation_epoch => {}
++            Some(_) => {
++                return Err(failed_precondition(
++                    "observed parent cancellation epoch is stale",
++                ));
++            }
++            None => {
++                return Err(failed_precondition("parent run is not persisted"));
++            }
++        }
++    }
++    let run_id = request.run_id;
++    let input_event_cursor = input_cursor(run_id)?;
++    crate::task::ensure_task(
++        txn,
++        NewTask {
++            task_id,
++            session_id,
++            created_by_actor_id: ctx.actor_id,
++            task_kind: request.task_kind,
++            payload: request.task_payload,
++            created_at_ms: now_ms,
++        },
++    )
++    .await?;
++    txn.runs()
++        .insert(NewRun {
++            run_id,
++            task_id,
++            session_id,
++            parent_run_id,
++            state: RunState::Created,
++            recovery: RecoveryDisposition::Normal,
++            loop_epoch: 0,
++            step_sequence: 0,
++            input_event_cursor,
++            cancellation_epoch: 0,
++            resolved_environment_id: None,
++            created_at_ms: now_ms,
++        })
++        .await?;
++    Ok(run_id)
++}
++
++/// Handler for `agentos.spec.v1.CreateTaskRun`.
++pub struct CreateTaskRunHandler {
++    deps: RuntimeDeps,
++}
++
++impl CreateTaskRunHandler {
++    /// Creates the handler with its runtime dependencies.
++    pub fn new(deps: RuntimeDeps) -> Self {
++        Self { deps }
++    }
++}
++
++#[async_trait]
++impl CommandHandler for CreateTaskRunHandler {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome> {
++        let raw = decode_contract::<contract::CreateTaskRun>("CreateTaskRun", &payload)?;
++        let request = CreateTaskRunRequest::from_contract(raw, self.deps.ids.as_ref())?;
++        let now_ms = self.deps.now_unix_ms();
++        let task_created = txn.tasks().get(request.task_id).await?.is_none();
++        let run_id = create_task_run(txn, request.clone(), ctx, now_ms).await?;
++        let cursor = input_cursor(run_id)?;
++        if task_created {
++            let task = contract::Task {
++                task_id: request.task_id.to_string(),
++                session_id: request
++                    .session_id
++                    .map(|id| id.to_string())
++                    .unwrap_or_default(),
++                created_by_actor_id: ctx.actor_id.to_string(),
++                task_kind: request.task_kind.clone(),
++                payload: request.task_payload.clone(),
++                created_unix_ms: now_ms,
++            };
++            stage_catalogued(
++                txn,
++                EventId::new(self.deps.ids.as_ref()),
++                "TaskCreated",
++                StreamKey::task(request.task_id),
++                task.encode_to_vec(),
++                ctx.correlation_id.clone(),
++                None,
++            )
++            .await?;
++        }
++        let run_event = run_created_event(&request, run_id, &cursor);
++        stage_catalogued(
++            txn,
++            EventId::new(self.deps.ids.as_ref()),
++            "RunCreated",
++            StreamKey::run(run_id),
++            run_event.clone(),
++            ctx.correlation_id.clone(),
++            None,
++        )
++        .await?;
++        if let Some(parent_run_id) = request.parent_run_id {
++            stage_catalogued(
++                txn,
++                EventId::new(self.deps.ids.as_ref()),
++                "ChildRunCreated",
++                StreamKey::run(parent_run_id),
++                run_event,
++                ctx.correlation_id.clone(),
++                None,
++            )
++            .await?;
++        }
++        Ok(CommandOutcome {
++            code: OutcomeCode::Ok,
++            payload: run_id.to_string().into_bytes(),
++        })
++    }
++}
++
++fn run_created_event(
++    request: &CreateTaskRunRequest,
++    run_id: RunId,
++    cursor: &EventCursor,
++) -> Vec<u8> {
++    contract::AgentRun {
++        run_id: run_id.to_string(),
++        task_id: request.task_id.to_string(),
++        session_id: request
++            .session_id
++            .map(|id| id.to_string())
++            .unwrap_or_default(),
++        parent_run_id: request
++            .parent_run_id
++            .map(|id| id.to_string())
++            .unwrap_or_default(),
++        state: RunState::Created.to_wire(),
++        recovery: RecoveryDisposition::Normal.to_wire(),
++        run_revision: 0,
++        loop_epoch: 0,
++        step_sequence: 0,
++        input_event_cursor: cursor.to_string(),
++        cancellation_epoch: 0,
++        resolved_environment_id: String::new(),
++        output_ref: String::new(),
++        current_turn_id: String::new(),
++    }
++    .encode_to_vec()
++}
++
++pub(crate) fn input_cursor(run_id: RunId) -> errors::Result<EventCursor> {
++    EventStreamKey::new(format!("run/{run_id}"))
++        .map(|key| EventCursor::new(key, 0))
++        .map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "run stream key is not canonical",
++            )
++        })
++}
++
++fn failed_precondition(detail: &'static str) -> KernelError {
++    KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, detail)
++}
+diff --git a/agent-os/crates/runtime/src/lib.rs b/agent-os/crates/runtime/src/lib.rs
+index 55a5da1..50f59c8 100644
+--- a/agent-os/crates/runtime/src/lib.rs
++++ b/agent-os/crates/runtime/src/lib.rs
+@@ -1,2 +1,190 @@
+-//! Run state machine, run fencing, and recovery disposition.
++//! Runtime entity creation: sessions, immutable agent specs, tasks with graph
++//! heads, and `Created` runs executed through the command coordinator.
+ #![forbid(unsafe_code)]
++
++pub mod agent_spec;
++pub mod create_run;
++pub mod session;
++pub mod task;
++
++use std::str::FromStr;
++use std::sync::Arc;
++
++use command_coordinator::handler::CommandRegistry;
++use domain::ids::{EventId, EventStreamKey};
++use domain::provider::IdProvider;
++use domain::time::Clock;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::outbox::{DraftEvent, stage};
++use events::{CatalogClassificationPolicy, ClassificationPolicy, StreamKey};
++use kernel_store::KernelTxn;
++
++/// Fully-qualified command type of `CreateSession`.
++pub const CMD_CREATE_SESSION: &str = "agentos.spec.v1.CreateSession";
++/// Fully-qualified command type of `PutAgentSpecRevision`.
++pub const CMD_PUT_AGENT_SPEC_REVISION: &str = "agentos.spec.v1.PutAgentSpecRevision";
++/// Fully-qualified command type of `CreateTaskRun`.
++pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
++
++/// Dependencies shared by the runtime command handlers.
++#[derive(Clone)]
++pub struct RuntimeDeps {
++    /// Wall-clock source for persisted timestamps.
++    pub clock: Arc<dyn Clock>,
++    /// Identifier source for entities and outbox events.
++    pub ids: Arc<dyn IdProvider>,
++}
++
++impl RuntimeDeps {
++    /// Returns the current UTC Unix time in milliseconds.
++    pub fn now_unix_ms(&self) -> i64 {
++        self.clock.now_unix_ms()
++    }
++}
++
++/// Registers the entity creation handlers with their canonical command types.
++pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> errors::Result<()> {
++    registry.register(
++        CMD_CREATE_SESSION,
++        Arc::new(session::CreateSessionHandler::new(deps.clone())),
++    )?;
++    registry.register(
++        CMD_PUT_AGENT_SPEC_REVISION,
++        Arc::new(agent_spec::PutAgentSpecRevisionHandler::new(deps.clone())),
++    )?;
++    registry.register(
++        CMD_CREATE_TASK_RUN,
++        Arc::new(create_run::CreateTaskRunHandler::new(deps)),
++    )?;
++    Ok(())
++}
++
++/// Stages a catalogued event through the transactional outbox.
++///
++/// `outbox::stage` allocates the per-stream sequence itself, so the event
++/// cannot exist as a built envelope before staging; sensitivity and retention
++/// come from the embedded catalog policy, which enforces the classification
++/// floor for the catalogue entry.
++pub(crate) async fn stage_catalogued(
++    txn: &mut dyn KernelTxn,
++    event_id: EventId,
++    event_type: &str,
++    stream: StreamKey,
++    payload: Vec<u8>,
++    correlation_id: Option<String>,
++    causation_id: Option<EventId>,
++) -> errors::Result<u64> {
++    let policy = CatalogClassificationPolicy::embedded()?;
++    let sensitivity = policy
++        .minimum(event_type)
++        .ok_or_else(|| uncatalogued(event_type))?;
++    let retention = policy
++        .default_retention(event_type)
++        .ok_or_else(|| uncatalogued(event_type))?;
++    let stream_key = EventStreamKey::new(stream.as_str().to_owned()).map_err(|_| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            "catalogued stream key is not canonical",
++        )
++    })?;
++    stage(
++        txn,
++        DraftEvent {
++            event_id,
++            stream_key,
++            event_type: event_type.to_owned(),
++            payload,
++            sensitivity,
++            retention,
++            correlation_id,
++            causation_id,
++        },
++    )
++    .await
++}
++
++/// Decodes a prost contract message without echoing the payload bytes.
++pub(crate) fn decode_contract<M>(name: &'static str, payload: &[u8]) -> errors::Result<M>
++where
++    M: prost::Message + Default,
++{
++    M::decode(payload).map_err(|source| {
++        KernelError::new(
++            ErrorCode::InvalidArgument,
++            RetryClass::Never,
++            format!("{name} payload is not valid contract bytes"),
++        )
++        .with_source(source)
++    })
++}
++
++/// Parses a required identifier field without echoing its value.
++pub(crate) fn required_id<T>(field: &'static str, text: &str) -> errors::Result<T>
++where
++    T: FromStr,
++{
++    text.parse()
++        .map_err(|_| invalid_field(field, "is not a valid identifier"))
++}
++
++/// Parses an optional identifier field; an empty string means absent.
++pub(crate) fn optional_id<T>(field: &'static str, text: &str) -> errors::Result<Option<T>>
++where
++    T: FromStr,
++{
++    if text.is_empty() {
++        return Ok(None);
++    }
++    required_id(field, text).map(Some)
++}
++
++fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
++    KernelError::new(
++        ErrorCode::InvalidArgument,
++        RetryClass::Never,
++        format!("{field} {detail}"),
++    )
++}
++
++fn uncatalogued(event_type: &str) -> KernelError {
++    KernelError::new(
++        ErrorCode::Internal,
++        RetryClass::Never,
++        format!("event type {event_type} has no catalog entry"),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use errors::codes::{ErrorCode, RetryClass};
++
++    use super::{decode_contract, optional_id, required_id};
++
++    #[test]
++    fn malformed_payloads_are_invalid_arguments_without_echoing_bytes() {
++        const MARKER: &[u8] = b"do-not-echo-payload-marker-7c1f";
++        let error =
++            decode_contract::<domain::generated::contract::CreateSession>("CreateSession", MARKER)
++                .unwrap_err();
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert!(!error.message().contains("do-not-echo"));
++    }
++
++    #[test]
++    fn malformed_identifiers_are_invalid_arguments_without_echoing_values() {
++        let error = required_id::<domain::ids::RunId>("run_id", "do-not-echo-run-id-marker-7c1f")
++            .unwrap_err();
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert!(!error.message().contains("do-not-echo"));
++    }
++
++    #[test]
++    fn empty_optional_identifiers_are_absent() {
++        let absent: Option<domain::ids::RunId> = optional_id("run_id", "").unwrap();
++        assert!(absent.is_none());
++    }
++}
+diff --git a/agent-os/crates/runtime/src/session.rs b/agent-os/crates/runtime/src/session.rs
+new file mode 100644
+index 0000000..f930d02
+--- /dev/null
++++ b/agent-os/crates/runtime/src/session.rs
+@@ -0,0 +1,82 @@
++//! Session creation: the transaction-scoped service and its command handler.
++
++use async_trait::async_trait;
++use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcome, OutcomeCode};
++use domain::generated::contract;
++use domain::ids::{EventId, PrincipalId, SessionId};
++use events::StreamKey;
++use kernel_store::KernelTxn;
++use kernel_store::models::NewSession;
++use prost::Message;
++
++use crate::{RuntimeDeps, decode_contract, optional_id, stage_catalogued};
++
++/// Inserts a session bound to `principal` and returns its identifier.
++///
++/// A `None` session id is derived from the command identity, so a caller that
++/// does not choose one still gets a unique, replay-stable identifier.
++pub async fn create_session(
++    txn: &mut dyn KernelTxn,
++    session_id: Option<SessionId>,
++    principal: PrincipalId,
++    now_ms: i64,
++) -> errors::Result<SessionId> {
++    let session_id = session_id
++        .unwrap_or_else(|| SessionId::from_uuid_v7(*txn.context().command_id.as_uuid_v7()));
++    txn.sessions()
++        .insert(NewSession {
++            session_id,
++            principal_id: principal,
++            created_at_ms: now_ms,
++            metadata: None,
++        })
++        .await?;
++    Ok(session_id)
++}
++
++/// Handler for `agentos.spec.v1.CreateSession`.
++pub struct CreateSessionHandler {
++    deps: RuntimeDeps,
++}
++
++impl CreateSessionHandler {
++    /// Creates the handler with its runtime dependencies.
++    pub fn new(deps: RuntimeDeps) -> Self {
++        Self { deps }
++    }
++}
++
++#[async_trait]
++impl CommandHandler for CreateSessionHandler {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome> {
++        let raw = decode_contract::<contract::CreateSession>("CreateSession", &payload)?;
++        let session_id = optional_id::<SessionId>("session_id", &raw.session_id)?;
++        let now_ms = self.deps.now_unix_ms();
++        let session_id = create_session(txn, session_id, ctx.principal_id, now_ms).await?;
++        let event = contract::Session {
++            session_id: session_id.to_string(),
++            principal_id: ctx.principal_id.to_string(),
++            metadata: raw.metadata,
++            created_unix_ms: now_ms,
++        };
++        stage_catalogued(
++            txn,
++            EventId::new(self.deps.ids.as_ref()),
++            "SessionCreated",
++            StreamKey::session(session_id),
++            event.encode_to_vec(),
++            ctx.correlation_id.clone(),
++            None,
++        )
++        .await?;
++        Ok(CommandOutcome {
++            code: OutcomeCode::Ok,
++            payload: session_id.to_string().into_bytes(),
++        })
++    }
++}
+diff --git a/agent-os/crates/runtime/src/task.rs b/agent-os/crates/runtime/src/task.rs
+new file mode 100644
+index 0000000..932e963
+--- /dev/null
++++ b/agent-os/crates/runtime/src/task.rs
+@@ -0,0 +1,18 @@
++//! Task creation with its graph head in the caller's transaction.
++
++use kernel_store::KernelTxn;
++use kernel_store::models::NewTask;
++
++/// Inserts the task when it does not exist yet and ensures its
++/// `run_graph_heads` row exists, both inside `txn` (D16).
++///
++/// The existence check makes task creation idempotent when several runs are
++/// created against the same task; the head insert is itself idempotent.
++pub async fn ensure_task(txn: &mut dyn KernelTxn, task: NewTask) -> errors::Result<()> {
++    let task_id = task.task_id;
++    if txn.tasks().get(task_id).await?.is_none() {
++        txn.tasks().insert(task).await?;
++    }
++    txn.graph().ensure_head(task_id).await?;
++    Ok(())
++}
+diff --git a/agent-os/crates/runtime/tests/entities.rs b/agent-os/crates/runtime/tests/entities.rs
+new file mode 100644
+index 0000000..8f6b727
+--- /dev/null
++++ b/agent-os/crates/runtime/tests/entities.rs
+@@ -0,0 +1,990 @@
++//! Entity creation acceptance tests over the real coordinator and the real
++//! SQLite kernel store: immutable agent spec revisions, idempotent session and
++//! task creation, child parent linkage, cancellation-epoch fencing, and
++//! `Created` runs with outbox and idempotency rows (R1, N1).
++
++use std::str::FromStr;
++use std::sync::Arc;
++
++use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
++use command_coordinator::handler::{CommandRegistry, OutcomeCode};
++use command_coordinator::{CommandCoordinator, FixedFence};
++use domain::generated::contract;
++use domain::ids::{
++    ActorId, AgentSpecId, CommandId, DaemonInstanceId, EventId, IdempotencyKey, PrincipalId, RunId,
++    SessionId, TaskId,
++};
++use domain::run::{RecoveryDisposition, RunState};
++use domain::security::{RetentionClass, SensitivityClass};
++use domain::time::Clock;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{
++    AgentSpecRow, NewSession, OutboxEventRow, RunCas, RunGraphHeadRow, RunPatch, RunRow,
++    SessionRow, TaskRow,
++};
++use kernel_store::{KernelStore, KernelTxn, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use prost::Message;
++use runtime::{CMD_CREATE_SESSION, CMD_CREATE_TASK_RUN, CMD_PUT_AGENT_SPEC_REVISION, RuntimeDeps};
++use testkit::clock::TestClock;
++use testkit::faults::ArmedFaults;
++use testkit::ids::DeterministicIds;
++
++const SEED_MS: i64 = 1_700_000_000_000;
++const DB_FILE: &str = "kernel.db";
++
++struct Harness {
++    _dir: tempfile::TempDir,
++    store: Arc<SqliteKernelStore>,
++    coordinator: CommandCoordinator,
++    clock: Arc<TestClock>,
++    ids: Arc<DeterministicIds>,
++    principal: PrincipalId,
++    actor: ActorId,
++    fence_epoch: u64,
++}
++
++impl Harness {
++    async fn new() -> Self {
++        let dir = tempfile::tempdir().expect("temp root");
++        let store = Arc::new(
++            SqliteKernelStore::open(StoreConfig {
++                path: dir.path().join(DB_FILE),
++                pool_max_connections: 5,
++                busy_timeout_ms: 5_000,
++            })
++            .await
++            .expect("store opens"),
++        );
++        let ids = Arc::new(DeterministicIds::new(SEED_MS));
++        let fence = store
++            .acquire_daemon_fence(DaemonInstanceId::new(ids.as_ref()))
++            .await
++            .expect("daemon fence acquired");
++        let clock = Arc::new(TestClock::new(SEED_MS));
++        let mut registry = CommandRegistry::new();
++        runtime::register_handlers(
++            &mut registry,
++            RuntimeDeps {
++                clock: clock.clone(),
++                ids: ids.clone(),
++            },
++        )
++        .expect("runtime handlers register");
++        let coordinator = CommandCoordinator::new(
++            store.clone(),
++            Arc::new(registry),
++            Arc::new(FixedFence(fence.epoch.0)),
++            clock.clone(),
++            Arc::new(ArmedFaults::new()),
++        );
++        Self {
++            _dir: dir,
++            store,
++            coordinator,
++            clock,
++            principal: PrincipalId::new(ids.as_ref()),
++            actor: ActorId::new(ids.as_ref()),
++            ids,
++            fence_epoch: fence.epoch.0,
++        }
++    }
++
++    fn envelope(&self, command_type: &str, key: &str, payload: Vec<u8>) -> CommandEnvelope {
++        CommandEnvelope {
++            command_id: CommandId::new(self.ids.as_ref()),
++            idempotency_key: IdempotencyKey::new(key).expect("valid idempotency key"),
++            principal_id: self.principal,
++            actor_id: self.actor,
++            device_id: None,
++            delegation_chain_id: None,
++            request_digest: digest(),
++            correlation_id: Some("corr-1".to_owned()),
++            causation_id: None,
++            deadline_unix_ms: None,
++            command_type: command_type.to_owned(),
++            payload,
++        }
++    }
++
++    async fn write_txn(&self) -> Box<dyn KernelTxn + '_> {
++        self.store
++            .begin_write(TxContext {
++                daemon_epoch: self.fence_epoch,
++                principal_id: self.principal,
++                command_id: CommandId::new(self.ids.as_ref()),
++                correlation_id: None,
++            })
++            .await
++            .expect("write transaction opens")
++    }
++
++    async fn session(&self, id: SessionId) -> Option<SessionRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn.sessions().get(id).await.expect("session read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn task(&self, id: TaskId) -> Option<TaskRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn.tasks().get(id).await.expect("task read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn run(&self, id: RunId) -> Option<RunRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn.runs().get(id).await.expect("run read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn head(&self, id: TaskId) -> Option<RunGraphHeadRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn.graph().get_head(id).await.expect("head read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn spec(&self, id: AgentSpecId, version: &str) -> Option<AgentSpecRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn.agent_specs().get(id, version).await.expect("spec read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn record(
++        &self,
++        envelope: &CommandEnvelope,
++    ) -> Option<kernel_store::models::IdempotencyRecordRow> {
++        let mut txn = self.write_txn().await;
++        let row = txn
++            .idempotency()
++            .lookup(envelope.principal_id, &envelope.idempotency_key)
++            .await
++            .expect("idempotency read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn events(&self) -> Vec<OutboxEventRow> {
++        let mut txn = self.write_txn().await;
++        let rows = txn
++            .streams()
++            .scan_unpublished(1_000)
++            .await
++            .expect("outbox read");
++        txn.rollback().await.expect("rollback");
++        rows
++    }
++
++    async fn seed_session(&self, session_id: SessionId) {
++        let mut txn = self.write_txn().await;
++        txn.sessions()
++            .insert(NewSession {
++                session_id,
++                principal_id: self.principal,
++                created_at_ms: self.clock.now_unix_ms(),
++                metadata: None,
++            })
++            .await
++            .expect("seed session");
++        txn.commit().await.expect("seed session commits");
++    }
++
++    async fn seed_spec(
++        &self,
++        agent_spec_id: AgentSpecId,
++        version: &str,
++        body: &[u8],
++        body_digest: &str,
++    ) {
++        let mut txn = self.write_txn().await;
++        txn.agent_specs()
++            .insert(kernel_store::models::NewAgentSpec {
++                agent_spec_id,
++                version: version.to_owned(),
++                digest: body_digest.to_owned(),
++                body: body.to_vec(),
++                created_at_ms: self.clock.now_unix_ms(),
++            })
++            .await
++            .expect("seed spec");
++        txn.commit().await.expect("seed spec commits");
++    }
++
++    async fn advance_parent_cancellation_epoch(&self, parent: RunId) {
++        let mut txn = self.write_txn().await;
++        let updated = txn
++            .runs()
++            .cas_update(
++                parent,
++                RunCas {
++                    run_revision: 0,
++                    state: None,
++                    cancellation_epoch: None,
++                },
++                RunPatch {
++                    cancellation_epoch: Some(1),
++                    bump_revision: true,
++                    ..RunPatch::default()
++                },
++            )
++            .await
++            .expect("parent epoch advance");
++        assert!(updated, "parent cancellation epoch advances");
++        txn.commit().await.expect("epoch advance commits");
++    }
++}
++
++fn digest() -> RequestDigest {
++    RequestDigest::from_str(&"ab".repeat(32)).expect("valid digest")
++}
++
++fn create_session_payload(session_id: SessionId, metadata: Vec<u8>) -> Vec<u8> {
++    contract::CreateSession {
++        session_id: session_id.to_string(),
++        metadata,
++    }
++    .encode_to_vec()
++}
++
++fn put_spec_payload(
++    agent_spec_id: AgentSpecId,
++    version: &str,
++    body: &[u8],
++    body_digest: &str,
++) -> Vec<u8> {
++    contract::PutAgentSpecRevision {
++        agent_spec_id: agent_spec_id.to_string(),
++        version: version.to_owned(),
++        body_bytes: body.to_vec(),
++        body_digest: body_digest.to_owned(),
++    }
++    .encode_to_vec()
++}
++
++#[allow(clippy::too_many_arguments)]
++fn create_task_run_payload(
++    task_id: TaskId,
++    run_id: RunId,
++    session_id: Option<SessionId>,
++    task_kind: &str,
++    task_payload: &[u8],
++    agent_spec_ref: Option<&AgentSpecRow>,
++    parent_run_id: Option<RunId>,
++    observed_parent_cancellation_epoch: u64,
++) -> Vec<u8> {
++    contract::CreateTaskRun {
++        task_id: task_id.to_string(),
++        run_id: run_id.to_string(),
++        session_id: session_id.map(|id| id.to_string()).unwrap_or_default(),
++        task_kind: task_kind.to_owned(),
++        task_payload: task_payload.to_vec(),
++        agent_spec_ref: agent_spec_ref.map(|spec| contract::VersionedRef {
++            id: spec.agent_spec_id.to_string(),
++            version: spec.version.clone(),
++            digest: spec.digest.clone(),
++        }),
++        parent_run_id: parent_run_id.map(|id| id.to_string()).unwrap_or_default(),
++        observed_parent_cancellation_epoch,
++        requested_profile: "default".to_owned(),
++        workspace_uri: "file:///workspace".to_owned(),
++        requested_capabilities: vec!["model".to_owned()],
++        requested_budget: vec![1, 2, 3],
++    }
++    .encode_to_vec()
++}
++
++fn events_of_type<'a>(events: &'a [OutboxEventRow], event_type: &str) -> Vec<&'a OutboxEventRow> {
++    events
++        .iter()
++        .filter(|event| event.event_type == event_type)
++        .collect()
++}
++
++#[tokio::test]
++async fn create_session_binds_principal_and_stages_event() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    let envelope = harness.envelope(
++        CMD_CREATE_SESSION,
++        "session-1",
++        create_session_payload(session_id, b"meta".to_vec()),
++    );
++
++    let outcome = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .expect("session creation succeeds");
++
++    assert_eq!(outcome.code, OutcomeCode::Ok);
++    assert_eq!(outcome.payload, session_id.to_string().into_bytes());
++    let session = harness
++        .session(session_id)
++        .await
++        .expect("session persisted");
++    assert_eq!(session.principal_id, harness.principal);
++    assert_eq!(session.created_at_ms, harness.clock.now_unix_ms());
++    assert_eq!(session.metadata.as_deref(), None);
++
++    let record = harness
++        .record(&envelope)
++        .await
++        .expect("idempotency record persisted");
++    assert_eq!(record.outcome_code, "ok");
++    assert_eq!(record.outcome_payload, outcome.payload);
++
++    let events = harness.events().await;
++    let created = events_of_type(&events, "SessionCreated");
++    assert_eq!(created.len(), 1);
++    assert_eq!(
++        created[0].stream_key.as_str(),
++        format!("session/{session_id}")
++    );
++    assert_eq!(created[0].sequence, 1);
++    assert_eq!(created[0].sensitivity, SensitivityClass::Internal);
++    assert_eq!(created[0].retention, RetentionClass::Standard);
++    let payload = contract::Session::decode(created[0].payload.as_slice())
++        .expect("SessionCreated payload decodes");
++    assert_eq!(payload.session_id, session_id.to_string());
++    assert_eq!(payload.principal_id, harness.principal.to_string());
++}
++
++#[tokio::test]
++async fn create_session_without_id_derives_it_from_the_command() {
++    let harness = Harness::new().await;
++    let mut envelope = harness.envelope(CMD_CREATE_SESSION, "session-derived", Vec::new());
++    envelope.payload = contract::CreateSession {
++        session_id: String::new(),
++        metadata: Vec::new(),
++    }
++    .encode_to_vec();
++
++    let outcome = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .expect("session creation succeeds");
++
++    assert_eq!(outcome.code, OutcomeCode::Ok);
++    let derived = SessionId::from_str(
++        std::str::from_utf8(&outcome.payload).expect("outcome payload is the session id"),
++    )
++    .expect("derived session id parses");
++    let session = harness.session(derived).await.expect("session persisted");
++    assert_eq!(session.principal_id, harness.principal);
++    assert!(harness.record(&envelope).await.is_some());
++}
++
++#[tokio::test]
++async fn replayed_create_session_returns_the_stored_outcome_without_new_events() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    let envelope = harness.envelope(
++        CMD_CREATE_SESSION,
++        "session-replay",
++        create_session_payload(session_id, Vec::new()),
++    );
++
++    let first = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .expect("first execution");
++    for _ in 0..3 {
++        let replay = harness
++            .coordinator
++            .execute(envelope.clone())
++            .await
++            .expect("replay succeeds");
++        assert_eq!(replay, first);
++    }
++
++    let events = harness.events().await;
++    assert_eq!(events_of_type(&events, "SessionCreated").len(), 1);
++    assert_eq!(
++        harness
++            .session(session_id)
++            .await
++            .expect("row")
++            .created_at_ms,
++        SEED_MS
++    );
++}
++
++#[tokio::test]
++async fn agent_spec_revisions_are_idempotent_and_immutable() {
++    let harness = Harness::new().await;
++    let spec_id = AgentSpecId::new(harness.ids.as_ref());
++    let body = br#"{"model":"alpha"}"#.to_vec();
++    let body_digest = "a1".repeat(32);
++    let original = harness.envelope(
++        CMD_PUT_AGENT_SPEC_REVISION,
++        "spec-1",
++        put_spec_payload(spec_id, "1", &body, &body_digest),
++    );
++
++    harness
++        .coordinator
++        .execute(original.clone())
++        .await
++        .expect("first revision stores");
++
++    let stored = harness.spec(spec_id, "1").await.expect("revision stored");
++    assert_eq!(stored.body, body);
++    assert_eq!(stored.digest, body_digest);
++    assert_eq!(stored.created_at_ms, SEED_MS);
++    let events = harness.events().await;
++    let stored_events = events_of_type(&events, "AgentSpecRevisionStored");
++    assert_eq!(stored_events.len(), 1);
++    assert_eq!(stored_events[0].stream_key.as_str(), "config/global");
++    assert_eq!(stored_events[0].sequence, 1);
++    assert_eq!(stored_events[0].sensitivity, SensitivityClass::Internal);
++    assert_eq!(stored_events[0].retention, RetentionClass::Audit);
++    let payload = contract::AgentSpecRevision::decode(stored_events[0].payload.as_slice())
++        .expect("AgentSpecRevisionStored payload decodes");
++    assert_eq!(payload.agent_spec_id, spec_id.to_string());
++    assert_eq!(payload.digest, body_digest);
++
++    // Identical restatement under a fresh command is idempotent and stages
++    // nothing new.
++    let restated = harness.envelope(
++        CMD_PUT_AGENT_SPEC_REVISION,
++        "spec-1-again",
++        put_spec_payload(spec_id, "1", &body, &body_digest),
++    );
++    harness
++        .coordinator
++        .execute(restated.clone())
++        .await
++        .expect("identical restatement succeeds");
++    let after = harness.spec(spec_id, "1").await.expect("revision stored");
++    assert_eq!(after, stored);
++    let events = harness.events().await;
++    assert_eq!(events_of_type(&events, "AgentSpecRevisionStored").len(), 1);
++
++    // Different bytes for the same version conflict and leave the stored
++    // revision untouched.
++    let conflicting = harness.envelope(
++        CMD_PUT_AGENT_SPEC_REVISION,
++        "spec-1-conflict",
++        put_spec_payload(spec_id, "1", b"different", &"b2".repeat(32)),
++    );
++    let error = harness
++        .coordinator
++        .execute(conflicting.clone())
++        .await
++        .expect_err("divergent revision conflicts");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(!error.message().contains("different"));
++    assert_eq!(harness.spec(spec_id, "1").await.expect("row"), stored);
++    let events = harness.events().await;
++    assert_eq!(events_of_type(&events, "AgentSpecRevisionStored").len(), 1);
++    assert!(harness.record(&conflicting).await.is_none());
++}
++
++#[tokio::test]
++async fn create_task_run_persists_task_head_and_created_run() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let spec_id = AgentSpecId::new(harness.ids.as_ref());
++    let spec_body = b"spec-body";
++    harness
++        .seed_spec(spec_id, "1", spec_body, &"c3".repeat(32))
++        .await;
++    let spec = harness.spec(spec_id, "1").await.expect("seeded spec");
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let run_id = RunId::new(harness.ids.as_ref());
++    let envelope = harness.envelope(
++        CMD_CREATE_TASK_RUN,
++        "run-1",
++        create_task_run_payload(
++            task_id,
++            run_id,
++            Some(session_id),
++            "chat",
++            b"task-payload",
++            Some(&spec),
++            None,
++            0,
++        ),
++    );
++
++    let outcome = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .expect("run creation succeeds");
++
++    assert_eq!(outcome.code, OutcomeCode::Ok);
++    assert_eq!(outcome.payload, run_id.to_string().into_bytes());
++    let run = harness.run(run_id).await.expect("run persisted");
++    assert_eq!(run.state, RunState::Created);
++    assert_ne!(run.state, RunState::Ready);
++    assert_eq!(run.recovery, RecoveryDisposition::Normal);
++    assert_eq!(run.task_id, task_id);
++    assert_eq!(run.session_id, Some(session_id));
++    assert_eq!(run.parent_run_id, None);
++    assert_eq!(run.run_revision, 0);
++    assert_eq!(run.cancellation_epoch, 0);
++    assert_eq!(run.resolved_environment_id, None);
++    assert_eq!(run.created_at_ms, SEED_MS);
++    assert_eq!(run.updated_at_ms, SEED_MS);
++    let task = harness.task(task_id).await.expect("task persisted");
++    assert_eq!(task.task_kind, "chat");
++    assert_eq!(task.payload, b"task-payload");
++    assert_eq!(task.session_id, Some(session_id));
++    assert_eq!(task.created_by_actor_id, harness.actor);
++    let head = harness.head(task_id).await.expect("graph head persisted");
++    assert_eq!(head.graph_revision, 0);
++
++    let record = harness
++        .record(&envelope)
++        .await
++        .expect("idempotency record persisted");
++    assert_eq!(record.outcome_payload, outcome.payload);
++    let events = harness.events().await;
++    let created_tasks = events_of_type(&events, "TaskCreated");
++    assert_eq!(created_tasks.len(), 1);
++    assert_eq!(
++        created_tasks[0].stream_key.as_str(),
++        format!("task/{task_id}")
++    );
++    assert_eq!(created_tasks[0].sequence, 1);
++    assert_eq!(created_tasks[0].sensitivity, SensitivityClass::Internal);
++    assert_eq!(created_tasks[0].retention, RetentionClass::Standard);
++    let task_payload = contract::Task::decode(created_tasks[0].payload.as_slice())
++        .expect("TaskCreated payload decodes");
++    assert_eq!(task_payload.task_id, task_id.to_string());
++    assert_eq!(task_payload.task_kind, "chat");
++    let created_runs = events_of_type(&events, "RunCreated");
++    assert_eq!(created_runs.len(), 1);
++    assert_eq!(created_runs[0].stream_key.as_str(), format!("run/{run_id}"));
++    assert_eq!(created_runs[0].sequence, 1);
++    let run_payload = contract::AgentRun::decode(created_runs[0].payload.as_slice())
++        .expect("RunCreated payload decodes");
++    assert_eq!(run_payload.run_id, run_id.to_string());
++    assert_eq!(run_payload.state, RunState::Created.to_wire());
++    assert_eq!(run_payload.recovery, RecoveryDisposition::Normal.to_wire());
++}
++
++#[tokio::test]
++async fn second_run_on_the_same_task_does_not_recreate_it() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let first_run = RunId::new(harness.ids.as_ref());
++    let second_run = RunId::new(harness.ids.as_ref());
++
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "run-1",
++            create_task_run_payload(
++                task_id,
++                first_run,
++                Some(session_id),
++                "chat",
++                b"p",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("first run succeeds");
++    let task_before = harness.task(task_id).await.expect("task persisted");
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "run-2",
++            create_task_run_payload(
++                task_id,
++                second_run,
++                Some(session_id),
++                "chat",
++                b"p2",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("second run succeeds");
++
++    assert_eq!(harness.task(task_id).await.expect("task"), task_before);
++    assert_eq!(harness.head(task_id).await.expect("head").graph_revision, 0);
++    assert_eq!(
++        harness.run(first_run).await.expect("run").state,
++        RunState::Created
++    );
++    assert_eq!(
++        harness.run(second_run).await.expect("run").state,
++        RunState::Created
++    );
++    let events = harness.events().await;
++    assert_eq!(
++        events_of_type(&events, "TaskCreated").len(),
++        1,
++        "the existing task is not re-announced"
++    );
++    assert_eq!(events_of_type(&events, "RunCreated").len(), 2);
++}
++
++#[tokio::test]
++async fn child_run_records_parent_linkage_and_stages_child_created() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let parent = RunId::new(harness.ids.as_ref());
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "parent",
++            create_task_run_payload(
++                task_id,
++                parent,
++                Some(session_id),
++                "chat",
++                b"p",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("parent creation succeeds");
++
++    let child = RunId::new(harness.ids.as_ref());
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "child",
++            create_task_run_payload(
++                task_id,
++                child,
++                Some(session_id),
++                "chat",
++                b"c",
++                None,
++                Some(parent),
++                0,
++            ),
++        ))
++        .await
++        .expect("child creation succeeds");
++
++    let child_row = harness.run(child).await.expect("child persisted");
++    assert_eq!(child_row.parent_run_id, Some(parent));
++    assert_eq!(child_row.state, RunState::Created);
++    let parent_row = harness.run(parent).await.expect("parent persisted");
++    assert_eq!(parent_row.cancellation_epoch, 0);
++    let events = harness.events().await;
++    let child_events = events_of_type(&events, "ChildRunCreated");
++    assert_eq!(child_events.len(), 1);
++    assert_eq!(child_events[0].stream_key.as_str(), format!("run/{parent}"));
++    assert_eq!(child_events[0].sequence, 2);
++    let payload = contract::AgentRun::decode(child_events[0].payload.as_slice())
++        .expect("ChildRunCreated payload decodes");
++    assert_eq!(payload.run_id, child.to_string());
++    assert_eq!(payload.parent_run_id, parent.to_string());
++}
++
++#[tokio::test]
++async fn stale_or_absent_parent_epoch_is_rejected_without_rows() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let parent = RunId::new(harness.ids.as_ref());
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "parent",
++            create_task_run_payload(
++                task_id,
++                parent,
++                Some(session_id),
++                "chat",
++                b"p",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("parent creation succeeds");
++    harness.advance_parent_cancellation_epoch(parent).await;
++    let events_before = harness.events().await;
++
++    let stale_child = RunId::new(harness.ids.as_ref());
++    let stale_task = TaskId::new(harness.ids.as_ref());
++    let stale_envelope = harness.envelope(
++        CMD_CREATE_TASK_RUN,
++        "stale-child",
++        create_task_run_payload(
++            stale_task,
++            stale_child,
++            Some(session_id),
++            "chat",
++            b"c",
++            None,
++            Some(parent),
++            0,
++        ),
++    );
++    let error = harness
++        .coordinator
++        .execute(stale_envelope.clone())
++        .await
++        .expect_err("stale observed epoch is rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.run(stale_child).await.is_none());
++    assert!(harness.task(stale_task).await.is_none());
++    assert_eq!(harness.events().await.len(), events_before.len());
++    assert!(harness.record(&stale_envelope).await.is_none());
++
++    let absent_parent = RunId::new(harness.ids.as_ref());
++    let absent_envelope = harness.envelope(
++        CMD_CREATE_TASK_RUN,
++        "absent-parent",
++        create_task_run_payload(
++            TaskId::new(harness.ids.as_ref()),
++            RunId::new(harness.ids.as_ref()),
++            Some(session_id),
++            "chat",
++            b"c",
++            None,
++            Some(absent_parent),
++            0,
++        ),
++    );
++    let error = harness
++        .coordinator
++        .execute(absent_envelope.clone())
++        .await
++        .expect_err("absent parent is rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.record(&absent_envelope).await.is_none());
++    assert_eq!(harness.events().await.len(), events_before.len());
++}
++
++#[tokio::test]
++async fn unknown_or_mismatched_agent_spec_reference_is_rejected() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let spec_id = AgentSpecId::new(harness.ids.as_ref());
++    harness
++        .seed_spec(spec_id, "1", b"body", &"d4".repeat(32))
++        .await;
++    let spec = harness.spec(spec_id, "1").await.expect("seeded spec");
++
++    let unknown_spec = AgentSpecRow {
++        agent_spec_id: AgentSpecId::new(harness.ids.as_ref()),
++        version: "9".to_owned(),
++        digest: "e5".repeat(32),
++        body: Vec::new(),
++        created_at_ms: SEED_MS,
++    };
++    let unknown_envelope = harness.envelope(
++        CMD_CREATE_TASK_RUN,
++        "unknown-spec",
++        create_task_run_payload(
++            TaskId::new(harness.ids.as_ref()),
++            RunId::new(harness.ids.as_ref()),
++            Some(session_id),
++            "chat",
++            b"c",
++            Some(&unknown_spec),
++            None,
++            0,
++        ),
++    );
++    let error = harness
++        .coordinator
++        .execute(unknown_envelope.clone())
++        .await
++        .expect_err("unknown spec is rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.record(&unknown_envelope).await.is_none());
++
++    let wrong_digest = AgentSpecRow {
++        agent_spec_id: spec.agent_spec_id,
++        version: spec.version.clone(),
++        digest: "f6".repeat(32),
++        body: spec.body.clone(),
++        created_at_ms: spec.created_at_ms,
++    };
++    let mismatched_envelope = harness.envelope(
++        CMD_CREATE_TASK_RUN,
++        "digest-mismatch",
++        create_task_run_payload(
++            TaskId::new(harness.ids.as_ref()),
++            RunId::new(harness.ids.as_ref()),
++            Some(session_id),
++            "chat",
++            b"c",
++            Some(&wrong_digest),
++            None,
++            0,
++        ),
++    );
++    let error = harness
++        .coordinator
++        .execute(mismatched_envelope.clone())
++        .await
++        .expect_err("digest mismatch is rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.record(&mismatched_envelope).await.is_none());
++    let events = harness.events().await;
++    assert!(events_of_type(&events, "RunCreated").is_empty());
++    assert!(events_of_type(&events, "TaskCreated").is_empty());
++}
++
++#[tokio::test]
++async fn failed_child_creation_stages_no_events() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let parent = RunId::new(harness.ids.as_ref());
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "parent",
++            create_task_run_payload(
++                task_id,
++                parent,
++                Some(session_id),
++                "chat",
++                b"p",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("parent creation succeeds");
++    let before = harness.events().await;
++
++    let error = harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "bad-child",
++            create_task_run_payload(
++                TaskId::new(harness.ids.as_ref()),
++                RunId::new(harness.ids.as_ref()),
++                Some(session_id),
++                "chat",
++                b"c",
++                None,
++                Some(RunId::new(harness.ids.as_ref())),
++                0,
++            ),
++        ))
++        .await
++        .expect_err("absent parent rejected");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++
++    assert_eq!(
++        harness.events().await.len(),
++        before.len(),
++        "rejection stages no outbox events"
++    );
++}
++
++#[tokio::test]
++async fn malformed_payload_is_rejected_without_echoing_bytes() {
++    let harness = Harness::new().await;
++    let mut payload = vec![0xFF];
++    payload.extend_from_slice(b"do-not-echo-payload-marker-7c1f");
++    let envelope = harness.envelope(CMD_CREATE_TASK_RUN, "malformed", payload);
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .expect_err("malformed payload rejected");
++
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        !error.message().contains("do-not-echo"),
++        "rejection must not echo payload bytes: {}",
++        error.message()
++    );
++    assert!(harness.record(&envelope).await.is_none());
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn event_ids_are_unique_across_a_multi_event_command() {
++    let harness = Harness::new().await;
++    let session_id = SessionId::new(harness.ids.as_ref());
++    harness.seed_session(session_id).await;
++    let task_id = TaskId::new(harness.ids.as_ref());
++    let parent = RunId::new(harness.ids.as_ref());
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "parent",
++            create_task_run_payload(
++                task_id,
++                parent,
++                Some(session_id),
++                "chat",
++                b"p",
++                None,
++                None,
++                0,
++            ),
++        ))
++        .await
++        .expect("parent creation succeeds");
++    harness
++        .coordinator
++        .execute(harness.envelope(
++            CMD_CREATE_TASK_RUN,
++            "child",
++            create_task_run_payload(
++                task_id,
++                RunId::new(harness.ids.as_ref()),
++                Some(session_id),
++                "chat",
++                b"c",
++                None,
++                Some(parent),
++                0,
++            ),
++        ))
++        .await
++        .expect("child creation succeeds");
++
++    let events = harness.events().await;
++    let mut ids: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
++    let total = ids.len();
++    ids.sort();
++    ids.dedup();
++    assert_eq!(ids.len(), total, "outbox event ids are unique");
++    assert_eq!(total, 4, "two runs plus task and child events");
++}
+diff --git a/agent-os/crates/testkit/src/store.rs b/agent-os/crates/testkit/src/store.rs
+index a16dae2..6522b82 100644
+--- a/agent-os/crates/testkit/src/store.rs
++++ b/agent-os/crates/testkit/src/store.rs
+@@ -19,40 +19,41 @@
+ //! TEXT CHECK literal sets for the untyped persisted enums, and the foreign
+ //! keys listed on [`MockStore`]. Every constraint that is still not emulated
+ //! is called out in that list so mock-based tests do not rely on it.
+ 
+ use std::collections::hash_map::Entry;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ 
+ use async_trait::async_trait;
+ use domain::ids::{
+-    AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
++    AdapterId, AdapterInstanceId, AgentSpecId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+     ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
+     EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
+     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
+ };
+ use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::*;
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ 
+ #[derive(Clone, Default)]
+ struct MockState {
+     revision: u64,
+     logical_now_ms: i64,
+     daemon_epoch: u64,
+     daemon_fence: Option<DaemonFence>,
+     sessions: HashMap<SessionId, SessionRow>,
++    agent_specs: HashMap<(AgentSpecId, String), AgentSpecRow>,
+     tasks: HashMap<TaskId, TaskRow>,
+     environments: HashMap<EnvironmentId, ResolvedEnvironmentRow>,
+     bindings: HashMap<(EnvironmentId, String), ResolvedBindingRow>,
+     runs: HashMap<RunId, RunRow>,
+     graph_heads: HashMap<TaskId, RunGraphHeadRow>,
+     dependencies: HashMap<DependencyId, RunDependencyRow>,
+     workspaces: HashMap<WorkspaceId, WorkspaceRow>,
+     leases: HashMap<LeaseId, WorkspaceLeaseRow>,
+     effects: HashMap<EffectId, EffectRow>,
+     reservations: HashMap<ReservationId, ReservationRow>,
+@@ -89,20 +90,24 @@ struct MockState {
+ ///
+ /// - a second active exclusive-write lease for one workspace is rejected with
+ ///   `Conflict`, mirroring `uq_workspace_exclusive_lease`;
+ /// - the persisted-literal CHECK sets are validated for loop turns
+ ///   (`issued|accepted|stale`), decisions (`Complete|Fail|Wait|SpawnAgent|
+ ///   InvokeEffect|RequestApproval`), adapter instances (`starting|ready|
+ ///   exited|failed`), config generations (`proposed|validated|rejected` and
+ ///   `untested|passed|failed`), conformance reports (`pass|fail`), and
+ ///   approval responses (`approve|deny`), on insert and on state patches,
+ ///   failing `FailedPrecondition`/`Never`;
++/// - agent spec inserts are insert-only: an identical `(id, version, digest,
++///   body)` is idempotent, a differing body or digest conflicts, and one
++///   digest cannot bind to two revisions, mirroring the schema key and unique
++///   constraints;
+ /// - foreign-key existence is checked for artifacts (origin run and effect),
+ ///   timers (run), leases (workspace and owner run), turns (run), decisions
+ ///   (run and turn), grants (run and delegating grant), delegation hops
+ ///   (run), and dependency endpoints (source and target run).
+ ///
+ /// Still unchecked, so mock-based tests must not rely on these being
+ /// rejected: the immutability triggers (the port exposes no update or delete
+ /// for those tables), CHECK constraints on typed enum and integer columns
+ /// (unrepresentable through the port types), `workspaces.parent_workspace_id`,
+ /// `approval_requests.run_id`, outbox entity references, delegation-hop chain
+@@ -283,20 +288,21 @@ macro_rules! repo_handle {
+                 }
+             }
+         )+
+     };
+ }
+ 
+ repo_handle!(
+     MockRunRepo,
+     MockTaskRepo,
+     MockSessionRepo,
++    MockAgentSpecRepo,
+     MockGraphRepo,
+     MockEnvironmentRepo,
+     MockEffectRepo,
+     MockResourceRepo,
+     MockTimerRepo,
+     MockSecurityRepo,
+     MockConfigRepo,
+     MockWorkspaceRepo,
+     MockAdapterRepo,
+     MockArtifactRepo,
+@@ -306,20 +312,21 @@ repo_handle!(
+ );
+ 
+ struct MockWriteTxn {
+     ctx: TxContext,
+     base_revision: u64,
+     state: Arc<Mutex<MockState>>,
+     store: Arc<Mutex<MockState>>,
+     runs: MockRunRepo,
+     tasks: MockTaskRepo,
+     sessions: MockSessionRepo,
++    agent_specs: MockAgentSpecRepo,
+     graph: MockGraphRepo,
+     environments: MockEnvironmentRepo,
+     effects: MockEffectRepo,
+     resources: MockResourceRepo,
+     timers: MockTimerRepo,
+     security: MockSecurityRepo,
+     config: MockConfigRepo,
+     workspaces: MockWorkspaceRepo,
+     adapters: MockAdapterRepo,
+     artifacts: MockArtifactRepo,
+@@ -336,20 +343,21 @@ impl MockWriteTxn {
+         state: Arc<Mutex<MockState>>,
+     ) -> Self {
+         Self {
+             ctx,
+             base_revision,
+             state: state.clone(),
+             store,
+             runs: MockRunRepo::new(state.clone()),
+             tasks: MockTaskRepo::new(state.clone()),
+             sessions: MockSessionRepo::new(state.clone()),
++            agent_specs: MockAgentSpecRepo::new(state.clone()),
+             graph: MockGraphRepo::new(state.clone()),
+             environments: MockEnvironmentRepo::new(state.clone()),
+             effects: MockEffectRepo::new(state.clone()),
+             resources: MockResourceRepo::new(state.clone()),
+             timers: MockTimerRepo::new(state.clone()),
+             security: MockSecurityRepo::new(state.clone()),
+             config: MockConfigRepo::new(state.clone()),
+             workspaces: MockWorkspaceRepo::new(state.clone()),
+             adapters: MockAdapterRepo::new(state.clone()),
+             artifacts: MockArtifactRepo::new(state.clone()),
+@@ -357,39 +365,41 @@ impl MockWriteTxn {
+             idempotency: MockIdempotencyRepo::new(state.clone()),
+             streams: MockStreamRepo::new(state),
+         }
+     }
+ }
+ 
+ struct MockReadTxn {
+     runs: MockRunRepo,
+     tasks: MockTaskRepo,
+     sessions: MockSessionRepo,
++    agent_specs: MockAgentSpecRepo,
+     graph: MockGraphRepo,
+     environments: MockEnvironmentRepo,
+     effects: MockEffectRepo,
+     resources: MockResourceRepo,
+     timers: MockTimerRepo,
+     security: MockSecurityRepo,
+     config: MockConfigRepo,
+     workspaces: MockWorkspaceRepo,
+     adapters: MockAdapterRepo,
+     artifacts: MockArtifactRepo,
+     loop_turns: MockLoopRepo,
+ }
+ 
+ impl MockReadTxn {
+     fn new(state: Arc<Mutex<MockState>>) -> Self {
+         Self {
+             runs: MockRunRepo::new(state.clone()),
+             tasks: MockTaskRepo::new(state.clone()),
+             sessions: MockSessionRepo::new(state.clone()),
++            agent_specs: MockAgentSpecRepo::new(state.clone()),
+             graph: MockGraphRepo::new(state.clone()),
+             environments: MockEnvironmentRepo::new(state.clone()),
+             effects: MockEffectRepo::new(state.clone()),
+             resources: MockResourceRepo::new(state.clone()),
+             timers: MockTimerRepo::new(state.clone()),
+             security: MockSecurityRepo::new(state.clone()),
+             config: MockConfigRepo::new(state.clone()),
+             workspaces: MockWorkspaceRepo::new(state.clone()),
+             adapters: MockAdapterRepo::new(state.clone()),
+             artifacts: MockArtifactRepo::new(state.clone()),
+@@ -453,20 +463,24 @@ impl KernelTxn for MockWriteTxn {
+     }
+ 
+     fn tasks(&mut self) -> &mut dyn TaskRepo {
+         &mut self.tasks
+     }
+ 
+     fn sessions(&mut self) -> &mut dyn SessionRepo {
+         &mut self.sessions
+     }
+ 
++    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo {
++        &mut self.agent_specs
++    }
++
+     fn graph(&mut self) -> &mut dyn GraphRepo {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRepo {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRepo {
+         &mut self.effects
+@@ -545,20 +559,24 @@ impl KernelReadTxn for MockReadTxn {
+     }
+ 
+     fn tasks(&mut self) -> &mut dyn TaskRead {
+         &mut self.tasks
+     }
+ 
+     fn sessions(&mut self) -> &mut dyn SessionRead {
+         &mut self.sessions
+     }
+ 
++    fn agent_specs(&mut self) -> &mut dyn AgentSpecRead {
++        &mut self.agent_specs
++    }
++
+     fn graph(&mut self) -> &mut dyn GraphRead {
+         &mut self.graph
+     }
+ 
+     fn environments(&mut self) -> &mut dyn EnvironmentRead {
+         &mut self.environments
+     }
+ 
+     fn effects(&mut self) -> &mut dyn EffectRead {
+         &mut self.effects
+@@ -778,20 +796,72 @@ impl SessionRepo for MockSessionRepo {
+         };
+         insert_unique(
+             &mut lock(&self.state)?.sessions,
+             row.session_id,
+             row,
+             "duplicate session id",
+         )
+     }
+ }
+ 
++#[async_trait]
++impl AgentSpecRead for MockAgentSpecRepo {
++    async fn get(
++        &mut self,
++        id: AgentSpecId,
++        version: &str,
++    ) -> errors::Result<Option<AgentSpecRow>> {
++        Ok(lock(&self.state)?
++            .agent_specs
++            .get(&(id, version.to_owned()))
++            .cloned())
++    }
++}
++
++#[async_trait]
++impl AgentSpecRepo for MockAgentSpecRepo {
++    async fn insert(&mut self, spec: NewAgentSpec) -> errors::Result<()> {
++        let mut state = lock(&self.state)?;
++        if let Some(stored) = state
++            .agent_specs
++            .get(&(spec.agent_spec_id, spec.version.clone()))
++        {
++            if stored.digest == spec.digest && stored.body == spec.body {
++                return Ok(());
++            }
++            return Err(conflict(
++                "agent spec revision conflicts with the stored revision",
++            ));
++        }
++        if state
++            .agent_specs
++            .values()
++            .any(|row| row.digest == spec.digest)
++        {
++            return Err(conflict(
++                "agent spec digest is already bound to another revision",
++            ));
++        }
++        let row = AgentSpecRow {
++            agent_spec_id: spec.agent_spec_id,
++            version: spec.version,
++            digest: spec.digest,
++            body: spec.body,
++            created_at_ms: spec.created_at_ms,
++        };
++        state
++            .agent_specs
++            .insert((row.agent_spec_id, row.version.clone()), row);
++        Ok(())
++    }
++}
++
+ #[async_trait]
+ impl GraphRead for MockGraphRepo {
+     async fn get_head(&mut self, task: TaskId) -> errors::Result<Option<RunGraphHeadRow>> {
+         Ok(lock(&self.state)?.graph_heads.get(&task).cloned())
+     }
+ 
+     async fn list_dependencies(&mut self, task: TaskId) -> errors::Result<Vec<RunDependencyRow>> {
+         let state = lock(&self.state)?;
+         let mut rows: Vec<RunDependencyRow> = state
+             .dependencies

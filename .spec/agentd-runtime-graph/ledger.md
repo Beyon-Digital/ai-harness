@@ -14,3 +14,6 @@
 - 2026-09-13T15:59:31Z RUN-000 -> claimed (@agent-run000c)
 - 2026-09-13T15:59:31Z RUN-000 -> in_progress (@agent-run000c)
 - 2026-09-13T16:53:23Z Recovery: RUN-000's implementing session was interrupted repeatedly after writing all files; the controller verified fmt/clippy/full workspace suite (87 targets ok, 0 failures), applied rustfmt, and committed the work for independent review.
+- 2026-09-13T16:53:24Z RUN-000 -> review (@controller)
+- 2026-09-13T17:08:28Z RUN-000 -> done (@controller)
+- 2026-09-13T17:08:29Z RUN-000 approved (recovered work, controller-verified). Deferred minors: session metadata staged in the event but not persisted on the row; stage_catalogued bypasses the builder hint for sequence allocation. 1/6 done.
