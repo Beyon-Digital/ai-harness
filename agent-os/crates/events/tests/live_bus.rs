@@ -62,8 +62,9 @@ fn expect_event(item: LiveItem) -> EventEnvelope {
     match item {
         LiveItem::Event(event) => event,
         LiveItem::Lagged { resume_from } => {
-            panic!("expected a delivered event, got lag at {resume_from}")
+            panic!("expected a delivered event, got lag at {resume_from:?}")
         }
+        LiveItem::BusClosed => panic!("expected a delivered event, got a closed bus"),
     }
 }
 
@@ -121,7 +122,7 @@ async fn slow_subscriber_reports_lag_with_its_last_delivered_cursor() {
     assert_eq!(
         lagged,
         LiveItem::Lagged {
-            resume_from: events[0].cursor()
+            resume_from: Some(events[0].cursor())
         }
     );
 
@@ -136,17 +137,46 @@ async fn slow_subscriber_reports_lag_with_its_last_delivered_cursor() {
 }
 
 #[tokio::test]
-async fn lag_before_any_delivery_never_fabricates_a_cursor() {
+async fn cold_start_lag_reports_no_resume_cursor() {
     let bus = LiveBus::new(1);
     let mut subscription = bus.subscribe();
     bus.publish(&envelope(1));
     bus.publish(&envelope(2));
 
+    assert_eq!(
+        receive(&mut subscription).await,
+        LiveItem::Lagged { resume_from: None },
+        "an undelivered subscription resumes from stream inception"
+    );
+
     let handle = tokio::spawn(async move { subscription.next().await });
-    let error = handle
-        .await
-        .expect_err("lag without a delivered cursor is terminal");
+    let error = handle.await.expect_err("a lagged subscription is terminal");
     assert!(error.is_panic());
+}
+
+#[tokio::test]
+async fn dropping_the_bus_closes_live_subscriptions() {
+    let bus = LiveBus::new(2);
+    let mut subscription = bus.subscribe();
+    drop(bus);
+
+    assert_eq!(receive(&mut subscription).await, LiveItem::BusClosed);
+
+    let handle = tokio::spawn(async move { subscription.next().await });
+    let error = handle.await.expect_err("a closed subscription is terminal");
+    assert!(error.is_panic());
+}
+
+#[tokio::test]
+async fn publishing_without_subscribers_is_a_no_op() {
+    let bus = LiveBus::new(2);
+    bus.publish(&envelope(1));
+
+    let mut subscription = bus.subscribe();
+    let event = envelope(2);
+    bus.publish(&event);
+
+    assert_eq!(expect_event(receive(&mut subscription).await), event);
 }
 
 #[tokio::test]
@@ -175,8 +205,11 @@ async fn resume_from_lag_reads_exactly_the_missed_journal_events() {
         bus.publish(event);
     }
 
-    let LiveItem::Lagged { resume_from } = receive(&mut subscription).await else {
-        panic!("expected the slow subscription to lag");
+    let LiveItem::Lagged {
+        resume_from: Some(resume_from),
+    } = receive(&mut subscription).await
+    else {
+        panic!("expected the slow subscription to lag with a delivered cursor");
     };
     assert_eq!(resume_from, events[0].cursor());
 

@@ -3,9 +3,11 @@
 //! [`LiveBus`] fans journal-backed events out to subscribers over a bounded
 //! `tokio::sync::broadcast` channel. A subscriber that falls behind the
 //! capacity receives exactly one [`LiveItem::Lagged`] carrying the last
-//! journal-backed cursor it actually delivered, and the subscription is then
-//! terminal: the client resumes through the durable journal from that cursor
-//! and no cursor is ever fabricated (R4.1-R4.3, R4.5).
+//! journal-backed cursor it actually delivered (`None` when it delivered
+//! none), and the subscription is then terminal: the client resumes through
+//! the durable journal from that cursor, or from stream inception, and no
+//! cursor is ever fabricated (R4.1-R4.3, R4.5). Dropping the bus yields
+//! [`LiveItem::BusClosed`].
 //!
 //! [`EphemeralBus`] is a separate, lossy, counted channel for transient bytes.
 //! Its overflow never touches durable cursors or durable delivery (R4.4, P3).
@@ -22,7 +24,7 @@ use crate::envelope::EventEnvelope;
 /// One item produced by a live subscription.
 ///
 /// `Event` carries the envelope inline so normal delivery stays allocation
-/// free; the rare `Lagged` variant makes the enum intentionally asymmetric.
+/// free; the rare terminal variants make the enum intentionally asymmetric.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveItem {
@@ -30,10 +32,16 @@ pub enum LiveItem {
     Event(EventEnvelope),
     /// The subscription fell behind; resume the journal from this cursor.
     ///
-    /// The cursor is the last one the subscription actually delivered, so a
-    /// journal read strictly after it recovers every missed event with no gap
-    /// and no duplicate.
-    Lagged { resume_from: EventCursor },
+    /// `resume_from` is the last cursor the subscription actually delivered,
+    /// so a journal read strictly after it recovers every missed event with no
+    /// gap and no duplicate. `None` means no event was ever delivered: the
+    /// consumer resumes from stream inception.
+    Lagged { resume_from: Option<EventCursor> },
+    /// The bus was dropped while the subscription was live.
+    ///
+    /// The subscription ends without a resume cursor; no event is fabricated
+    /// and no cursor is invented.
+    BusClosed,
 }
 
 /// Bounded in-process fan-out of journal-backed events.
@@ -58,6 +66,9 @@ impl LiveBus {
     /// Publishing with no subscribers is a no-op; the event remains durable in
     /// the journal, and nothing is fabricated for live delivery.
     pub fn publish(&self, event: &EventEnvelope) {
+        if self.sender.receiver_count() == 0 {
+            return;
+        }
         let _ = self.sender.send(event.clone());
     }
 
@@ -97,19 +108,18 @@ impl LiveSubscription {
     ///
     /// Delivery is ordered. When the bounded buffer overflows, the
     /// subscription reports [`LiveItem::Lagged`] once, carrying the last
-    /// journal-backed cursor it delivered, and becomes terminal; later calls
-    /// panic. A subscription that overflows before delivering anything has no
-    /// journal-backed cursor to report and panics rather than fabricating one.
+    /// journal-backed cursor it delivered (`None` when it never delivered
+    /// one), and becomes terminal. When the owning [`LiveBus`] is dropped it
+    /// reports [`LiveItem::BusClosed`] and becomes terminal. No cursor is ever
+    /// fabricated.
     ///
     /// # Panics
     ///
-    /// Panics on any call after the subscription reported lag, when the
-    /// subscription overflows before its first delivery, or when the owning
-    /// [`LiveBus`] has been dropped.
+    /// Panics on any call after the subscription became terminal.
     pub async fn next(&mut self) -> LiveItem {
         assert!(
             !self.ended,
-            "live subscription is terminal after reporting lag"
+            "live subscription is terminal after lag or bus closure"
         );
         match self.receiver.recv().await {
             Ok(event) => {
@@ -118,14 +128,13 @@ impl LiveSubscription {
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 self.ended = true;
-                let Some(resume_from) = self.last_delivered.clone() else {
-                    panic!("live subscription lagged before delivering any journal-backed cursor");
-                };
-                LiveItem::Lagged { resume_from }
+                LiveItem::Lagged {
+                    resume_from: self.last_delivered.take(),
+                }
             }
             Err(broadcast::error::RecvError::Closed) => {
                 self.ended = true;
-                panic!("live bus was dropped while a subscription was live");
+                LiveItem::BusClosed
             }
         }
     }
@@ -133,8 +142,8 @@ impl LiveSubscription {
 
 /// Bounded, lossy channel for ephemeral bytes.
 ///
-/// Overflow and withdrawal are counted; nothing published here can advance a
-/// durable cursor or affect [`LiveBus`] delivery.
+/// Dropped messages are counted; nothing published here can advance a durable
+/// cursor or affect [`LiveBus`] delivery.
 pub struct EphemeralBus {
     sender: mpsc::Sender<Vec<u8>>,
     _receiver: mpsc::Receiver<Vec<u8>>,
@@ -159,7 +168,8 @@ impl EphemeralBus {
     /// Attempts a non-blocking publish.
     ///
     /// Returns `true` when the message entered the buffer and `false` when it
-    /// was dropped because the buffer was full, incrementing [`Self::dropped`].
+    /// was dropped because the buffer was full or the channel was closed,
+    /// incrementing [`Self::dropped`].
     pub fn try_publish(&self, bytes: Vec<u8>) -> bool {
         match self.sender.try_send(bytes) {
             Ok(()) => true,
