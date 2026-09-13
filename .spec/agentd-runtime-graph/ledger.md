@@ -22,3 +22,13 @@
 - 2026-09-13T18:00:03Z RUN-001 -> review (@agent-run001)
 - 2026-09-13T18:07:51Z RUN-001 -> done (@agent-run001)
 - 2026-09-13T18:07:51Z RUN-001 approved; its two minors are carried into RUN-003 (declare modules, drop #[path]) and deferred (RunPatch has no updated_at_ms). 2/6 done.
+- 2026-09-13T18:08:06Z RUN-002 -> claimed (@agent-run002)
+- 2026-09-13T18:08:06Z RUN-002 -> in_progress (@agent-run002)
+- 2026-09-13T18:28:10Z RUN-002 -> blocked (@agent-run002) — need agent-os/crates/run-graph/Cargo.toml: add prost to [dependencies] (encode the DependencyAdded contract::RunDependency payload; neither domain nor events re-exports prost) and dev-deps kernel-store-sqlite + tempfile (+ proptest) because the brief mandates a real SQLite store in a temp root while RUN-000 gave run-graph only testkit+tokio. Alternative: rule MockStore tests + a payload decision.
+- 2026-09-13T18:31:05Z RUN-002 -> pending (@agent-run002)
+- 2026-09-13T18:31:20Z Ruling: RUN-002's lease adds run-graph's manifest and lock for prost plus dev kernel-store-sqlite/tempfile/proptest; RUN-000's dependency pass missed them. Cost if wrong: another manifest edit in a dependency-ordered task.
+- 2026-09-13T18:31:50Z RUN-002 -> claimed (@agent-run002b)
+- 2026-09-13T18:31:50Z RUN-002 -> in_progress (@agent-run002b)
+- 2026-09-13T19:07:21Z RUN-002 -> review (@agent-run002b)
+- 2026-09-13T19:44:54Z RUN-002 -> done (@agent-run002b)
+- 2026-09-13T19:44:56Z RUN-002 approved. Deferred minors: duplicate-after-target-moved returns FailedPrecondition instead of idempotent Ok; cycle property lacks a non-vacuous positive assertion; SystemIdProvider minting is inert vs RuntimeDeps.ids; O(N) duplicate scan. 3/6 done.

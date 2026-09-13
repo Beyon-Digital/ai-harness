@@ -109,13 +109,14 @@
 
 ### Task RUN-002: Dependency edges and cycle prevention
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-run002b
 - depends_on: RUN-001
-- files: `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/run-graph/src/graph.rs`, `agent-os/crates/run-graph/src/repository.rs`, `agent-os/crates/run-graph/tests/graph.rs`
+- files: `agent-os/crates/run-graph/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/run-graph/src/graph.rs`, `agent-os/crates/run-graph/src/repository.rs`, `agent-os/crates/run-graph/tests/graph.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, P1, N2
 - scope: large
 - model: capable
+- blocked_reason: need agent-os/crates/run-graph/Cargo.toml: add prost to [dependencies] (encode the DependencyAdded contract::RunDependency payload; neither domain nor events re-exports prost) and dev-deps kernel-store-sqlite + tempfile (+ proptest) because the brief mandates a real SQLite store in a temp root while RUN-000 gave run-graph only testkit+tokio. Alternative: rule MockStore tests + a payload decision.
 
 **Objective:** Dependency edges are transactional, same-task scoped, mutable-target only, duplicate-safe, and can never form a committed cycle.
 

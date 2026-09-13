@@ -1,0 +1,1162 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 621fbf8..2ddd764 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -1487,16 +1487,20 @@ dependencies = [
+ [[package]]
+ name = "run-graph"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+  "events",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "proptest",
++ "prost",
++ "tempfile",
+  "testkit",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "runtime"
+ version = "0.1.0"
+ dependencies = [
+diff --git a/agent-os/crates/run-graph/Cargo.toml b/agent-os/crates/run-graph/Cargo.toml
+index 5372716..0ddb4cf 100644
+--- a/agent-os/crates/run-graph/Cargo.toml
++++ b/agent-os/crates/run-graph/Cargo.toml
+@@ -5,12 +5,16 @@ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
+ events.workspace = true
++prost.workspace = true
+ 
+ [dev-dependencies]
+ testkit.workspace = true
+ tokio.workspace = true
++kernel-store-sqlite.workspace = true
++tempfile.workspace = true
++proptest.workspace = true
+diff --git a/agent-os/crates/run-graph/src/graph.rs b/agent-os/crates/run-graph/src/graph.rs
+new file mode 100644
+index 0000000..7fb71d6
+--- /dev/null
++++ b/agent-os/crates/run-graph/src/graph.rs
+@@ -0,0 +1,161 @@
++//! Dependency edge mutation: same-task scope, mutable targets, deterministic
++//! duplicates, cycle rejection, and the `DependencyAdded` outbox event.
++//!
++//! Cycle detection is not reimplemented here: `GraphRepo::insert_dependency`
++//! checks reachability and advances the task's graph head inside one immediate
++//! transaction (R3.3). This service adds the domain validations, the duplicate
++//! outcome, and stages the catalogued event through the transactional outbox in
++//! the caller's transaction (R3.1, R3.2, R3.4).
++
++use domain::generated::contract;
++use domain::ids::{DependencyId, EventId, EventStreamKey, RunId, TaskId};
++use domain::provider::SystemIdProvider;
++use domain::resource::DependencyCondition;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::outbox::{DraftEvent, stage};
++use events::{CatalogClassificationPolicy, ClassificationPolicy, StreamKey};
++use kernel_store::KernelTxn;
++use kernel_store::models::NewRunDependency;
++use prost::Message;
++
++use crate::repository::{find_dependency, is_mutable_target, load_run};
++
++/// Catalogued event type staged when an edge commits.
++const DEPENDENCY_ADDED: &str = "DependencyAdded";
++
++/// Adds `source -> target` to their task's dependency graph.
++///
++/// The source and target must be persisted runs of the same task and the
++/// target must be mutable: `Created`, or `Ready` without a live claim (R3.1).
++/// `expected_revision` must equal the task's persisted graph head, or the call
++/// conflicts without mutation. An identical edge is an idempotent no-op; the
++/// same endpoints with another condition conflict. Cycle-forming edges are
++/// rejected by the store's reachability check inside the immediate transaction
++/// (R3.2). On success the head advances and `DependencyAdded` is staged on the
++/// `task/{task_id}` stream in the same transaction (R3.3).
++pub async fn add_dependency(
++    txn: &mut dyn KernelTxn,
++    source: RunId,
++    target: RunId,
++    condition: DependencyCondition,
++    expected_revision: u64,
++    now_ms: i64,
++) -> errors::Result<()> {
++    if condition == DependencyCondition::Unspecified {
++        return Err(failed_precondition("dependency condition is unspecified"));
++    }
++
++    let source_row = load_run(txn, source).await?;
++    let target_row = load_run(txn, target).await?;
++    if source_row.task_id != target_row.task_id {
++        return Err(failed_precondition(
++            "dependency endpoints belong to different tasks",
++        ));
++    }
++    if !is_mutable_target(&target_row, now_ms) {
++        return Err(failed_precondition(
++            "dependency target is not Created or unclaimed Ready",
++        ));
++    }
++    let task_id = target_row.task_id;
++
++    let head = txn.graph().get_head(task_id).await?.ok_or_else(|| {
++        KernelError::new(
++            ErrorCode::NotFound,
++            RetryClass::Never,
++            "graph head missing for task",
++        )
++    })?;
++    if head.graph_revision != expected_revision {
++        return Err(KernelError::new(
++            ErrorCode::Conflict,
++            RetryClass::Never,
++            "graph revision does not match",
++        ));
++    }
++
++    if let Some(existing) = find_dependency(txn, task_id, source, target).await? {
++        if existing.dependency_condition == condition {
++            return Ok(());
++        }
++        return Err(KernelError::new(
++            ErrorCode::Conflict,
++            RetryClass::Never,
++            "duplicate run dependency has a different condition",
++        ));
++    }
++
++    let dependency_id = DependencyId::new(&SystemIdProvider);
++    txn.graph()
++        .insert_dependency(
++            NewRunDependency {
++                dependency_id,
++                task_id,
++                source_run_id: source,
++                target_run_id: target,
++                dependency_condition: condition,
++                created_at_ms: now_ms,
++            },
++            expected_revision,
++        )
++        .await?;
++
++    let payload = contract::RunDependency {
++        dependency_id: dependency_id.to_string(),
++        task_id: task_id.to_string(),
++        source_run_id: source.to_string(),
++        target_run_id: target.to_string(),
++        condition: condition.to_wire(),
++        created_graph_revision: expected_revision,
++    }
++    .encode_to_vec();
++    stage_event(txn, task_id, payload).await
++}
++
++/// Stages the catalogued `DependencyAdded` payload on the task stream.
++async fn stage_event(
++    txn: &mut dyn KernelTxn,
++    task_id: TaskId,
++    payload: Vec<u8>,
++) -> errors::Result<()> {
++    let policy = CatalogClassificationPolicy::embedded()?;
++    let sensitivity = policy.minimum(DEPENDENCY_ADDED).ok_or_else(uncatalogued)?;
++    let retention = policy
++        .default_retention(DEPENDENCY_ADDED)
++        .ok_or_else(uncatalogued)?;
++    let stream_key = EventStreamKey::new(StreamKey::task(task_id).as_str()).map_err(|_| {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            "catalogued stream key is not canonical",
++        )
++    })?;
++    stage(
++        txn,
++        DraftEvent {
++            event_id: EventId::new(&SystemIdProvider),
++            stream_key,
++            event_type: DEPENDENCY_ADDED.to_owned(),
++            payload,
++            sensitivity,
++            retention,
++            correlation_id: None,
++            causation_id: None,
++        },
++    )
++    .await?;
++    Ok(())
++}
++
++fn failed_precondition(detail: &'static str) -> KernelError {
++    KernelError::new(ErrorCode::FailedPrecondition, RetryClass::Never, detail)
++}
++
++fn uncatalogued() -> KernelError {
++    KernelError::new(
++        ErrorCode::Internal,
++        RetryClass::Never,
++        "event type DependencyAdded has no catalog entry",
++    )
++}
+diff --git a/agent-os/crates/run-graph/src/lib.rs b/agent-os/crates/run-graph/src/lib.rs
+index c1b580a..b7cbd7c 100644
+--- a/agent-os/crates/run-graph/src/lib.rs
++++ b/agent-os/crates/run-graph/src/lib.rs
+@@ -1,2 +1,5 @@
+ //! Graph mutation, readiness, and cancellation epoch logic.
+ #![forbid(unsafe_code)]
++
++pub mod graph;
++pub mod repository;
+diff --git a/agent-os/crates/run-graph/src/repository.rs b/agent-os/crates/run-graph/src/repository.rs
+new file mode 100644
+index 0000000..ded9238
+--- /dev/null
++++ b/agent-os/crates/run-graph/src/repository.rs
+@@ -0,0 +1,77 @@
++//! Read helpers over the kernel-store ports for run-graph services.
++//!
++//! Ancestry is derived exclusively from `runs.parent_run_id` through
++//! [`RunRepo::list_by_task`](kernel_store::repositories::RunRepo::list_by_task);
++//! the graph stores dependency edges only and never a second ancestry table
++//! (R3.6). Cycle logic stays in `GraphRepo::insert_dependency`, which checks
++//! reachability inside the same immediate transaction as the insert.
++
++use std::collections::{HashMap, VecDeque};
++
++use domain::ids::{RunId, TaskId};
++use domain::run::RunState;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::KernelTxn;
++use kernel_store::models::{RunDependencyRow, RunRow};
++
++/// Loads a run or fails with `NotFound` when the identifier is unknown.
++pub async fn load_run(txn: &mut dyn KernelTxn, run_id: RunId) -> errors::Result<RunRow> {
++    txn.runs().get(run_id).await?.ok_or_else(|| {
++        KernelError::new(ErrorCode::NotFound, RetryClass::Never, "run does not exist")
++    })
++}
++
++/// Returns true when the run carries a claim whose expiry is still in the
++/// future at `now_ms`; expired claims are reclaimable.
++pub fn has_live_claim(run: &RunRow, now_ms: i64) -> bool {
++    run.claim_expires_ms
++        .is_some_and(|expires_unix_ms| expires_unix_ms > now_ms)
++}
++
++/// Returns true when new dependency edges may target the run: only `Created`
++/// runs or `Ready` runs without a live claim are mutable (R3.1).
++pub fn is_mutable_target(run: &RunRow, now_ms: i64) -> bool {
++    run.state == RunState::Created || (run.state == RunState::Ready && !has_live_claim(run, now_ms))
++}
++
++/// Finds the already-persisted edge for `(source, target)` within a task.
++pub async fn find_dependency(
++    txn: &mut dyn KernelTxn,
++    task: TaskId,
++    source: RunId,
++    target: RunId,
++) -> errors::Result<Option<RunDependencyRow>> {
++    Ok(txn
++        .graph()
++        .list_dependencies(task)
++        .await?
++        .into_iter()
++        .find(|row| row.source_run_id == source && row.target_run_id == target))
++}
++
++/// Returns every run descended from `root` through `runs.parent_run_id`,
++/// walked in memory within the root's task and ordered by breadth-first
++/// traversal of the run-id-ordered task listing. The root itself is not
++/// included.
++pub async fn descendants(txn: &mut dyn KernelTxn, root: RunId) -> errors::Result<Vec<RunId>> {
++    let root_row = load_run(txn, root).await?;
++    let runs = txn.runs().list_by_task(root_row.task_id).await?;
++
++    let mut children: HashMap<RunId, Vec<RunId>> = HashMap::new();
++    for run in &runs {
++        if let Some(parent) = run.parent_run_id {
++            children.entry(parent).or_default().push(run.run_id);
++        }
++    }
++
++    let mut ordered = Vec::new();
++    let mut frontier = VecDeque::from([root]);
++    while let Some(current) = frontier.pop_front() {
++        for child in children.get(&current).into_iter().flatten() {
++            ordered.push(*child);
++            frontier.push_back(*child);
++        }
++    }
++    Ok(ordered)
++}
+diff --git a/agent-os/crates/run-graph/tests/graph.rs b/agent-os/crates/run-graph/tests/graph.rs
+new file mode 100644
+index 0000000..ae25272
+--- /dev/null
++++ b/agent-os/crates/run-graph/tests/graph.rs
+@@ -0,0 +1,850 @@
++//! Dependency edge acceptance tests over the real SQLite kernel store: same
++//! task scope, mutable targets, transactional head plus `DependencyAdded`,
++//! deterministic duplicates, committed acyclicity under races and arbitrary
++//! interleavings, and parent-link ancestry without a second table (R3, P1, N2).
++
++use std::sync::Arc;
++
++use domain::generated::contract;
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, EventCursor, EventStreamKey, PrincipalId, RunId, TaskId,
++};
++use domain::resource::DependencyCondition;
++use domain::run::{RecoveryDisposition, RunState};
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::{
++    ClaimPatch, NewRun, NewTask, OutboxEventRow, RunCas, RunDependencyRow, RunGraphHeadRow,
++    RunPatch,
++};
++use kernel_store::{KernelStore, KernelTxn, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use proptest::prelude::*;
++use prost::Message;
++use run_graph::graph::add_dependency;
++use run_graph::repository::descendants;
++use testkit::ids::DeterministicIds;
++use tokio::sync::Barrier;
++
++const SEED_MS: i64 = 1_700_000_000_000;
++const DB_FILE: &str = "kernel.db";
++
++struct Harness {
++    _dir: tempfile::TempDir,
++    store: Arc<SqliteKernelStore>,
++    ids: Arc<DeterministicIds>,
++    principal: PrincipalId,
++    epoch: u64,
++}
++
++impl Harness {
++    async fn new() -> Self {
++        let dir = tempfile::tempdir().expect("temp root");
++        let store = Arc::new(
++            SqliteKernelStore::open(StoreConfig {
++                path: dir.path().join(DB_FILE),
++                pool_max_connections: 8,
++                busy_timeout_ms: 5_000,
++            })
++            .await
++            .expect("store opens"),
++        );
++        let ids = Arc::new(DeterministicIds::new(SEED_MS));
++        let fence = store
++            .acquire_daemon_fence(DaemonInstanceId::new(ids.as_ref()))
++            .await
++            .expect("daemon fence acquired");
++        let principal = PrincipalId::new(ids.as_ref());
++        Self {
++            _dir: dir,
++            store,
++            ids,
++            principal,
++            epoch: fence.epoch.0,
++        }
++    }
++
++    fn context(&self) -> TxContext {
++        TxContext {
++            daemon_epoch: self.epoch,
++            principal_id: self.principal,
++            command_id: CommandId::new(self.ids.as_ref()),
++            correlation_id: None,
++        }
++    }
++
++    async fn write(&self) -> Box<dyn KernelTxn + '_> {
++        self.store
++            .begin_write(self.context())
++            .await
++            .expect("write transaction opens")
++    }
++
++    async fn seed_task(&self, task_id: TaskId) {
++        let mut txn = self.write().await;
++        txn.tasks()
++            .insert(NewTask {
++                task_id,
++                session_id: None,
++                created_by_actor_id: ActorId::new(self.ids.as_ref()),
++                task_kind: "test".to_owned(),
++                payload: Vec::new(),
++                created_at_ms: SEED_MS,
++            })
++            .await
++            .expect("seed task");
++        txn.graph().ensure_head(task_id).await.expect("seed head");
++        txn.commit().await.expect("seed task commits");
++    }
++
++    async fn seed_run(&self, task_id: TaskId, state: RunState) -> RunId {
++        self.seed_linked_run(task_id, None, state).await
++    }
++
++    async fn seed_child(&self, task_id: TaskId, parent: RunId) -> RunId {
++        self.seed_linked_run(task_id, Some(parent), RunState::Created)
++            .await
++    }
++
++    async fn seed_linked_run(
++        &self,
++        task_id: TaskId,
++        parent_run_id: Option<RunId>,
++        state: RunState,
++    ) -> RunId {
++        let run_id = RunId::new(self.ids.as_ref());
++        let cursor = EventCursor::new(
++            EventStreamKey::new(format!("run/{run_id}")).expect("canonical stream key"),
++            0,
++        );
++        let mut txn = self.write().await;
++        txn.runs()
++            .insert(NewRun {
++                run_id,
++                task_id,
++                session_id: None,
++                parent_run_id,
++                state,
++                recovery: RecoveryDisposition::Normal,
++                loop_epoch: 0,
++                step_sequence: 0,
++                input_event_cursor: cursor,
++                cancellation_epoch: 0,
++                resolved_environment_id: None,
++                created_at_ms: SEED_MS,
++            })
++            .await
++            .expect("seed run");
++        txn.commit().await.expect("seed run commits");
++        run_id
++    }
++
++    async fn seed_claim(&self, run_id: RunId, expires_unix_ms: i64) {
++        let mut txn = self.write().await;
++        let updated = txn
++            .runs()
++            .cas_update(
++                run_id,
++                RunCas {
++                    run_revision: 0,
++                    state: Some(RunState::Ready),
++                    cancellation_epoch: None,
++                },
++                RunPatch {
++                    claim: Some(ClaimPatch {
++                        owner: "worker-1".to_owned(),
++                        token: 1,
++                        expires_unix_ms,
++                        daemon_epoch: self.epoch,
++                    }),
++                    ..RunPatch::default()
++                },
++            )
++            .await
++            .expect("claim patch applies");
++        assert!(updated, "claim patch must land");
++        txn.commit().await.expect("claim commits");
++    }
++
++    async fn add(
++        &self,
++        source: RunId,
++        target: RunId,
++        condition: DependencyCondition,
++        expected_revision: u64,
++    ) -> errors::Result<()> {
++        let mut txn = self.write().await;
++        match add_dependency(
++            txn.as_mut(),
++            source,
++            target,
++            condition,
++            expected_revision,
++            SEED_MS,
++        )
++        .await
++        {
++            Ok(()) => {
++                txn.commit().await.expect("edge commits");
++                Ok(())
++            }
++            Err(error) => {
++                txn.rollback().await.expect("edge rolls back");
++                Err(error)
++            }
++        }
++    }
++
++    async fn dependencies(&self, task_id: TaskId) -> Vec<RunDependencyRow> {
++        let mut txn = self.write().await;
++        let rows = txn
++            .graph()
++            .list_dependencies(task_id)
++            .await
++            .expect("dependencies read");
++        txn.rollback().await.expect("rollback");
++        rows
++    }
++
++    async fn head(&self, task_id: TaskId) -> Option<RunGraphHeadRow> {
++        let mut txn = self.write().await;
++        let row = txn.graph().get_head(task_id).await.expect("head read");
++        txn.rollback().await.expect("rollback");
++        row
++    }
++
++    async fn events(&self) -> Vec<OutboxEventRow> {
++        let mut txn = self.write().await;
++        let rows = txn
++            .streams()
++            .scan_unpublished(1_000)
++            .await
++            .expect("outbox read");
++        txn.rollback().await.expect("rollback");
++        rows
++    }
++
++    async fn descendants(&self, root: RunId) -> errors::Result<Vec<RunId>> {
++        let mut txn = self.write().await;
++        let result = descendants(txn.as_mut(), root).await;
++        txn.rollback().await.expect("rollback");
++        result
++    }
++
++    async fn assert_acyclic(&self, runs: &[RunId]) {
++        let mut read = self.store.begin_read().await.expect("read transaction");
++        for left in runs {
++            for right in runs {
++                if left == right {
++                    continue;
++                }
++                let forward = read
++                    .graph()
++                    .is_reachable(*left, *right)
++                    .await
++                    .expect("reachability read");
++                let backward = read
++                    .graph()
++                    .is_reachable(*right, *left)
++                    .await
++                    .expect("reachability read");
++                assert!(
++                    !(forward && backward),
++                    "committed graph contains a cycle through {left} and {right}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn edge_insertion_advances_head_and_stages_dependency_added() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let target = harness.seed_run(task, RunState::Created).await;
++
++    harness
++        .add(
++            source,
++            target,
++            DependencyCondition::CompletedSuccessfully,
++            0,
++        )
++        .await
++        .expect("edge commits");
++
++    let head = harness.head(task).await.expect("head present");
++    assert_eq!(
++        head.graph_revision, 1,
++        "one committed edge advances the head"
++    );
++    let dependencies = harness.dependencies(task).await;
++    assert_eq!(dependencies.len(), 1);
++    let edge = &dependencies[0];
++    assert_eq!(edge.task_id, task);
++    assert_eq!(edge.source_run_id, source);
++    assert_eq!(edge.target_run_id, target);
++    assert_eq!(
++        edge.dependency_condition,
++        DependencyCondition::CompletedSuccessfully
++    );
++    assert_eq!(edge.created_graph_revision, 0);
++    assert_eq!(edge.created_at_ms, SEED_MS);
++
++    let events = harness.events().await;
++    assert_eq!(events.len(), 1, "one edge stages one event");
++    let event = &events[0];
++    assert_eq!(event.event_type, "DependencyAdded");
++    assert_eq!(event.event_version, 1);
++    assert_eq!(event.stream_key.as_str(), format!("task/{task}"));
++    assert_eq!(event.sequence, 1);
++    assert_eq!(event.sensitivity, SensitivityClass::Internal);
++    assert_eq!(event.retention, RetentionClass::Standard);
++    assert_eq!(event.task_id, None);
++    let payload =
++        contract::RunDependency::decode(event.payload.as_slice()).expect("payload decodes");
++    assert_eq!(payload.dependency_id, edge.dependency_id.to_string());
++    assert_eq!(payload.task_id, task.to_string());
++    assert_eq!(payload.source_run_id, source.to_string());
++    assert_eq!(payload.target_run_id, target.to_string());
++    assert_eq!(
++        payload.condition,
++        DependencyCondition::CompletedSuccessfully.to_wire()
++    );
++    assert_eq!(payload.created_graph_revision, 0);
++}
++
++#[tokio::test]
++async fn rollback_discards_the_edge_head_and_event() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let target = harness.seed_run(task, RunState::Created).await;
++
++    let mut txn = harness.write().await;
++    add_dependency(
++        txn.as_mut(),
++        source,
++        target,
++        DependencyCondition::AnyTerminal,
++        0,
++        SEED_MS,
++    )
++    .await
++    .expect("edge stages inside the transaction");
++    txn.rollback().await.expect("rollback");
++
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        0
++    );
++    assert!(harness.dependencies(task).await.is_empty());
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn self_edge_is_rejected_without_mutation() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let run = harness.seed_run(task, RunState::Created).await;
++
++    let error = harness
++        .add(run, run, DependencyCondition::AnyTerminal, 0)
++        .await
++        .expect_err("self edge is rejected");
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.dependencies(task).await.is_empty());
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        0
++    );
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn cross_task_edges_are_rejected_without_mutation() {
++    let harness = Harness::new().await;
++    let left_task = TaskId::new(harness.ids.as_ref());
++    let right_task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(left_task).await;
++    harness.seed_task(right_task).await;
++    let left = harness.seed_run(left_task, RunState::Created).await;
++    let right = harness.seed_run(right_task, RunState::Created).await;
++
++    for (source, target, task) in [(left, right, left_task), (right, left, right_task)] {
++        let error = harness
++            .add(source, target, DependencyCondition::AnyTerminal, 0)
++            .await
++            .expect_err("cross-task edge is rejected");
++        assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert!(harness.dependencies(task).await.is_empty());
++        assert_eq!(
++            harness
++                .head(task)
++                .await
++                .expect("head present")
++                .graph_revision,
++            0
++        );
++    }
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn target_must_be_created_or_unclaimed_ready() {
++    let harness = Harness::new().await;
++    let mutable = [
++        (RunState::Created, None),
++        (RunState::Ready, None),
++        (RunState::Ready, Some(SEED_MS - 1)),
++    ];
++    for (index, (state, claim_expires)) in mutable.into_iter().enumerate() {
++        let task = TaskId::new(harness.ids.as_ref());
++        harness.seed_task(task).await;
++        let source = harness.seed_run(task, RunState::Created).await;
++        let target = harness.seed_run(task, state).await;
++        if let Some(expires) = claim_expires {
++            harness.seed_claim(target, expires).await;
++        }
++        harness
++            .add(source, target, DependencyCondition::AnyTerminal, 0)
++            .await
++            .unwrap_or_else(|error| {
++                panic!("case {index} ({state:?}, expired claim {claim_expires:?}): {error}")
++            });
++        assert_eq!(harness.dependencies(task).await.len(), 1, "case {index}");
++    }
++
++    let immutable = [
++        RunState::Running,
++        RunState::WaitingTool,
++        RunState::WaitingChild,
++        RunState::WaitingHuman,
++        RunState::Suspended,
++        RunState::Cancelling,
++        RunState::Completed,
++        RunState::Failed,
++        RunState::Cancelled,
++    ];
++    for state in immutable {
++        let task = TaskId::new(harness.ids.as_ref());
++        harness.seed_task(task).await;
++        let source = harness.seed_run(task, RunState::Created).await;
++        let target = harness.seed_run(task, state).await;
++        let error = match harness
++            .add(source, target, DependencyCondition::AnyTerminal, 0)
++            .await
++        {
++            Ok(()) => panic!("{state:?} must not be a mutable target"),
++            Err(error) => error,
++        };
++        assert_eq!(error.code(), ErrorCode::FailedPrecondition, "{state:?}");
++        assert_eq!(error.retry_class(), RetryClass::Never, "{state:?}");
++        assert!(harness.dependencies(task).await.is_empty(), "{state:?}");
++        assert_eq!(
++            harness
++                .head(task)
++                .await
++                .expect("head present")
++                .graph_revision,
++            0,
++            "{state:?}"
++        );
++    }
++
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let claimed = harness.seed_run(task, RunState::Ready).await;
++    harness.seed_claim(claimed, SEED_MS + 1_000).await;
++    let events_before = harness.events().await.len();
++    let error = harness
++        .add(source, claimed, DependencyCondition::AnyTerminal, 0)
++        .await
++        .expect_err("a live claim freezes the target");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.dependencies(task).await.is_empty());
++    assert_eq!(harness.events().await.len(), events_before);
++}
++
++#[tokio::test]
++async fn cycle_forming_edges_are_rejected() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let first = harness.seed_run(task, RunState::Created).await;
++    let second = harness.seed_run(task, RunState::Created).await;
++    let third = harness.seed_run(task, RunState::Created).await;
++
++    harness
++        .add(first, second, DependencyCondition::CompletedSuccessfully, 0)
++        .await
++        .expect("first edge commits");
++    harness
++        .add(second, third, DependencyCondition::CompletedSuccessfully, 1)
++        .await
++        .expect("second edge commits");
++
++    for (source, target) in [(third, first), (second, first)] {
++        let error = harness
++            .add(
++                source,
++                target,
++                DependencyCondition::CompletedSuccessfully,
++                2,
++            )
++            .await
++            .expect_err("a cycle-forming edge is rejected");
++        assert_eq!(error.code(), ErrorCode::Conflict);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++    }
++
++    assert_eq!(harness.dependencies(task).await.len(), 2);
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        2
++    );
++    let events = harness.events().await;
++    assert_eq!(events.len(), 2, "rejections stage no events");
++    harness.assert_acyclic(&[first, second, third]).await;
++}
++
++#[tokio::test]
++async fn duplicate_edge_is_a_deterministic_no_op() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let target = harness.seed_run(task, RunState::Created).await;
++
++    harness
++        .add(
++            source,
++            target,
++            DependencyCondition::CompletedSuccessfully,
++            0,
++        )
++        .await
++        .expect("first edge commits");
++
++    harness
++        .add(
++            source,
++            target,
++            DependencyCondition::CompletedSuccessfully,
++            1,
++        )
++        .await
++        .expect("identical duplicate is idempotent");
++    assert_eq!(harness.dependencies(task).await.len(), 1);
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        1,
++        "a duplicate does not advance the head"
++    );
++    assert_eq!(
++        harness.events().await.len(),
++        1,
++        "a duplicate stages nothing"
++    );
++
++    let differing = harness
++        .add(source, target, DependencyCondition::AnyTerminal, 1)
++        .await
++        .expect_err("a duplicate with another condition conflicts");
++    assert_eq!(differing.code(), ErrorCode::Conflict);
++    assert_eq!(differing.retry_class(), RetryClass::Never);
++
++    let stale = harness
++        .add(
++            source,
++            target,
++            DependencyCondition::CompletedSuccessfully,
++            0,
++        )
++        .await
++        .expect_err("a stale expected revision conflicts");
++    assert_eq!(stale.code(), ErrorCode::Conflict);
++    assert_eq!(stale.retry_class(), RetryClass::Never);
++
++    assert_eq!(harness.dependencies(task).await.len(), 1);
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        1
++    );
++    assert_eq!(harness.events().await.len(), 1);
++}
++
++#[tokio::test]
++async fn stale_expected_revision_is_rejected_without_mutation() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let target = harness.seed_run(task, RunState::Created).await;
++
++    let error = harness
++        .add(source, target, DependencyCondition::AnyTerminal, 7)
++        .await
++        .expect_err("a future revision is stale");
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.dependencies(task).await.is_empty());
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        0
++    );
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn missing_runs_are_not_found() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let present = harness.seed_run(task, RunState::Created).await;
++    let absent = RunId::new(harness.ids.as_ref());
++
++    let missing_target = harness
++        .add(present, absent, DependencyCondition::AnyTerminal, 0)
++        .await
++        .expect_err("the target must exist");
++    assert_eq!(missing_target.code(), ErrorCode::NotFound);
++    assert_eq!(missing_target.retry_class(), RetryClass::Never);
++
++    let missing_source = harness
++        .add(absent, present, DependencyCondition::AnyTerminal, 0)
++        .await
++        .expect_err("the source must exist");
++    assert_eq!(missing_source.code(), ErrorCode::NotFound);
++    assert_eq!(missing_source.retry_class(), RetryClass::Never);
++
++    assert!(harness.dependencies(task).await.is_empty());
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test]
++async fn unspecified_condition_is_rejected() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let source = harness.seed_run(task, RunState::Created).await;
++    let target = harness.seed_run(task, RunState::Created).await;
++
++    let error = harness
++        .add(source, target, DependencyCondition::Unspecified, 0)
++        .await
++        .expect_err("an unspecified condition is rejected");
++
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(harness.dependencies(task).await.is_empty());
++    assert!(harness.events().await.is_empty());
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn opposite_edge_race_commits_at_most_one() {
++    let harness = Arc::new(Harness::new().await);
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let left = harness.seed_run(task, RunState::Created).await;
++    let right = harness.seed_run(task, RunState::Created).await;
++
++    let barrier = Arc::new(Barrier::new(2));
++    let mut writers = Vec::new();
++    for (source, target) in [(left, right), (right, left)] {
++        let harness = Arc::clone(&harness);
++        let barrier = Arc::clone(&barrier);
++        writers.push(tokio::spawn(async move {
++            barrier.wait().await;
++            harness
++                .add(source, target, DependencyCondition::AnyTerminal, 0)
++                .await
++        }));
++    }
++
++    let mut committed = 0;
++    let mut rejected = 0;
++    for writer in writers {
++        match writer.await.expect("writer joins") {
++            Ok(()) => committed += 1,
++            Err(error) => {
++                assert_eq!(error.code(), ErrorCode::Conflict);
++                assert_eq!(error.retry_class(), RetryClass::Never);
++                rejected += 1;
++            }
++        }
++    }
++    assert_eq!(committed, 1, "at most one of the opposite pair commits");
++    assert_eq!(rejected, 1);
++
++    let dependencies = harness.dependencies(task).await;
++    assert_eq!(dependencies.len(), 1);
++    assert!(
++        (dependencies[0].source_run_id == left && dependencies[0].target_run_id == right)
++            || (dependencies[0].source_run_id == right && dependencies[0].target_run_id == left),
++        "the surviving edge is one of the racing pair"
++    );
++    assert_eq!(
++        harness
++            .head(task)
++            .await
++            .expect("head present")
++            .graph_revision,
++        1
++    );
++    assert_eq!(harness.events().await.len(), 1);
++    harness.assert_acyclic(&[left, right]).await;
++}
++
++#[tokio::test]
++async fn descendants_follow_parent_linkage_without_an_ancestry_table() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let root = harness.seed_run(task, RunState::Created).await;
++    let child = harness.seed_child(task, root).await;
++    let grandchild = harness.seed_child(task, child).await;
++    let sibling = harness.seed_child(task, root).await;
++
++    harness
++        .add(child, sibling, DependencyCondition::AnyTerminal, 0)
++        .await
++        .expect("a dependency edge does not create ancestry");
++
++    assert_eq!(
++        harness.descendants(root).await.expect("descendants walk"),
++        vec![child, sibling, grandchild],
++        "descendants derive from runs.parent_run_id, dependency edges do not add children"
++    );
++    assert!(
++        harness
++            .descendants(grandchild)
++            .await
++            .expect("leaf walk")
++            .is_empty()
++    );
++
++    let absent = RunId::new(harness.ids.as_ref());
++    let error = harness
++        .descendants(absent)
++        .await
++        .expect_err("unknown roots are not found");
++    assert_eq!(error.code(), ErrorCode::NotFound);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++}
++
++#[tokio::test]
++async fn second_task_descendants_do_not_leak_across_task_boundaries() {
++    let harness = Harness::new().await;
++    let left_task = TaskId::new(harness.ids.as_ref());
++    let right_task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(left_task).await;
++    harness.seed_task(right_task).await;
++    let root = harness.seed_run(left_task, RunState::Created).await;
++    let child = harness.seed_child(left_task, root).await;
++    let _elsewhere = harness.seed_run(right_task, RunState::Created).await;
++
++    assert_eq!(
++        harness.descendants(root).await.expect("descendants walk"),
++        vec![child]
++    );
++}
++
++proptest! {
++    #![proptest_config(ProptestConfig::with_cases(48))]
++    #[test]
++    fn sequential_inserts_keep_the_graph_acyclic(
++        pairs in prop::collection::vec((0u8..5u8, 0u8..5u8), 0..24),
++    ) {
++        let runtime = tokio::runtime::Builder::new_multi_thread()
++            .worker_threads(2)
++            .enable_time()
++            .build()
++            .expect("test runtime builds");
++        runtime.block_on(async move {
++            let harness = Harness::new().await;
++            let task = TaskId::new(harness.ids.as_ref());
++            harness.seed_task(task).await;
++            let mut runs = Vec::new();
++            for _ in 0..5 {
++                runs.push(harness.seed_run(task, RunState::Created).await);
++            }
++
++            for (source_index, target_index) in pairs {
++                let source = runs[source_index as usize];
++                let target = runs[target_index as usize];
++                let mut txn = harness.write().await;
++                let expected = txn
++                    .graph()
++                    .get_head(task)
++                    .await
++                    .expect("head read")
++                    .expect("head present")
++                    .graph_revision;
++                let result = add_dependency(
++                    txn.as_mut(),
++                    source,
++                    target,
++                    DependencyCondition::CompletedSuccessfully,
++                    expected,
++                    SEED_MS,
++                )
++                .await;
++                match result {
++                    Ok(()) => txn.commit().await.expect("edge commits"),
++                    Err(error) => {
++                        assert_eq!(error.retry_class(), RetryClass::Never);
++                        txn.rollback().await.expect("edge rolls back");
++                    }
++                }
++            }
++
++            let dependencies = harness.dependencies(task).await;
++            let head = harness
++                .head(task)
++                .await
++                .expect("head present")
++                .graph_revision;
++            assert_eq!(
++                dependencies.len() as u64,
++                head,
++                "each committed edge advances the head exactly once"
++            );
++            harness.assert_acyclic(&runs).await;
++        });
++    }
++}
