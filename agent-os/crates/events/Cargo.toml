@@ -9,6 +9,7 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
+prost.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true

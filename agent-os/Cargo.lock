@@ -420,6 +420,7 @@ dependencies = [
  "errors",
  "kernel-store",
  "kernel-store-sqlite",
+ "prost",
  "serde",
  "serde_yaml",
  "tempfile",
