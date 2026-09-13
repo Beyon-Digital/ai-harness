@@ -8,3 +8,6 @@ publish.workspace = true
 [dependencies]
 observability.workspace = true
 tokio.workspace = true
+errors.workspace = true
+events.workspace = true
+kernel-store.workspace = true

@@ -9,3 +9,4 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 events.workspace = true
+async-trait.workspace = true

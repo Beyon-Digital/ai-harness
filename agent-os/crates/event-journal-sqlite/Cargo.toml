@@ -10,3 +10,9 @@ domain.workspace = true
 errors.workspace = true
 event-journal.workspace = true
 events.workspace = true
+async-trait.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
