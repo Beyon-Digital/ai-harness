@@ -113,8 +113,8 @@
 
 ### Task CMD-001B: The command coordinator
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-cmd001b
 - depends_on: CMD-001A
 - files: `agent-os/crates/command-coordinator/src/lib.rs`, `agent-os/crates/command-coordinator/src/envelope.rs`, `agent-os/crates/command-coordinator/src/handler.rs`, `agent-os/crates/command-coordinator/tests/coordinator.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, R2.1, R2.2, R2.3, R2.4, R2.5, R3.1, R3.2, R3.3, R3.4, R4.1, R4.2, N1, P1

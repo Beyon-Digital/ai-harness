@@ -1,0 +1,107 @@
+diff --git a/agent-os/crates/command-coordinator/src/lib.rs b/agent-os/crates/command-coordinator/src/lib.rs
+index 114c7af..ba4c505 100644
+--- a/agent-os/crates/command-coordinator/src/lib.rs
++++ b/agent-os/crates/command-coordinator/src/lib.rs
+@@ -78,21 +78,24 @@ impl CommandCoordinator {
+     /// Fresh commands commit their mutations, staged outbox events, and an
+     /// `ok` idempotency record atomically. An identical replay returns the
+     /// stored outcome without touching state; a differing digest is a
+     /// `Conflict`. The `command.before_commit` fault point rolls back, and
+     /// `command.after_commit` reports `Unavailable` after a durable commit.
+     pub async fn execute(&self, envelope: CommandEnvelope) -> errors::Result<CommandOutcome> {
+         let handler = self.registry.get(&envelope.command_type).ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::InvalidArgument,
+                 RetryClass::Never,
+-                "command_type is not registered in the coordinator",
++                format!(
++                    "command_type {:?} is not registered in the coordinator",
++                    envelope.command_type
++                ),
+             )
+         })?;
+ 
+         envelope.validate(self.clock.now_unix_ms())?;
+ 
+         let context = CommandContext {
+             command_id: envelope.command_id,
+             principal_id: envelope.principal_id,
+             actor_id: envelope.actor_id,
+             device_id: envelope.device_id,
+diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
+index 79b7279..fb79a32 100644
+--- a/agent-os/crates/command-coordinator/tests/coordinator.rs
++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
+@@ -246,31 +246,40 @@ async fn fresh_command_commits_rows_outbox_and_idempotency() {
+     assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
+     assert_eq!(harness.handler.calls(), 1);
+ }
+ 
+ #[tokio::test]
+ async fn identical_replay_returns_the_stored_outcome_without_changes() {
+     let harness = harness().await;
+     let envelope = envelope(TEST_COMMAND, digest(0xa2));
+ 
+     let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
+-    let before = harness.observe(&envelope).await;
+-
+-    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
+-
+-    assert_eq!(replayed, first);
++    let mut observation = harness.observe(&envelope).await;
++
++    for replay_index in 0..3 {
++        let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
++        assert_eq!(
++            replayed, first,
++            "replay {replay_index} returned a different outcome"
++        );
++        let next = harness.observe(&envelope).await;
++        assert_eq!(
++            next, observation,
++            "replay {replay_index} changed persisted state"
++        );
++        observation = next;
++    }
+     assert_eq!(
+         harness.handler.calls(),
+         1,
+         "replay must not run the handler"
+     );
+-    assert_eq!(harness.observe(&envelope).await, before);
+ }
+ 
+ #[tokio::test]
+ async fn different_digest_for_the_same_key_is_a_conflict() {
+     let harness = harness().await;
+     let envelope = envelope(TEST_COMMAND, digest(0xb1));
+     harness.coordinator.execute(envelope.clone()).await.unwrap();
+     let before = harness.observe(&envelope).await;
+ 
+     let mut conflicting = envelope.clone();
+@@ -385,20 +394,25 @@ async fn unknown_command_type_rejects_without_rows() {
+     let envelope = envelope("session.unknown", digest(0xf1));
+ 
+     let error = harness
+         .coordinator
+         .execute(envelope.clone())
+         .await
+         .unwrap_err();
+ 
+     assert_eq!(error.code(), ErrorCode::InvalidArgument);
+     assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        error.message().contains("session.unknown"),
++        "message must name the unregistered command_type: {}",
++        error.message()
++    );
+     assert_eq!(harness.handler.calls(), 0);
+     let observed = harness.observe(&envelope).await;
+     assert!(observed.session.is_none());
+     assert!(observed.idempotency.is_none());
+     assert!(observed.unpublished.is_empty());
+ }
+ 
+ #[tokio::test]
+ async fn duplicate_registration_is_a_conflict() {
+     let clock = Arc::new(TestClock::new(SEED_MS));

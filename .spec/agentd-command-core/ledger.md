@@ -12,3 +12,7 @@
 - 2026-09-12T23:35:17Z CMD-001A -> review (@agent-cmd001a)
 - 2026-09-12T23:39:14Z CMD-001A -> done (@agent-cmd001a)
 - 2026-09-12T23:39:14Z CMD-000 and CMD-001A approved; CMD-001B dispatched as the final implementation task.
+- 2026-09-12T23:39:27Z CMD-001B -> claimed (@agent-cmd001b)
+- 2026-09-12T23:39:28Z CMD-001B -> in_progress (@agent-cmd001b)
+- 2026-09-12T23:58:48Z CMD-001B -> review (@agent-cmd001b)
+- 2026-09-13T00:19:08Z CMD-001B -> done (@agent-cmd001b)
