@@ -1,0 +1,164 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 8ea624f..59dba39 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -32,10 +32,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "agentd"
+ version = "0.1.0"
+ dependencies = [
++ "errors",
++ "events",
++ "kernel-store",
+  "observability",
+  "tokio",
+ ]
+ 
+ [[package]]
+@@ -377,23 +380,28 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-journal"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "events",
+ ]
+ 
+ [[package]]
+ name = "event-journal-sqlite"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "event-journal",
+  "events",
++ "sqlx",
++ "tempfile",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "event-listener"
+ version = "5.4.2"
+@@ -409,10 +417,16 @@ name = "events"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "serde",
++ "serde_yaml",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "fastrand"
+ version = "2.5.0"
+@@ -1608,10 +1622,23 @@ dependencies = [
+  "itoa",
+  "ryu",
+  "serde",
+ ]
+ 
++[[package]]
++name = "serde_yaml"
++version = "0.9.34+deprecated"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
++dependencies = [
++ "indexmap",
++ "itoa",
++ "ryu",
++ "serde",
++ "unsafe-libyaml",
++]
++
+ [[package]]
+ name = "sha1"
+ version = "0.10.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+@@ -2175,10 +2202,16 @@ dependencies = [
+ name = "unicode-properties"
+ version = "0.1.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+ 
++[[package]]
++name = "unsafe-libyaml"
++version = "0.2.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
++
+ [[package]]
+ name = "url"
+ version = "2.5.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+diff --git a/agent-os/crates/agentd/Cargo.toml b/agent-os/crates/agentd/Cargo.toml
+index 433d90d..e23117a 100644
+--- a/agent-os/crates/agentd/Cargo.toml
++++ b/agent-os/crates/agentd/Cargo.toml
+@@ -6,5 +6,8 @@ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ observability.workspace = true
+ tokio.workspace = true
++errors.workspace = true
++events.workspace = true
++kernel-store.workspace = true
+diff --git a/agent-os/crates/event-journal-sqlite/Cargo.toml b/agent-os/crates/event-journal-sqlite/Cargo.toml
+index 5ada6fa..af66149 100644
+--- a/agent-os/crates/event-journal-sqlite/Cargo.toml
++++ b/agent-os/crates/event-journal-sqlite/Cargo.toml
+@@ -8,5 +8,11 @@ publish.workspace = true
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ event-journal.workspace = true
+ events.workspace = true
++async-trait.workspace = true
++sqlx.workspace = true
++tokio.workspace = true
++
++[dev-dependencies]
++tempfile.workspace = true
+diff --git a/agent-os/crates/event-journal/Cargo.toml b/agent-os/crates/event-journal/Cargo.toml
+index 270fb89..d400344 100644
+--- a/agent-os/crates/event-journal/Cargo.toml
++++ b/agent-os/crates/event-journal/Cargo.toml
+@@ -7,5 +7,6 @@ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ events.workspace = true
++async-trait.workspace = true
+diff --git a/agent-os/crates/events/Cargo.toml b/agent-os/crates/events/Cargo.toml
+index 6f02b0a..4d38950 100644
+--- a/agent-os/crates/events/Cargo.toml
++++ b/agent-os/crates/events/Cargo.toml
+@@ -7,5 +7,14 @@ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
++serde.workspace = true
++serde_yaml.workspace = true
++tokio.workspace = true
++
++[dev-dependencies]
++kernel-store-sqlite.workspace = true
++tempfile.workspace = true
++testkit.workspace = true
++tokio.workspace = true

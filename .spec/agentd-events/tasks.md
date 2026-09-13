@@ -29,8 +29,8 @@
 
 ### Task EVT-000: Declare events-module dependencies
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-evt000
 - depends_on: none
 - files: `agent-os/crates/events/Cargo.toml`, `agent-os/crates/event-journal/Cargo.toml`, `agent-os/crates/event-journal-sqlite/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`
 - requirements: N3, G1, G2
