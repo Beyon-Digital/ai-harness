@@ -279,8 +279,8 @@ async fn cancel_transitions_the_root_and_nested_descendants() {
         "only the root's epoch moves"
     );
     assert_eq!(
-        created_row.run_revision, 2,
-        "the table's only path to Cancelled"
+        created_row.run_revision, 1,
+        "the cancellation-only edge commits once"
     );
     assert_eq!(
         created_row.terminal_reason.as_deref(),
@@ -421,7 +421,7 @@ async fn duplicate_cancel_advances_the_epoch_and_leaves_terminals_untouched() {
 
     let child_row = harness.run(child).await.expect("child persists");
     assert_eq!(child_row.state, RunState::Cancelled);
-    assert_eq!(child_row.run_revision, 2, "terminal runs are untouched");
+    assert_eq!(child_row.run_revision, 1, "terminal runs are untouched");
 
     let events = harness.events().await;
     assert_eq!(events_of(&events, "CancellationEpochAdvanced").len(), 2);

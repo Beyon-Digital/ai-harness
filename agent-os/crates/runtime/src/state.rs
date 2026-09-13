@@ -19,11 +19,16 @@ pub const REASON_CANCELLED: &str = "cancelled";
 pub const REASON_CANCELLATION_REQUESTED: &str = "cancellation_requested";
 
 /// Returns true when the normative transition table permits `from -> to`.
+///
+/// `Created -> Cancelled` is cancellation-only: a never-started run has no
+/// cleanup to drain and no resolved environment, so the cancellation service
+/// moves it straight to `Cancelled` rather than fabricating a `Ready`.
 pub const fn allows(from: RunState, to: RunState) -> bool {
     use RunState::*;
     matches!(
         (from, to),
         (Created, Ready)
+            | (Created, Cancelled) // cancellation of a never-started run
             | (Ready, Running)
             | (Ready, Cancelled)
             | (Running, WaitingTool)

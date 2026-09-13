@@ -55,6 +55,7 @@ fn normative_allows(from: RunState, to: RunState) -> bool {
     matches!(
         (from, to),
         (Created, Ready)
+            | (Created, Cancelled) // cancellation of a never-started run
             | (Ready, Running)
             | (Ready, Cancelled)
             | (Running, WaitingTool)
@@ -299,7 +300,7 @@ async fn every_allowed_pair_commits_once_and_persists_the_target() {
             assert_eq!(persisted.terminal_reason.as_deref(), expected_reason);
         }
     }
-    assert_eq!(checked, 24, "the normative table has 24 allowed pairs");
+    assert_eq!(checked, 25, "the normative table has 25 allowed pairs");
 }
 
 #[tokio::test]
@@ -326,6 +327,31 @@ async fn every_forbidden_pair_conflicts_without_mutation() {
             assert_eq!(persisted.terminal_reason, None);
         }
     }
+}
+
+#[tokio::test]
+async fn cancellation_moves_a_never_started_run_directly_to_cancelled() {
+    let harness = Harness::new().await;
+    let run_id = RunId::new(&harness.ids);
+    harness.seed_run(run_id, RunState::Created).await;
+
+    let updated = harness
+        .attempt(run_id, 0, RunState::Cancelled, None)
+        .await
+        .expect("Created -> Cancelled commits for cancellation");
+
+    assert_eq!(updated.state, RunState::Cancelled);
+    assert_eq!(
+        updated.run_revision, 1,
+        "the cancellation-only edge bumps the revision once"
+    );
+    let persisted = harness.run(run_id).await;
+    assert_eq!(persisted.state, RunState::Cancelled);
+    assert_eq!(persisted.run_revision, 1);
+    assert_eq!(
+        persisted.terminal_reason.as_deref(),
+        Some(state::REASON_CANCELLED)
+    );
 }
 
 #[tokio::test]

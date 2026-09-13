@@ -45,8 +45,8 @@
     },
     {
       "path": "SOURCE_CORRECTIONS.md",
-      "bytes": 3613,
-      "sha256": "ab58f89f22fddde7092d046425da6e36901c5c007e6b3b474a8acdf550159061"
+      "bytes": 4215,
+      "sha256": "9d3c6f33cefaf3e8aedd4cd1215596ec7a4c877d60b59229c2603fe36a5a6d4d"
     },
     {
       "path": "TASK_STATUS.yaml",
@@ -435,8 +435,8 @@
     },
     {
       "path": "specs/runtime-manager.md",
-      "bytes": 1385,
-      "sha256": "de71ccaa4c07fab89c0712b844b473c5b6b9a667fabf317887076b272056efae"
+      "bytes": 1457,
+      "sha256": "aa33696a879783646326cee7ccc767ab987c06203c0845b045124a28da441b04"
     },
     {
       "path": "specs/sandbox.md",

@@ -50,3 +50,16 @@ domain mirror, catalog, schema, and every Rust usage:
 
 The canonical repo-root `spec/events/event.proto` intentionally keeps the old
 names for now; a future canonical-tree update should adopt this correction.
+
+## Transition table correction
+
+`specs/runtime-manager.md` allowed `Created -> Ready` as the only edge out of
+`Created`, but cancellation of a never-started run has no cleanup to drain and
+no persisted `ResolvedRunEnvironment`, so it must reach `Cancelled` without
+fabricating a `Ready`. The pack's state table now reads
+`Created -> Ready | Cancelled`, where `Created -> Cancelled` is
+cancellation-only.
+
+The runtime implementation and its state-machine suite mirror this correction
+(`runtime/src/state.rs`, `runtime/tests/state_machine.rs`); the repo-root
+canonical runtime-manager doc is unchanged.

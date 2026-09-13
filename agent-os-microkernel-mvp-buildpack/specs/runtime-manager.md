@@ -8,7 +8,7 @@
 Allowed transitions:
 
 ```text
-Created -> Ready
+Created -> Ready | Cancelled   # Cancelled is cancellation-only, for a never-started run
 Ready -> Running | Cancelled
 Running -> WaitingTool | WaitingChild | WaitingHuman | Suspended | Cancelling | Completed | Failed
 WaitingTool -> Running | Cancelling | Failed

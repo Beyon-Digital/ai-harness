@@ -759,6 +759,6 @@ fn register_handlers_registers_claim_ready_run() {
         },
     )
     .expect("runtime handlers register");
-    assert!(registry.len() >= 4);
+    assert_eq!(registry.len(), 5);
     assert!(registry.get(CMD_CLAIM_READY_RUN).is_some());
 }

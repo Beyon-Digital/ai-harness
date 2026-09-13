@@ -42,12 +42,12 @@ pub struct CancellationReport {
 ///
 /// `cancel_subtree` owns the epoch CAS, the epoch event, and the ancestry walk;
 /// this service applies the RUN-001 table with [`transition`] so revisions and
-/// terminal reasons stay authoritative. A `Created` run reaches `Cancelled`
-/// through the table's only path, `Created -> Ready -> Cancelled`, because the
-/// table does not admit `Created -> Cancelled` directly; the intermediate hop
-/// is an artifact of that gap and stages no event of its own (D6). The
-/// committed revision increments once per transition plus once for the epoch
-/// advance (R5.4).
+/// terminal reasons stay authoritative. Never-started runs cancel directly:
+/// `Created -> Cancelled` is the table's cancellation-only edge (it avoids a
+/// phantom `Ready` without a resolved environment) and `Ready -> Cancelled` has
+/// always been allowed, so every changed run commits exactly one transition.
+/// The committed revision increments once per transition plus once for the
+/// epoch advance (R5.4).
 pub async fn cancel(
     txn: &mut dyn KernelTxn,
     run_id: RunId,
@@ -66,28 +66,7 @@ pub async fn cancel(
             )
         })?;
         let (final_row, event_type) = match row.state {
-            RunState::Created => {
-                let ready = transition(
-                    txn,
-                    candidate,
-                    row.run_revision,
-                    RunState::Ready,
-                    None,
-                    now_ms,
-                )
-                .await?;
-                let cancelled = transition(
-                    txn,
-                    candidate,
-                    ready.run_revision,
-                    RunState::Cancelled,
-                    terminal_reason(reason),
-                    now_ms,
-                )
-                .await?;
-                (cancelled, "RunCancelled")
-            }
-            RunState::Ready => (
+            RunState::Created | RunState::Ready => (
                 transition(
                     txn,
                     candidate,

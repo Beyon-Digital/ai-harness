@@ -71,6 +71,12 @@ pub async fn cancel_subtree(
 
 /// Returns true when cancellation still has to move the run: every non-terminal
 /// state except `Cancelling`, which is already draining (R5.2, R5.5).
+///
+/// The eligible set deliberately mirrors the cancellation edges of
+/// `runtime/src/state.rs`, which stays the transition authority and is applied
+/// by `runtime::cancel`; the mirror lives here only to respect the crate
+/// direction (`runtime` depends on `run-graph`, never the reverse), and it must
+/// move with the table's cancellation edges.
 const fn is_eligible(state: RunState) -> bool {
     matches!(
         state,
