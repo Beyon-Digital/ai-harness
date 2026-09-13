@@ -207,6 +207,41 @@ async fn duplicate_position_with_a_different_event_is_a_conflict() {
 }
 
 #[tokio::test]
+async fn same_position_and_event_id_with_different_bytes_is_a_conflict() {
+    let (_dir, _path, journal) = open_journal().await;
+    let key = run_key();
+    let original = envelope(&key, 1, 0x01);
+    journal
+        .append(&key, 0, std::slice::from_ref(&original))
+        .await
+        .expect("first append");
+
+    let mutated = EventBuilder::new(EVENT_TYPE, 1, key.clone())
+        .event_id(original.event_id)
+        .sequence(1)
+        .occurred_at_ms(original.occurred_unix_ms + 1)
+        .sensitivity(SensitivityClass::Internal)
+        .retention(RetentionClass::Standard)
+        .payload(vec![0xfe])
+        .build(&policy())
+        .expect("mutated envelope builds");
+    assert_ne!(mutated.to_bytes(), original.to_bytes());
+
+    let error = journal
+        .append(&key, 0, std::slice::from_ref(&mutated))
+        .await
+        .expect_err("same event id and position with different bytes conflicts");
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+
+    let read = journal
+        .read_stream(&key, 0, 10)
+        .await
+        .expect("read succeeds");
+    assert_eq!(read.events, vec![original]);
+}
+
+#[tokio::test]
 async fn append_rejects_a_batch_that_would_leave_a_gap() {
     let (_dir, _path, journal) = open_journal().await;
     let key = run_key();
@@ -354,9 +389,16 @@ async fn concurrent_same_position_appends_have_exactly_one_winner() {
     assert_eq!(read.events[0].sequence, 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn append_waits_out_a_held_writer_lock() {
-    let (_dir, path, journal) = open_journal().await;
+#[tokio::test]
+async fn append_fails_retry_safely_while_the_writer_lock_is_held() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("events.db");
+    let journal = SqliteEventJournal::open(JournalConfig {
+        path: path.clone(),
+        busy_timeout_ms: 1,
+    })
+    .await
+    .expect("journal opens");
     let key = run_key();
 
     let mut blocker = SqliteConnection::connect_with(
@@ -371,25 +413,48 @@ async fn append_waits_out_a_held_writer_lock() {
         .await
         .expect("blocker takes the writer lock");
 
-    let handle = tokio::spawn({
-        let journal = Arc::clone(&journal);
-        let key = key.clone();
-        let pending = envelope(&key, 1, 0x01);
-        async move { journal.append(&key, 0, &[pending]).await }
-    });
+    let error = journal
+        .append(&key, 0, &[envelope(&key, 1, 0x01)])
+        .await
+        .expect_err("append cannot begin while the writer lock is held");
+    assert_eq!(error.code(), ErrorCode::Unavailable);
+    assert_eq!(error.retry_class(), RetryClass::Safe);
+    let read = journal
+        .read_stream(&key, 0, 10)
+        .await
+        .expect("read succeeds");
+    assert!(read.events.is_empty());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !handle.is_finished(),
-        "append must wait on the writer lock instead of failing fast"
-    );
-
-    sqlx::query("COMMIT")
+    sqlx::query("ROLLBACK")
         .execute(&mut blocker)
         .await
         .expect("blocker releases the writer lock");
-    let result = handle.await.expect("append task joins");
-    assert!(result.is_ok(), "append succeeds after the lock clears");
+    journal
+        .append(&key, 0, &[envelope(&key, 1, 0x01)])
+        .await
+        .expect("append succeeds once the writer lock clears");
+}
+
+#[tokio::test]
+async fn open_bootstraps_an_existing_but_empty_database_file() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("events.db");
+    // Simulate a crash between file creation and schema bootstrap.
+    fs::write(&path, b"").expect("empty file");
+
+    let journal = SqliteEventJournal::open(journal_config(&path))
+        .await
+        .expect("journal opens and repairs the empty file");
+    let key = run_key();
+    journal
+        .append(&key, 0, &[envelope(&key, 1, 0x01)])
+        .await
+        .expect("append succeeds after repair");
+    let read = journal
+        .read_stream(&key, 0, 10)
+        .await
+        .expect("read succeeds");
+    assert_eq!(read.events.len(), 1);
 }
 
 #[tokio::test]
@@ -467,13 +532,26 @@ async fn errors_never_render_payload_bytes() {
         "debug leaked payload bytes"
     );
 
-    let stale = envelope(&key, 2, 0x02);
+    let gap_key = run_key();
+    let canary_at_a_gap = EventBuilder::new(EVENT_TYPE, 1, gap_key.clone())
+        .sequence(2)
+        .occurred_at_ms(1_700_000_000_002)
+        .sensitivity(SensitivityClass::Internal)
+        .retention(RetentionClass::Standard)
+        .payload(CANARY.as_bytes().to_vec())
+        .build(&policy())
+        .expect("canary envelope builds");
     let error = journal
-        .append(&key, 0, &[stale])
+        .append(&gap_key, 1, &[canary_at_a_gap])
         .await
-        .expect_err("stale expectation");
+        .expect_err("the gap is rejected while the canary envelope is in hand");
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
     assert!(
         !error.to_string().contains(CANARY),
         "display leaked payload bytes"
+    );
+    assert!(
+        !format!("{error:?}").contains(CANARY),
+        "debug leaked payload bytes"
     );
 }

@@ -69,7 +69,7 @@ impl SqliteEventJournal {
                 )
             })?;
         prepare_runtime_dir(runtime_dir)?;
-        let created = prepare_database_file(&path)?;
+        prepare_database_file(&path)?;
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(false)
@@ -77,9 +77,9 @@ impl SqliteEventJournal {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true);
-        if created {
-            bootstrap_schema(&options).await?;
-        }
+        // Re-checked on every open so a crash between file creation and
+        // bootstrap still yields a usable journal.
+        ensure_schema(&options).await?;
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -279,6 +279,11 @@ async fn verify_recorded_batch(
     Ok(())
 }
 
+/// Creates `dir` and re-asserts mode `0700`.
+///
+/// Precondition: `dir` must be the dedicated runtime root for the journal
+/// (normally `events.db`'s parent). This function chmods its argument, so
+/// callers must never pass a shared or user-owned directory.
 fn prepare_runtime_dir(dir: &Path) -> errors::Result<()> {
     fs::create_dir_all(dir).map_err(|source| {
         KernelError::new(
@@ -298,15 +303,23 @@ fn prepare_runtime_dir(dir: &Path) -> errors::Result<()> {
     })
 }
 
-fn prepare_database_file(path: &Path) -> errors::Result<bool> {
-    let created = match fs::OpenOptions::new()
+fn prepare_database_file(path: &Path) -> errors::Result<()> {
+    match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
     {
-        Ok(_) => true,
-        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Ok(_) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !path.is_file() {
+                return Err(KernelError::new(
+                    ErrorCode::FailedPrecondition,
+                    RetryClass::Never,
+                    "event journal path is not a regular file",
+                ));
+            }
+        }
         Err(source) => {
             return Err(KernelError::new(
                 ErrorCode::Unavailable,
@@ -315,13 +328,6 @@ fn prepare_database_file(path: &Path) -> errors::Result<bool> {
             )
             .with_source(source));
         }
-    };
-    if !created && !path.is_file() {
-        return Err(KernelError::new(
-            ErrorCode::FailedPrecondition,
-            RetryClass::Never,
-            "event journal path is not a regular file",
-        ));
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
         KernelError::new(
@@ -330,37 +336,56 @@ fn prepare_database_file(path: &Path) -> errors::Result<bool> {
             "event journal file permissions could not be set",
         )
         .with_source(source)
-    })?;
-    Ok(created)
+    })
 }
 
-async fn bootstrap_schema(options: &SqliteConnectOptions) -> errors::Result<()> {
+/// Applies the embedded inception schema when `events.db` does not yet carry
+/// the `events` table.
+///
+/// The schema file is executed verbatim, so existence is checked first; this
+/// also repairs a file left empty by a crash between creation and bootstrap.
+async fn ensure_schema(options: &SqliteConnectOptions) -> errors::Result<()> {
     let mut connection = SqliteConnection::connect_with(options)
         .await
         .map_err(|source| {
             KernelError::new(
                 ErrorCode::Unavailable,
                 RetryClass::Safe,
-                "event journal schema bootstrap connection failed",
+                "event journal schema connection failed",
             )
             .with_source(source)
         })?;
-    sqlx::raw_sql(SCHEMA)
-        .execute(&mut connection)
-        .await
-        .map_err(|source| {
-            KernelError::new(
-                ErrorCode::Unavailable,
-                RetryClass::Safe,
-                "event journal schema bootstrap failed",
-            )
-            .with_source(source)
-        })?;
+    let present: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'",
+    )
+    .fetch_optional(&mut connection)
+    .await
+    .map_err(|source| {
+        KernelError::new(
+            ErrorCode::Unavailable,
+            RetryClass::Safe,
+            "event journal schema inventory is unreadable",
+        )
+        .with_source(source)
+    })?;
+    if present.is_none() {
+        sqlx::raw_sql(SCHEMA)
+            .execute(&mut connection)
+            .await
+            .map_err(|source| {
+                KernelError::new(
+                    ErrorCode::Unavailable,
+                    RetryClass::Safe,
+                    "event journal schema bootstrap failed",
+                )
+                .with_source(source)
+            })?;
+    }
     connection.close().await.map_err(|source| {
         KernelError::new(
             ErrorCode::Unavailable,
             RetryClass::Safe,
-            "event journal schema bootstrap connection failed to close",
+            "event journal schema connection failed to close",
         )
         .with_source(source)
     })
