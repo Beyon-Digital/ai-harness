@@ -19,7 +19,7 @@
 | Component | Responsibility | New or existing | Path |
 |---|---|---|---|
 | Primitives | Envelope builder, stream keys, cursors, classification policy | new fill of stubs | `agent-os/crates/events/src/{envelope,stream,cursor}.rs` |
-| Journal port | Append/read contract with expected-sequence semantics | new fill | `agent-os/crates/event-journal/src/lib.rs` |
+| Journal port | Append/read contract with expected-sequence semantics | new fill | `agent-os/crates/events/src/journal.rs`; `agent-os/crates/event-journal/src/lib.rs` re-exports it |
 | Journal SQLite | `events.db` bootstrap, append rules, reads | new fill | `agent-os/crates/event-journal-sqlite/src/lib.rs` |
 | Dispatcher | Outbox scan, journal-first append, publication marks, bus hand-off | new | `agent-os/crates/events/src/dispatcher.rs` |
 | Live bus | Bounded durable delivery with explicit lag; lossy ephemeral channel | new | `agent-os/crates/events/src/live_bus.rs` |
@@ -47,7 +47,7 @@
 **Failure path — journal unavailable**
 
 1. `append` returns `Unavailable` with retry-safe classification.
-2. The dispatcher records the failure and returns an outcome with a non-zero backlog; no mark and no live delivery.
+2. The dispatcher returns the error; no mark and no live delivery, and the unpublished outbox rows remain visible as the backlog in the store.
 3. The worker retries with capped backoff; commands continue committing because they never touch the journal.
 
 **Failure path — slow subscriber**
@@ -124,7 +124,7 @@ impl EventEnvelope {
 }
 ```
 
-### event-journal port
+### events :: journal.rs (journal port)
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -340,7 +340,8 @@ Paths relative to `agent-os/` unless the pack path is explicit.
 | `crates/events/src/envelope.rs` | create | builder, policy, envelope codec | EVT-001 |
 | `crates/events/src/lib.rs` | modify | module declarations and re-exports | EVT-001, EVT-003, EVT-004 |
 | `crates/events/tests/primitives.rs` | create | round trips and validation tests | EVT-001 |
-| `crates/event-journal/src/lib.rs` | create | port types and trait | EVT-002 |
+| `crates/events/src/journal.rs` | create | port types and trait | EVT-002 |
+| `crates/event-journal/src/lib.rs` | create | re-export of the port types and trait from `events` | EVT-002 |
 | `crates/event-journal-sqlite/src/lib.rs` | create | SQLite journal | EVT-002 |
 | `crates/event-journal-sqlite/tests/journal.rs` | create | append/read suite | EVT-002 |
 | `crates/events/src/dispatcher.rs` | create | dispatcher | EVT-003 |

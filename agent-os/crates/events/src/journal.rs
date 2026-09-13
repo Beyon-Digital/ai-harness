@@ -50,7 +50,8 @@ pub trait EventJournalPort: Send + Sync {
     ///   batch to replay is a failed precondition.
     /// * A batch already recorded exactly (same event id, position, and
     ///   bytes) is an idempotent success with no write.
-    /// * A recorded position holding a different event id is a conflict.
+    /// * A recorded position holding a different event id, or different bytes
+    ///   under the same event id, is a conflict.
     fn append<'life0, 'life1, 'life2, 'async_trait>(
         &'life0 self,
         stream_key: &'life1 StreamKey,

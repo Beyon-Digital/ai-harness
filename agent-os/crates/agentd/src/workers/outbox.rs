@@ -87,7 +87,7 @@ impl OutboxWorker {
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
                 }
-                Err(_) => {}
+                Err(_) => backoff = INITIAL_BACKOFF,
             }
         }
     }

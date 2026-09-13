@@ -12,8 +12,8 @@ The MVP uses multiple crates for ownership and test boundaries while remaining o
 | `kernel-store` | `KernelStore` + transaction traits | SQLite details |
 | `kernel-store-sqlite` | SQLite schema/repositories/transactions | runtime policy |
 | `command-coordinator` | linearization/idempotency/atomic command orchestration | AI behavior |
-| `events` | event envelope, sequence/cursor helpers, live bus | persistent backend |
-| `event-journal` | journal port | SQLite details |
+| `events` | event envelope, sequence/cursor helpers, journal port, live bus | persistent backend |
+| `event-journal` | re-export of the journal port owned by `events` | SQLite details |
 | `event-journal-sqlite` | SQLite event projection | canonical runtime truth |
 | `message-queue` | queue port + in-memory adapter | canonical runtime truth |
 | `runtime` | run state machine, run fencing, recovery disposition | graph storage |

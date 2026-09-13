@@ -45,8 +45,8 @@
     },
     {
       "path": "SOURCE_CORRECTIONS.md",
-      "bytes": 2944,
-      "sha256": "3c281280b66ed70f12be267eb50e3ddc4bfd967afca70078384b141307236d6d"
+      "bytes": 3613,
+      "sha256": "ab58f89f22fddde7092d046425da6e36901c5c007e6b3b474a8acdf550159061"
     },
     {
       "path": "TASK_STATUS.yaml",
@@ -65,8 +65,8 @@
     },
     {
       "path": "architecture/crate-map.md",
-      "bytes": 3272,
-      "sha256": "bb90a6d7a7d9fc5e69035d6ec2f7477e7d757885533cec3ac48eb00d49e490fd"
+      "bytes": 3321,
+      "sha256": "1dd04166ad9cc916bc793da5a8377746b9f9eb3a50f9a083807aecc024a11f53"
     },
     {
       "path": "architecture/failure-model.md",

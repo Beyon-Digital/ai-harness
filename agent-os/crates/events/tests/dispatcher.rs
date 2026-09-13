@@ -1,9 +1,10 @@
 //! EVT-003 dispatcher integration tests.
 //!
 //! The dispatcher runs against a real `SqliteKernelStore` in a temp runtime
-//! root, a test-local in-memory journal with the idempotent append semantics
-//! of the SQLite journal, and a recorder `LiveSink`. Iterations are driven by
-//! direct `dispatch_once` calls; there are no sleeps.
+//! root. The crash-recovery cases use a real `SqliteEventJournal`; the other
+//! cases use a test-local in-memory journal with the idempotent append
+//! semantics of the SQLite journal. Iterations are driven by direct
+//! `dispatch_once` calls; there are no sleeps.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,6 +18,7 @@ use domain::provider::SystemIdProvider;
 use domain::security::{RetentionClass, SensitivityClass};
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
+use event_journal_sqlite::{JournalConfig, SqliteEventJournal};
 use events::dispatcher::{AFTER_JOURNAL_APPEND, DispatchOutcome, EventDispatcher, LiveSink};
 use events::journal::{AppendResult, EventJournalPort, ReadResult};
 use events::outbox::DraftEvent;
@@ -71,6 +73,24 @@ async fn open_store(dir: &TempDir) -> (Arc<SqliteKernelStore>, u64) {
     (Arc::new(store), fence.epoch.0)
 }
 
+async fn open_journal(dir: &TempDir) -> Arc<SqliteEventJournal> {
+    let journal = SqliteEventJournal::open(JournalConfig {
+        path: dir.path().join("journal").join("events.db"),
+        busy_timeout_ms: 5_000,
+    })
+    .await
+    .expect("journal opens");
+    Arc::new(journal)
+}
+
+async fn journal_rows(journal: &dyn EventJournalPort, stream: &StreamKey) -> Vec<EventEnvelope> {
+    journal
+        .read_stream(stream, 0, u32::MAX)
+        .await
+        .expect("journal read succeeds")
+        .events
+}
+
 async fn stage_events(
     store: &SqliteKernelStore,
     epoch: u64,
@@ -122,7 +142,7 @@ async fn unpublished(
 
 fn dispatcher(
     store: &Arc<SqliteKernelStore>,
-    journal: Arc<MemoryJournal>,
+    journal: Arc<dyn EventJournalPort>,
     sink: Arc<dyn LiveSink>,
     faults: Arc<ArmedFaults>,
     principal: PrincipalId,
@@ -373,7 +393,7 @@ async fn happy_path_appends_marks_and_delivers_in_order() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -439,12 +459,12 @@ async fn crash_after_append_reappends_without_duplicates() {
     let (store, epoch) = open_store(&dir).await;
     let principal = PrincipalId::new(&SystemIdProvider);
     let stream = run_stream(RUN_A);
-    let journal = Arc::new(MemoryJournal::new());
+    let journal = open_journal(&dir).await;
     let sink = Arc::new(RecorderSink::default());
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -472,7 +492,7 @@ async fn crash_after_append_reappends_without_duplicates() {
     assert!(faults.is_triggered(AFTER_JOURNAL_APPEND));
 
     assert_eq!(
-        journal.total_rows(),
+        journal_rows(&*journal, &stream).await.len(),
         3,
         "journal rows are durable before the crash point"
     );
@@ -499,10 +519,16 @@ async fn crash_after_append_reappends_without_duplicates() {
             backlog: 0,
         }
     );
+    let recovered = journal_rows(&*journal, &stream).await;
     assert_eq!(
-        journal.total_rows(),
+        recovered.len(),
         3,
         "idempotent re-append adds no duplicate rows"
+    );
+    assert_eq!(
+        recovered.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "recovered journal stays contiguous"
     );
     assert_eq!(sink.delivered().len(), 3, "recovery publishes every event");
     assert!(
@@ -518,12 +544,12 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
     let principal = PrincipalId::new(&SystemIdProvider);
     let stream_a = run_stream(RUN_A);
     let stream_b = run_stream(RUN_B);
-    let journal = Arc::new(MemoryJournal::new());
+    let journal = open_journal(&dir).await;
     let sink = Arc::new(RecorderSink::default());
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -553,12 +579,12 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
         .expect_err("the armed fault aborts after stream A");
     assert_unavailable(&error);
     assert_eq!(
-        journal.rows_for(&stream_a).len(),
+        journal_rows(&*journal, &stream_a).await.len(),
         2,
         "stream A is recorded before the fault"
     );
     assert!(
-        journal.rows_for(&stream_b).is_empty(),
+        journal_rows(&*journal, &stream_b).await.is_empty(),
         "stream B is not reached before the fault"
     );
 
@@ -584,7 +610,7 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
         }
     );
 
-    let rows_a = journal.rows_for(&stream_a);
+    let rows_a = journal_rows(&*journal, &stream_a).await;
     assert_eq!(
         rows_a.iter().map(|row| row.sequence).collect::<Vec<_>>(),
         vec![1, 2, 3],
@@ -595,13 +621,13 @@ async fn mixed_batch_recovery_reappends_only_the_unrecorded_suffix() {
         vec![event_id(0x70), event_id(0x71), event_id(0x72)],
         "the recorded prefix is not re-appended"
     );
-    let rows_b = journal.rows_for(&stream_b);
+    let rows_b = journal_rows(&*journal, &stream_b).await;
     assert_eq!(
         rows_b.iter().map(|row| row.sequence).collect::<Vec<_>>(),
         vec![1],
         "stream B is not blocked by stream A's recovery"
     );
-    assert_eq!(journal.total_rows(), 4, "no duplicate journal rows");
+    assert_eq!(rows_a.len() + rows_b.len(), 4, "no duplicate journal rows");
     assert!(
         unpublished(&store, epoch, principal).await.is_empty(),
         "every row is marked after recovery"
@@ -620,7 +646,7 @@ async fn unavailable_journal_grows_the_backlog_and_commands_still_commit() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -693,7 +719,7 @@ async fn multi_stream_backlog_keeps_per_stream_order() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -789,7 +815,7 @@ async fn no_sink_delivery_precedes_journal_acceptance() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -827,7 +853,7 @@ async fn empty_outbox_is_a_no_op() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,
@@ -860,7 +886,7 @@ async fn stale_epoch_rejects_the_iteration_before_any_append() {
     let faults = Arc::new(ArmedFaults::new());
     let dispatcher = dispatcher(
         &store,
-        Arc::clone(&journal),
+        Arc::clone(&journal) as Arc<dyn EventJournalPort>,
         Arc::clone(&sink) as Arc<dyn LiveSink>,
         Arc::clone(&faults),
         principal,

@@ -36,3 +36,17 @@ The following snapshot files existed but were previously undocumented:
 - `contracts/protocols/adapter_frames.proto`.
 
 The repo-root canonical sources under `spec/` are unchanged.
+
+## Classification vocabulary reconciliation
+
+The inception event contract used a sensitivity value named `PRIVATE` and four
+retention values (`EPHEMERAL`, `SESSION`, `AUDIT`, `DURABLE`). This pack
+reconciles the classification vocabulary to one spelling across the proto,
+domain mirror, catalog, schema, and every Rust usage:
+
+- `Sensitivity.PRIVATE` is renamed `Sensitivity.CONFIDENTIAL`.
+- Retention narrows to three values, `EPHEMERAL` (1), `STANDARD` (2), and
+  `AUDIT` (3), removing `SESSION` and `DURABLE`.
+
+The canonical repo-root `spec/events/event.proto` intentionally keeps the old
+names for now; a future canonical-tree update should adopt this correction.
