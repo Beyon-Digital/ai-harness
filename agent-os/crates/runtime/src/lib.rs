@@ -3,8 +3,11 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_spec;
+pub mod claim;
 pub mod create_run;
+pub mod run;
 pub mod session;
+pub mod state;
 pub mod task;
 
 use std::str::FromStr;
@@ -26,6 +29,8 @@ pub const CMD_CREATE_SESSION: &str = "agentos.spec.v1.CreateSession";
 pub const CMD_PUT_AGENT_SPEC_REVISION: &str = "agentos.spec.v1.PutAgentSpecRevision";
 /// Fully-qualified command type of `CreateTaskRun`.
 pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
+/// Fully-qualified command type of `ClaimReadyRun`.
+pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 
 /// Dependencies shared by the runtime command handlers.
 #[derive(Clone)]
@@ -55,7 +60,11 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
     )?;
     registry.register(
         CMD_CREATE_TASK_RUN,
-        Arc::new(create_run::CreateTaskRunHandler::new(deps)),
+        Arc::new(create_run::CreateTaskRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        CMD_CLAIM_READY_RUN,
+        Arc::new(claim::ClaimReadyRunHandler::new(deps)),
     )?;
     Ok(())
 }

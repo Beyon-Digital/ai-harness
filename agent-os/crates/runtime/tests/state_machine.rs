@@ -1,9 +1,6 @@
 //! Run state machine acceptance tests (R2): the normative transition table for
 //! every state pair, revisioned commits against a real SQLite store, terminal
 //! reasons, and recovery-disposition independence.
-//!
-//! `runtime/src/lib.rs` is owned by RUN-003/RUN-004, so this suite compiles the
-//! two modules directly through `#[path]` includes.
 
 use std::sync::Arc;
 
@@ -16,12 +13,8 @@ use kernel_store::models::{NewRun, NewTask, RunCas, RunPatch, RunRow};
 use kernel_store::{KernelStore, KernelTxn, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
 use proptest::prelude::*;
+use runtime::{run, state};
 use testkit::ids::DeterministicIds;
-
-#[path = "../src/run.rs"]
-mod run;
-#[path = "../src/state.rs"]
-mod state;
 
 const SEED_MS: i64 = 1_700_000_000_000;
 const DB_FILE: &str = "kernel.db";
