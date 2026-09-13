@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::str::FromStr;
 
 use domain::generated::contract;
@@ -22,11 +22,15 @@ use serde::Deserialize;
 use crate::cursor::{EventCursor, EventCursorExt};
 use crate::stream::StreamKey;
 
-/// Minimum sensitivity an event type may carry.
+/// Minimum sensitivity and default retention an event type carries.
 pub trait ClassificationPolicy: Send + Sync {
     /// Returns the lowest sensitivity the event type may be assigned, or
     /// `None` when the type has no catalog entry (and therefore no floor).
     fn minimum(&self, event_type: &str) -> Option<SensitivityClass>;
+
+    /// Returns the retention class the catalog declares for the event type,
+    /// or `None` when the type has no catalog entry.
+    fn default_retention(&self, event_type: &str) -> Option<RetentionClass>;
 }
 
 #[derive(Deserialize)]
@@ -38,11 +42,14 @@ struct CatalogDocument {
 struct CatalogEntry {
     id: String,
     default_sensitivity: String,
+    default_retention: String,
 }
 
-/// Classification floor parsed once from the embedded event catalog.
+/// Classification floor and retention default parsed once from the embedded
+/// event catalog.
 pub struct CatalogClassificationPolicy {
     floors: HashMap<String, SensitivityClass>,
+    retentions: HashMap<String, RetentionClass>,
 }
 
 impl CatalogClassificationPolicy {
@@ -61,6 +68,7 @@ impl CatalogClassificationPolicy {
             .with_source(error)
         })?;
         let mut floors = HashMap::with_capacity(document.events.len());
+        let mut retentions = HashMap::with_capacity(document.events.len());
         for entry in document.events {
             let sensitivity = catalog_sensitivity(&entry.default_sensitivity).ok_or_else(|| {
                 KernelError::new(
@@ -69,15 +77,27 @@ impl CatalogClassificationPolicy {
                     "embedded event catalog declares an unknown sensitivity",
                 )
             })?;
-            floors.insert(entry.id, sensitivity);
+            let retention = catalog_retention(&entry.default_retention).ok_or_else(|| {
+                KernelError::new(
+                    ErrorCode::Internal,
+                    RetryClass::Never,
+                    "embedded event catalog declares an unknown retention",
+                )
+            })?;
+            floors.insert(entry.id.clone(), sensitivity);
+            retentions.insert(entry.id, retention);
         }
-        Ok(Self { floors })
+        Ok(Self { floors, retentions })
     }
 }
 
 impl ClassificationPolicy for CatalogClassificationPolicy {
     fn minimum(&self, event_type: &str) -> Option<SensitivityClass> {
         self.floors.get(event_type).copied()
+    }
+
+    fn default_retention(&self, event_type: &str) -> Option<RetentionClass> {
+        self.retentions.get(event_type).copied()
     }
 }
 
@@ -91,8 +111,21 @@ fn catalog_sensitivity(text: &str) -> Option<SensitivityClass> {
     }
 }
 
+fn catalog_retention(text: &str) -> Option<RetentionClass> {
+    match text {
+        "ephemeral" => Some(RetentionClass::Ephemeral),
+        "standard" => Some(RetentionClass::Standard),
+        "audit" => Some(RetentionClass::Audit),
+        _ => None,
+    }
+}
+
 /// Validated durable event, mirroring `contracts/events/event.proto` exactly.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The manual [`fmt::Debug`] rendering elides the payload bytes and prints
+/// `payload_len` instead, so logging an envelope cannot leak payload content
+/// (N1).
+#[derive(Clone, PartialEq, Eq)]
 pub struct EventEnvelope {
     /// Stable identity of the event.
     pub event_id: EventId,
@@ -124,6 +157,28 @@ pub struct EventEnvelope {
     pub retention: RetentionClass,
     /// Serialized event payload; never rendered in errors or logs.
     pub payload: Vec<u8>,
+}
+
+impl fmt::Debug for EventEnvelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventEnvelope")
+            .field("event_id", &self.event_id)
+            .field("event_type", &self.event_type)
+            .field("event_version", &self.event_version)
+            .field("stream_key", &self.stream_key)
+            .field("sequence", &self.sequence)
+            .field("occurred_unix_ms", &self.occurred_unix_ms)
+            .field("run_id", &self.run_id)
+            .field("task_id", &self.task_id)
+            .field("session_id", &self.session_id)
+            .field("effect_id", &self.effect_id)
+            .field("causation_id", &self.causation_id)
+            .field("correlation_id", &self.correlation_id)
+            .field("sensitivity", &self.sensitivity)
+            .field("retention", &self.retention)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl EventEnvelope {
@@ -302,7 +357,7 @@ impl EventBuilder {
         self
     }
 
-    /// Sets the retention class; defaults to [`RetentionClass::Standard`].
+    /// Overrides the catalog's default retention class.
     pub fn retention(mut self, class: RetentionClass) -> Self {
         self.retention = Some(class);
         self
@@ -337,7 +392,12 @@ impl EventBuilder {
         let payload = self
             .payload
             .ok_or_else(|| invalid_envelope("event payload is required"))?;
-        let retention = self.retention.unwrap_or(RetentionClass::Standard);
+        let retention = match self.retention {
+            Some(class) => class,
+            None => policy
+                .default_retention(&self.event_type)
+                .ok_or_else(|| invalid_envelope("event retention is required"))?,
+        };
         if retention == RetentionClass::Unspecified {
             return Err(invalid_envelope("event retention is required"));
         }

@@ -51,48 +51,40 @@ pub struct StreamKey(EventStreamKey, StreamKind);
 impl StreamKey {
     /// Canonical `run/<run-id>` key.
     pub fn run(id: RunId) -> Self {
-        Self::assemble(&["run", &id.to_hyphenated()], StreamKind::Run)
+        Self::canonical(&["run", &id.to_hyphenated()])
     }
 
     /// Canonical `task/<task-id>` key.
     pub fn task(id: TaskId) -> Self {
-        Self::assemble(&["task", &id.to_hyphenated()], StreamKind::Task)
+        Self::canonical(&["task", &id.to_hyphenated()])
     }
 
     /// Canonical `session/<session-id>` key.
     pub fn session(id: SessionId) -> Self {
-        Self::assemble(&["session", &id.to_hyphenated()], StreamKind::Session)
+        Self::canonical(&["session", &id.to_hyphenated()])
     }
 
     /// Canonical `effect/<effect-id>` key.
     pub fn effect(id: EffectId) -> Self {
-        Self::assemble(&["effect", &id.to_hyphenated()], StreamKind::Effect)
+        Self::canonical(&["effect", &id.to_hyphenated()])
     }
 
     /// The single `config/global` key.
     pub fn config_global() -> Self {
-        Self::assemble(&["config", "global"], StreamKind::ConfigGlobal)
+        Self::canonical(&["config", "global"])
     }
 
     /// Canonical `adapter/<adapter-id>/<version>/<digest>` key.
     ///
-    /// # Panics
-    ///
-    /// Panics if `version` or `digest` is empty or contains bytes outside the
-    /// canonical stream-key alphabet.
-    pub fn adapter(id: AdapterId, version: &str, digest: &str) -> Self {
-        Self::assemble(
-            &["adapter", &id.to_hyphenated(), version, digest],
-            StreamKind::Adapter,
-        )
+    /// Fails with `InvalidArgument`/`Never` when `version` or `digest` is
+    /// empty or contains bytes outside the canonical stream-key alphabet.
+    pub fn adapter(id: AdapterId, version: &str, digest: &str) -> errors::Result<Self> {
+        Self::try_assemble(&["adapter", &id.to_hyphenated(), version, digest])
     }
 
     /// Canonical `security/principal/<principal-id>` key.
     pub fn principal(id: PrincipalId) -> Self {
-        Self::assemble(
-            &["security", "principal", &id.to_hyphenated()],
-            StreamKind::Principal,
-        )
+        Self::canonical(&["security", "principal", &id.to_hyphenated()])
     }
 
     /// Returns the stream category.
@@ -110,13 +102,18 @@ impl StreamKey {
         &self.0
     }
 
-    fn assemble(segments: &[&str], kind: StreamKind) -> Self {
+    fn canonical(segments: &[&str]) -> Self {
+        match Self::try_assemble(segments) {
+            Ok(key) => key,
+            Err(_) => unreachable!("typed identifiers always form canonical stream keys"),
+        }
+    }
+
+    fn try_assemble(segments: &[&str]) -> errors::Result<Self> {
         let text = segments.join("/");
-        let Ok(key) = EventStreamKey::new(text) else {
-            panic!("stream key segments must be non-empty and canonical");
-        };
-        debug_assert_eq!(classify(key.as_str()), Some(kind));
-        Self(key, kind)
+        let kind = classify(&text).ok_or_else(invalid_stream_key)?;
+        let key = EventStreamKey::new(text).map_err(|_| invalid_stream_key())?;
+        Ok(Self(key, kind))
     }
 }
 
@@ -124,9 +121,7 @@ impl FromStr for StreamKey {
     type Err = errors::KernelError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let kind = classify(text).ok_or_else(invalid_stream_key)?;
-        let key = EventStreamKey::new(text).map_err(|_| invalid_stream_key())?;
-        Ok(Self(key, kind))
+        Self::try_assemble(&[text])
     }
 }
 

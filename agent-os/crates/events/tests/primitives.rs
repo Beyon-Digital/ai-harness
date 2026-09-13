@@ -76,7 +76,8 @@ fn every_stream_kind_round_trips() {
                 AdapterId::from_str(ADAPTER).expect("sample adapter id"),
                 "1.0.0",
                 "a1b2c3d4",
-            ),
+            )
+            .expect("canonical adapter key"),
             format!("adapter/{ADAPTER}/1.0.0/a1b2c3d4"),
         ),
         (
@@ -130,6 +131,26 @@ fn stream_key_parsing_rejects_non_canonical_forms() {
             StreamKey::from_str(text).expect_err("non-canonical stream key must be refused");
         assert_eq!(error.code(), ErrorCode::InvalidArgument, "{text:?}");
         assert_eq!(error.retry_class(), RetryClass::Never, "{text:?}");
+    }
+}
+
+#[test]
+fn adapter_stream_keys_reject_malformed_external_parts() {
+    let adapter = AdapterId::from_str(ADAPTER).expect("sample adapter id");
+    let rejected = [
+        ("", "a1b2c3d4"),
+        ("1.0.0", ""),
+        ("1.0.0+build", "a1b2c3d4"),
+        ("1.0.0", "SHA256"),
+        ("1.0.0", "sha256:abc"),
+        ("1.0.0", "sha 256"),
+    ];
+
+    for (version, digest) in rejected {
+        let error = StreamKey::adapter(adapter, version, digest)
+            .expect_err("malformed adapter parts must be refused");
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{version:?}");
+        assert_eq!(error.retry_class(), RetryClass::Never, "{version:?}");
     }
 }
 
@@ -300,12 +321,63 @@ fn embedded_policy_reads_floors_from_the_catalog() {
         Some(SensitivityClass::Internal)
     );
     assert_eq!(policy.minimum("NoSuchEventType"), None);
+    assert_eq!(
+        policy.default_retention("CapabilityRequested"),
+        Some(RetentionClass::Audit)
+    );
+    assert_eq!(
+        policy.default_retention("AdapterHealthy"),
+        Some(RetentionClass::Ephemeral)
+    );
+    assert_eq!(
+        policy.default_retention("RunStarted"),
+        Some(RetentionClass::Standard)
+    );
+    assert_eq!(policy.default_retention("NoSuchEventType"), None);
 
     let envelope = builder("NoSuchEventType")
         .sensitivity(SensitivityClass::Public)
+        .retention(RetentionClass::Standard)
         .build(&policy)
         .expect("unknown event types have no floor");
     assert_eq!(envelope.sensitivity, SensitivityClass::Public);
+}
+
+#[test]
+fn builder_uses_catalog_retention_defaults_and_requires_a_class() {
+    let policy = policy();
+
+    let privileged = EventBuilder::new(
+        "CapabilityRequested",
+        1,
+        StreamKey::principal(PrincipalId::from_str(PRINCIPAL).expect("sample principal id")),
+    )
+    .event_id(event_id())
+    .sequence(1)
+    .occurred_at_ms(1)
+    .sensitivity(SensitivityClass::Confidential)
+    .payload(vec![])
+    .build(&policy)
+    .expect("catalog retention applies");
+    assert_eq!(privileged.retention, RetentionClass::Audit);
+
+    let ephemeral = builder("AdapterHealthy")
+        .build(&policy)
+        .expect("catalog retention applies");
+    assert_eq!(ephemeral.retention, RetentionClass::Ephemeral);
+
+    let explicit = builder("AdapterHealthy")
+        .retention(RetentionClass::Audit)
+        .build(&policy)
+        .expect("explicit retention wins");
+    assert_eq!(explicit.retention, RetentionClass::Audit);
+
+    let error = builder("NoSuchEventType")
+        .sensitivity(SensitivityClass::Public)
+        .build(&policy)
+        .expect_err("unknown type without explicit retention must be refused");
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.retry_class(), RetryClass::Never);
 }
 
 #[test]
@@ -433,4 +505,25 @@ fn envelope_decoding_fails_closed_without_echoing_payload() {
     let error = EventEnvelope::from_bytes(&prost::Message::encode_to_vec(&bad_stream_key))
         .expect_err("non-canonical stream key must be refused");
     assert_eq!(error.code(), ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn envelope_debug_elides_payload_bytes() {
+    let canary = "canary-payload-bytes";
+    let envelope = builder("RunStarted")
+        .payload(canary.as_bytes().to_vec())
+        .build(&policy())
+        .expect("valid envelope");
+
+    let rendered = format!("{envelope:?}");
+    assert!(
+        rendered.contains(&format!("payload_len: {}", canary.len())),
+        "debug output must report the payload length: {rendered}"
+    );
+    assert!(
+        !rendered.contains("canary"),
+        "debug output must not contain payload bytes: {rendered}"
+    );
+    assert!(rendered.contains("EventEnvelope"));
+    assert!(rendered.contains("RunStarted"));
 }
