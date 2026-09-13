@@ -1,0 +1,4041 @@
+diff --git a/.spec/agentd-command-core/design.md b/.spec/agentd-command-core/design.md
+new file mode 100644
+index 0000000..9e0d9f8
+--- /dev/null
++++ b/.spec/agentd-command-core/design.md
+@@ -0,0 +1,316 @@
++# Design — agentd-command-core
++
++**Status:** draft
++**Date:** 2026-09-11
++**Requirements:** `requirements.md` (approved)
++
++## Architecture
++
++```
++                    ┌──────────────────────────┐
++   caller ────────▶ │   CommandCoordinator     │  lib.rs
++                    │  validate → begin_write  │
++                    │  replay → handler → out  │
++                    │  commit → fault points   │
++                    └───────┬──────────┬───────┘
++                            │          │
++              ┌─────────────▼──┐   ┌───▼──────────────────┐
++              │ CommandRegistry│   │ KernelStore (port)   │
++              │ type → handler │   │ fenced KernelTxn     │
++              └───────┬────────┘   └───┬──────────────────┘
++                      │                │
++              ┌───────▼────────┐  ┌────▼─────────────────┐
++              │ CommandHandler │  │ persistence module   │
++              │ ctx + txn only │  │ idempotency, streams │
++              └────────────────┘  └──────────────────────┘
++```
++
++| Component | Responsibility | New or existing | Path |
++|---|---|---|---|
++| Envelope | Validated request wrapper and digest type | new | `agent-os/crates/command-coordinator/src/envelope.rs` |
++| Handler | Context, outcome, handler trait, registry | new | `agent-os/crates/command-coordinator/src/handler.rs` |
++| Coordinator | Execute algorithm, replay branch, fault points | new | `agent-os/crates/command-coordinator/src/lib.rs` |
++| Fault seam | Additive `inject` on the foundation fault trait | modify | `agent-os/crates/domain/src/faults.rs`, `agent-os/crates/testkit/src/faults.rs` |
++
++## Data flow
++
++**Happy path — fresh command**
++
++1. `execute(envelope)` resolves the handler from the registry by `command_type`; unknown types reject with `InvalidArgument` before any transaction.
++2. `envelope.validate(clock.now_unix_ms())` checks key bounds, digest format, ids, and deadline.
++3. The coordinator builds `TxContext { daemon_epoch: fence.epoch(), principal_id, command_id, correlation_id }` and calls `store.begin_write` — the persistence guard asserts the live fence.
++4. `txn.idempotency().lookup(principal, key)` returns none, so the handler runs with `CommandContext` and `&mut dyn KernelTxn` only.
++5. The handler applies mutations and stages events through `events::outbox::stage`, which writes stream-head and outbox rows in the same transaction.
++6. The fault point `command.before_commit` is consulted; unarmed, it is a no-op.
++7. The coordinator inserts the idempotency record with the outcome code and payload and calls `commit`.
++8. The fault point `command.after_commit` is consulted; unarmed, the outcome returns to the caller.
++
++**Replay path**
++
++1. Validation and `begin_write` run exactly as above.
++2. `lookup` returns a record: same digest returns the stored code and payload after dropping the transaction (rollback of an otherwise empty write); different digest returns `Conflict`.
++3. No handler runs and no row changes.
++
++**Failure path — pre-commit fault**
++
++1. The handler has staged mutations and outbox rows.
++2. `command.before_commit` is armed; the coordinator returns `Unavailable` (retry-safe) and drops the transaction.
++3. `Drop` rolls back; zero canonical rows, zero outbox rows, zero idempotency rows remain.
++
++**Failure path — post-commit fault**
++
++1. The transaction commits with mutations, outbox rows, and the idempotency record.
++2. `command.after_commit` is armed; the coordinator returns `Unavailable` although the work committed.
++3. A later identical replay finds the stored outcome and returns it with unchanged row counts.
++
++## Interfaces
++
++### envelope.rs
++
++```rust
++pub struct RequestDigest([u8; 32]);
++impl std::str::FromStr for RequestDigest { type Err = errors::KernelError; }
++impl std::fmt::Display for RequestDigest;   // lowercase hex
++
++pub struct CommandEnvelope {
++    pub command_id: domain::ids::CommandId,
++    pub idempotency_key: domain::ids::IdempotencyKey,
++    pub principal_id: domain::ids::PrincipalId,
++    pub actor_id: domain::ids::ActorId,
++    pub device_id: Option⟨domain::ids::DeviceId⟩,
++    pub delegation_chain_id: Option⟨domain::ids::DelegationChainId⟩,
++    pub request_digest: RequestDigest,
++    pub correlation_id: Option⟨String⟩,
++    pub causation_id: Option⟨String⟩,
++    pub deadline_unix_ms: Option⟨i64⟩,
++    pub command_type: String,
++    pub payload: Vec⟨u8⟩,
++}
++
++impl CommandEnvelope {
++    /// Rejects empty keys, malformed digests, empty command types, and past deadlines.
++    pub fn validate(&self, now_unix_ms: i64) -> errors::Result⟨()⟩;
++}
++```
++
++### handler.rs
++
++```rust
++pub struct CommandContext {
++    pub command_id: domain::ids::CommandId,
++    pub principal_id: domain::ids::PrincipalId,
++    pub actor_id: domain::ids::ActorId,
++    pub device_id: Option⟨domain::ids::DeviceId⟩,
++    pub delegation_chain_id: Option⟨domain::ids::DelegationChainId⟩,
++    pub correlation_id: Option⟨String⟩,
++    pub causation_id: Option⟨String⟩,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OutcomeCode { Ok }
++impl OutcomeCode {
++    pub const fn as_str(self) -> &'static str;          // "ok"
++    pub fn from_stored(value: &str) -> errors::Result⟨Self⟩;
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CommandOutcome {
++    pub code: OutcomeCode,
++    pub payload: Vec⟨u8⟩,
++}
++
++#[async_trait::async_trait]
++pub trait CommandHandler: Send + Sync + 'static {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn kernel_store::KernelTxn,
++        payload: Vec⟨u8⟩,
++    ) -> errors::Result⟨CommandOutcome⟩;
++}
++
++#[derive(Default)]
++pub struct CommandRegistry { /* HashMap⟨String, Arc⟨dyn CommandHandler⟩⟩ */ }
++impl CommandRegistry {
++    pub fn new() -> Self;
++    /// Returns `Conflict` when the command type is already registered.
++    pub fn register(&mut self, command_type: impl Into⟨String⟩,
++                    handler: std::sync::Arc⟨dyn CommandHandler⟩) -> errors::Result⟨()⟩;
++    pub fn get(&self, command_type: &str) -> Option⟨std::sync::Arc⟨dyn CommandHandler⟩⟩;
++    pub fn len(&self) -> usize;
++}
++```
++
++### lib.rs
++
++```rust
++pub const BEFORE_COMMIT: &str = "command.before_commit";
++pub const AFTER_COMMIT: &str = "command.after_commit";
++
++pub trait FenceProvider: Send + Sync {
++    fn epoch(&self) -> u64;
++}
++pub struct FixedFence(pub u64);
++impl FenceProvider for FixedFence;
++
++pub struct CommandCoordinator { /* store, registry, fence, clock, faults */ }
++impl CommandCoordinator {
++    pub fn new(
++        store: std::sync::Arc⟨dyn kernel_store::KernelStore⟩,
++        registry: std::sync::Arc⟨CommandRegistry⟩,
++        fence: std::sync::Arc⟨dyn FenceProvider⟩,
++        clock: std::sync::Arc⟨dyn domain::time::Clock⟩,
++        faults: std::sync::Arc⟨dyn domain::faults::FaultInjector⟩,
++    ) -> Self;
++
++    pub async fn execute(&self, envelope: CommandEnvelope)
++        -> errors::Result⟨CommandOutcome⟩;
++}
++```
++
++### Fault seam addition (CMD-001A)
++
++```rust
++// crates/domain/src/faults.rs — additive, defaulted
++pub trait FaultInjector: Send + Sync + 'static {
++    fn trigger(&self, point: &str);
++    /// Fires `point` once if armed and reports whether it fired. Default: never fires.
++    fn inject(&self, point: &str) -> bool { let _ = point; false }
++}
++// crates/testkit/src/faults.rs — ArmedFaults::inject marks triggered and returns true once per arm.
++```
++
++| Interface | Produced by | Consumed by | Serves |
++|---|---|---|---|
++| `CommandEnvelope`, `RequestDigest` | CMD-001B | control-api module, later handlers | R2 |
++| `CommandHandler`, `CommandRegistry`, `OutcomeCode` | CMD-001B | every later command module | R1, R3 |
++| `CommandCoordinator::execute` | CMD-001B | control-api module and daemon composition | R1, R4 |
++| `FaultInjector::inject` | CMD-001A | coordinator and later fault-injected modules | R4, N2 |
++| `FenceProvider` | CMD-001B | daemon composition (identity fence) | R2.5 |
++
++## Data model
++
++No schema changes. The coordinator reads and writes:
++
++| Use | Table | Rule |
++|---|---|---|
++| Idempotency lookup and insert | `idempotency_records` | unique `(principal_id, idempotency_key)`; insert only on success, inside the transaction |
++| Event staging | `event_stream_heads`, `outbox_events` | staged by handlers through `events::outbox::stage`; immutable rows, publication metadata later |
++
++**Migration required:** no. **Backward compatible:** n/a.
++
++## Error handling
++
++| Failure mode | Detection | Response | Serves |
++|---|---|---|---|
++| Malformed envelope (key, digest, ids) | `validate` before transaction | `InvalidArgument`, `Never` | R2.1, R2.2 |
++| Past deadline | `validate` with the injected clock | `FailedPrecondition`, `Never` | R2.3 |
++| Unknown command type | registry lookup | `InvalidArgument`, `Never`, no transaction | R1.4 |
++| Duplicate registration | registry insert | `Conflict` at registration | R3.2 |
++| Digest mismatch on replay | stored digest comparison | `Conflict`, `Never`, no mutation | R1.3 |
++| Stale or absent fence | persistence `begin_write` assertion | `FailedPrecondition`, `Never` | R2.4 |
++| Handler error | handler result | transaction dropped; mapped error returned; nothing recorded | R3, R4.1 |
++| Pre-commit fault | `inject(BEFORE_COMMIT)` | `Unavailable`, `Safe`, rollback | R4.1 |
++| Post-commit fault | `inject(AFTER_COMMIT)` | `Unavailable`, `Safe`, committed state retained | R4.2 |
++
++**Error taxonomy:** `agent-os/crates/errors` (`KernelError`, `ErrorCode`, `RetryClass`); no new
++codes. Error messages never include payload bytes (N1).
++
++## Security considerations
++
++| Concern | Treatment |
++|---|---|
++| Authentication / authorisation | out of scope here; the context carries principal/actor for later handlers; transport authentication is the control-api module's requirement |
++| Input validation and injection | envelope validation before any transaction; no SQL in this crate |
++| Secrets handling | no secrets handled; payloads are opaque bytes |
++| Data exposure in logs / errors | faults and validation errors name points and fields only; never payloads (N1) |
++| New network surface | none |
++| Dependency additions | `async-trait`; dev-only `tokio`, `testkit`, `tempfile`, `kernel-store-sqlite`; all existing workspace dependencies (CMD-000) |
++
++## Test strategy
++
++| Level | Framework | Location | Covers |
++|---|---|---|---|
++| Integration | `cargo test` with a real SQLite store in a temp root | `crates/command-coordinator/tests/coordinator.rs` | R1.1–R1.5, R2.1–R2.5, R4.1–R4.4, P1, P2 |
++| Unit | in-crate tests | `src/envelope.rs`, `src/handler.rs` | digest parsing, validation predicates, duplicate registration, outcome codes |
++| Fault-seam tests | testkit integration tests | `crates/testkit/tests/prop_faults.rs` | `inject` once-per-arm, default no-op |
++| Regression | workspace gates and pack validators | repo root and `agent-os/` | G1, G2, N3 |
++
++**Property tests**
++
++| Property | Statement | Generator strategy |
++|---|---|---|
++| P1 | any number of identical replays returns the stored outcome with unchanged canonical row counts | fixed command submitted N times with assertions between calls |
++| P2 | any pre-commit failure leaves zero attributable rows | arm the fault point before commit for distinct commands and assert row counts |
++
++**Explicitly not tested (and why):**
++
++- Real command handlers and their authorization — later modules.
++- Process-level crash recovery — verification module.
++- Digest recomputation — foundation spec; the coordinator validates format only.
++
++## Observability
++
++No new signals in this module: the persistence ruling deferred store-level instrumentation, and
++the coordinator depends on no observability crate. Fault-point usage is observable through the
++testkit injector, and errors carry stable codes.
++
++## Performance
++
++| Requirement | Design mechanism | How it is measured |
++|---|---|---|
++| N1 | validation before transactions; no payload echoing | unit tests assert error content |
++| N2 | once-per-arm injector with no sleeps | testkit tests |
++| N3 | no contract or schema edits | pack validators |
++
++## Design decisions
++
++| # | Decision | Alternatives rejected | Rationale | Serves |
++|---|---|---|---|---|
++| D1 | Type-erased registry keyed by command type string | generic `execute` per command; closed enum | runtime dispatch over the wire string; later modules add handlers without editing the coordinator | R1.4, R3.2 |
++| D2 | Handlers receive raw payload bytes and decode their own typed message | coordinator decodes via a prost registry | simplest erasure; each handler owns its payload type | R3.1 |
++| D3 | Success-only idempotency recording | record failures | replay of failures is unspecified; safe default | R1.5 |
++| D4 | Unknown command type and malformed envelopes reject before any transaction | open then reject | no trace, cheaper, and consistent with R2 | R1.4, R2.2 |
++| D5 | Fencing epoch comes from the fence provider, never the envelope | envelope-carried epoch | clients must not influence the fence | R2.5 |
++| D6 | Replay returns the stored outcome after dropping the empty write transaction | read-only transaction variant | one code path; dropping a write transaction is a no-op rollback | R1.2 |
++| D7 | Outcome vocabulary is `ok` plus bytes | rich codes now | nothing to code until the real commands exist | R1.1 |
++| D8 | Fault seam is an additive defaulted `inject` method | coordinator-local trait; panics | non-breaking for every existing implementor; testkit keeps one seam | R4.3 |
++| D9 | No span instrumentation in this module | add observability now | the persistence ruling deferred store instrumentation; no consumer yet | N3 |
++
++## Requirements traceability
++
++| Requirement | Covered by | Verified by |
++|---|---|---|
++| R1.1–R1.6 | `execute` algorithm, registry, idempotency repo | `tests/coordinator.rs` |
++| R2.1–R2.5 | `validate`, fence provider, persistence assertion | unit tests, `tests/coordinator.rs` |
++| R3.1–R3.4 | handler trait, registry, txn-only access | compile-time shape plus registry tests |
++| R4.1–R4.4 | fault points, injector semantics | `tests/coordinator.rs`, `crates/testkit/tests/prop_faults.rs` |
++| N1 | validation and error construction | unit tests |
++| N2 | `ArmedFaults::inject` | testkit tests |
++| N3 | no contract or schema edits | pack validators |
++| P1, P2 | replay and pre-commit tests | `tests/coordinator.rs` |
++| G1, G2 | quality gates and validators | repo root and `agent-os/` |
++
++## File structure
++
++Paths relative to `agent-os/`.
++
++| Path | Create or modify | Responsibility | Owner task |
++|---|---|---|---|
++| `crates/command-coordinator/Cargo.toml` | modify | add `async-trait`; dev `tokio`, `testkit`, `tempfile`, `kernel-store-sqlite` | CMD-000 |
++| `Cargo.lock` | modify | resolution update | CMD-000 |
++| `crates/domain/src/faults.rs` | modify | additive `inject` with default | CMD-001A |
++| `crates/testkit/src/faults.rs` | modify | `ArmedFaults::inject` once per arm | CMD-001A |
++| `crates/testkit/tests/prop_faults.rs` | modify | inject semantics tests | CMD-001A |
++| `crates/command-coordinator/src/envelope.rs` | create | envelope, digest, validation | CMD-001B |
++| `crates/command-coordinator/src/handler.rs` | create | context, outcome, handler trait, registry | CMD-001B |
++| `crates/command-coordinator/src/lib.rs` | modify | coordinator, fence provider, execute algorithm, fault points | CMD-001B |
++| `crates/command-coordinator/tests/coordinator.rs` | create | integration suite with a real store and a test handler | CMD-001B |
++
++---
++
++## Approval
++
++**Decision:** approved
++**Approved by:** jainamshah (standing instruction to proceed without per-step confirmation)
++**Date:** 2026-09-11
+diff --git a/.spec/agentd-command-core/ledger.md b/.spec/agentd-command-core/ledger.md
+new file mode 100644
+index 0000000..276582b
+--- /dev/null
++++ b/.spec/agentd-command-core/ledger.md
+@@ -0,0 +1,18 @@
++# Ledger — agentd-command-core
++
++- 2026-09-12T17:03:16Z spec initialized
++- 2026-09-12T17:05:30Z gate passed: implement
++- 2026-09-12T17:05:30Z Plan/requirements/design authored and approved under the user's standing instruction; 3 tasks validated across 3 waves. Implementation starting.
++- 2026-09-12T17:05:52Z CMD-000 -> claimed (@agent-cmd000)
++- 2026-09-12T17:05:53Z CMD-000 -> in_progress (@agent-cmd000)
++- 2026-09-12T23:27:23Z CMD-000 -> review (@agent-cmd000)
++- 2026-09-12T23:29:11Z CMD-000 -> done (@agent-cmd000)
++- 2026-09-12T23:29:14Z CMD-001A -> claimed (@agent-cmd001a)
++- 2026-09-12T23:29:17Z CMD-001A -> in_progress (@agent-cmd001a)
++- 2026-09-12T23:35:17Z CMD-001A -> review (@agent-cmd001a)
++- 2026-09-12T23:39:14Z CMD-001A -> done (@agent-cmd001a)
++- 2026-09-12T23:39:14Z CMD-000 and CMD-001A approved; CMD-001B dispatched as the final implementation task.
++- 2026-09-12T23:39:27Z CMD-001B -> claimed (@agent-cmd001b)
++- 2026-09-12T23:39:28Z CMD-001B -> in_progress (@agent-cmd001b)
++- 2026-09-12T23:58:48Z CMD-001B -> review (@agent-cmd001b)
++- 2026-09-13T00:19:08Z CMD-001B -> done (@agent-cmd001b)
+diff --git a/.spec/agentd-command-core/plan.md b/.spec/agentd-command-core/plan.md
+new file mode 100644
+index 0000000..d124d10
+--- /dev/null
++++ b/.spec/agentd-command-core/plan.md
+@@ -0,0 +1,137 @@
++# Plan — agentd-command-core
++
++**Status:** draft
++**Date:** 2026-09-11
++
++Module spec. Phase 1 input is the approved umbrella plan at
++`.spec/agentd-microkernel-mvp/plan.md`. This module is third in the build order; the persistence
++module is complete (7/7 tasks, approved branch). Approvals below are recorded under the user's
++standing instruction to proceed through design, tasks, and implementation without per-step
++confirmation.
++
++## Problem statement
++
++Persistence is real, but nothing routes state changes through it. Any future caller could
++begin its own transaction, skip idempotency, ignore the daemon fence, or commit without outbox
++rows. The pack's Command Coordinator specification (`specs/command-coordinator.md`) and task
++CMD-001 require one linearization path with replay semantics, and none exists yet.
++
++## Outcome
++
++`CommandCoordinator::execute` is the only way a state-changing command reaches the store: it
++validates the envelope, opens a fenced write transaction, resolves the idempotency record,
++invokes a typed handler that never sees the store, records the outcome, stages outbox rows, and
++commits. Pre-commit faults leave zero rows; post-commit faults make replays return the stored
++outcome. Tasks CMD-000, CMD-001A, and CMD-001B are implemented and reviewed.
++
++## Assumptions surfaced
++
++| # | Assumption | If wrong, what changes |
++|---|---|---|
++| 1 | The fault-injection seam is extended additively: `domain::faults::FaultInjector` gains `fn inject(&self, point: &str) -> bool` with a default `false`, and `testkit::ArmedFaults` fires and reports `true` once per arm | Without a boolean seam the crash tests cannot simulate a failure at a coordinator boundary; an alternative is a coordinator-local injector trait |
++| 2 | The coordinator validates the request digest format and compares stored digests; it does not recompute digests | Recomputing would add `sha2` plus canonical serialization to the coordinator; the foundation spec assigns digest computation to clients |
++| 3 | Only successful outcomes are recorded in idempotency; failures roll back entirely | If deterministic failures must be replayed, the coordinator needs an error-recording policy and error outcomes in the record |
++| 4 | MVP outcome code vocabulary is `ok` plus the payload bytes; richer codes arrive with the commands | Stored outcomes would need a code registry before the first real command |
++| 5 | A present `deadline_unix_ms` in the past rejects the command with `FailedPrecondition` before any mutation | Expired deadlines could be treated as best-effort instead |
++| 6 | The coordinator does not instrument spans in this module; store observability was deferred by the persistence ruling | Adding `observability` dependency and span plumbing would extend the task |
++
++## Codebase evidence
++
++| Finding | Evidence (`path:line`) | Consequence for this work |
++|---|---|---|
++| The coordinator algorithm is fully specified | `agent-os-microkernel-mvp-buildpack/specs/command-coordinator.md:26-40` | CMD-001B implements the ten steps and the replay outcome branch verbatim |
++| The command envelope fields are fixed | `specs/command-coordinator.md:8-24`, `contracts/control-api/mvp_control.proto` | `CommandEnvelope` mirrors the wire fields; `command_type` is the fully-qualified payload message name (design D2 of the foundation) |
++| Required tests and acceptance are fixed | `tasks/CMD-001.md:28-37` | Fault-before-commit, fault-after-commit replay, idempotency conflict, and fence mismatch tests are the task's checklist |
++| Transaction recipe A is the normative sequence | `specs/transaction-recipes.md:7-23` | Fenced begin, idempotency lookup, mutations, stream/outbox allocation, idempotency outcome, commit |
++| The store port is ready and typed | `agent-os/crates/kernel-store/src/txn.rs`, `repositories.rs`; persistence reports | The coordinator consumes `KernelStore`, `KernelTxn`, `IdempotencyRepo`, `StreamRepo`; no SQL ever crosses this boundary |
++| Fault injection exists but cannot force a failure | `agent-os/crates/domain/src/faults.rs:4-6`, `agent-os/crates/testkit/src/faults.rs:18-58` | CMD-001A adds the additive boolean seam and its once-per-arm semantics test |
++| Stream staging API exists | `agent-os/crates/events/src/outbox.rs` (`DraftEvent`, `stage`) | Handlers stage events through the txn; the coordinator does not build outbox rows itself |
++| Error taxonomy and IDs are ready | `agent-os/crates/errors`, `agent-os/crates/domain` | Errors map to stable codes; envelope ids are typed |
++
++## Existing conventions to follow
++
++- All commands run from `agent-os/`: `cargo check --workspace`, `cargo test --workspace`,
++  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`.
++- Pack validators from the repo root: `validate_buildpack.py`, `tools/validate_repo.py`.
++- No `unwrap()`/`expect()` outside tests; no payload or secret material in errors or logs;
++  no sleeps in tests; parameterized SQL only, and no SQL outside the SQLite crate.
++- Commit per task with the task id; reports under this spec's `reports/` directory.
++
++## Approach
++
++### Chosen
++
++Mirror CMD-001 as three small tasks behind one interface:
++
++1. **CMD-000** — declare the `command-coordinator` crate's remaining dependencies
++   (`async-trait`, dev `tokio`, `testkit`, `tempfile`) and resolve the lock.
++2. **CMD-001A** — extend the fault seam additively: `FaultInjector::inject` defaulting to
++   `false`, `ArmedFaults::inject` firing once per arm, with tests proving exactly-once and the
++   default no-fault behaviour. This is the smallest change that lets a coordinator boundary
++   deterministically fail, without weakening the existing `trigger` contract.
++3. **CMD-001B** — implement `envelope.rs`, `handler.rs`, and `lib.rs`: envelope validation,
++   the type-erased handler registry over `prost` payload bytes, the ten-step execute algorithm
++   with the replay branch, and the fault points `command.before_commit` and
++   `command.after_commit`. Integration tests use a real SQLite store in a temp root.
++
++Dependency edges: CMD-000 → CMD-001A → CMD-001B. Sequential; the module is small.
++
++### Rejected
++
++| Alternative | Why not |
++|---|---|
++| A generic `execute<C: Command>` per command type | The registry must dispatch on a wire string at runtime; generics stop at the API boundary anyway |
++| A closed enum of commands in the coordinator | Higher-level commands arrive in later modules and would force edits to the coordinator every time |
++| Recording failed outcomes in idempotency | Failure replay policy is unspecified in the pack; success-only recording is safe and simpler (assumption 3) |
++| A coordinator-local fault trait instead of extending the foundation one | Duplicates the injector contract and splits the testkit seam; the additive default method is non-breaking |
++| Recomputing the request digest inside the coordinator | Duplicates the client contract and drags canonical serialization into this module (assumption 2) |
++| Instrumenting spans now | Persistence recorded the observability deferral; adding it here would expand scope without a consumer |
++
++## Scope
++
++**In scope**
++
++- CMD-000, CMD-001A, CMD-001B as described
++- The four pack-required tests plus unknown-command, deadline, and registry tests
++- The `command.before_commit` and `command.after_commit` fault points
++- One representative test handler performing a session insert plus an outbox stage within the
++  transaction (the pack's "prove commit/replay semantics before higher-level commands")
++
++**Explicitly out of scope**
++
++- The 18 real command handlers (later modules: runtime-graph, security, config, scheduler)
++- Control API transport, authentication, and peer-credential handling (control-api module)
++- Request digest computation and canonical serialization (foundation spec)
++- Query paths; only mutations flow through the coordinator
++
++## Capability map
++
++Single capability — command routing and linearization. No decomposition; three sequential tasks.
++
++## Risks
++
++| Risk | Likelihood | Blast radius | Mitigation |
++|---|---|---|---|
++| The additive fault method changes a foundation trait | Low | Domain and testkit consumers | Default implementation keeps every existing implementor compiling; a test pins once-per-arm semantics |
++| Registry type erasure around `prost` payloads becomes awkward | Medium | CMD-001B churn | Handlers receive raw payload bytes and decode their own typed message; registration is a plain map insert |
++| Crash tests accidentally assert the wrong fault point | Medium | False confidence in replay semantics | Tests assert row counts, outbox rows, and idempotency rows before and after replay, not just error codes |
++| Scope creep toward real commands | Low | Coordinator churn | The task forbids command semantics; the test handler lives in tests |
++
++## Parallelisation forecast
++
++Fully sequential: CMD-000 → CMD-001A → CMD-001B. The module is too small to parallelize safely,
++and each step is a prerequisite for the next.
++
++## Open questions for the user
++
++None blocking. The five behavioural decisions above (fault seam, digest validation, success-only
++recording, outcome vocabulary, deadline rejection) are resolved in the requirements with
++proposed defaults and can be corrected at review.
++
++---
++
++## Approval
++
++**Decision:** approved
++**Approved by:** jainamshah (standing instruction to proceed without per-step confirmation)
++**Date:** 2026-09-11
+diff --git a/.spec/agentd-command-core/reports/diffs/fix-CMD-001B.diff b/.spec/agentd-command-core/reports/diffs/fix-CMD-001B.diff
+new file mode 100644
+index 0000000..93bd2e0
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/diffs/fix-CMD-001B.diff
+@@ -0,0 +1,107 @@
++diff --git a/agent-os/crates/command-coordinator/src/lib.rs b/agent-os/crates/command-coordinator/src/lib.rs
++index 114c7af..ba4c505 100644
++--- a/agent-os/crates/command-coordinator/src/lib.rs
+++++ b/agent-os/crates/command-coordinator/src/lib.rs
++@@ -78,21 +78,24 @@ impl CommandCoordinator {
++     /// Fresh commands commit their mutations, staged outbox events, and an
++     /// `ok` idempotency record atomically. An identical replay returns the
++     /// stored outcome without touching state; a differing digest is a
++     /// `Conflict`. The `command.before_commit` fault point rolls back, and
++     /// `command.after_commit` reports `Unavailable` after a durable commit.
++     pub async fn execute(&self, envelope: CommandEnvelope) -> errors::Result<CommandOutcome> {
++         let handler = self.registry.get(&envelope.command_type).ok_or_else(|| {
++             KernelError::new(
++                 ErrorCode::InvalidArgument,
++                 RetryClass::Never,
++-                "command_type is not registered in the coordinator",
+++                format!(
+++                    "command_type {:?} is not registered in the coordinator",
+++                    envelope.command_type
+++                ),
++             )
++         })?;
++ 
++         envelope.validate(self.clock.now_unix_ms())?;
++ 
++         let context = CommandContext {
++             command_id: envelope.command_id,
++             principal_id: envelope.principal_id,
++             actor_id: envelope.actor_id,
++             device_id: envelope.device_id,
++diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
++index 79b7279..fb79a32 100644
++--- a/agent-os/crates/command-coordinator/tests/coordinator.rs
+++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
++@@ -246,31 +246,40 @@ async fn fresh_command_commits_rows_outbox_and_idempotency() {
++     assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
++     assert_eq!(harness.handler.calls(), 1);
++ }
++ 
++ #[tokio::test]
++ async fn identical_replay_returns_the_stored_outcome_without_changes() {
++     let harness = harness().await;
++     let envelope = envelope(TEST_COMMAND, digest(0xa2));
++ 
++     let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
++-    let before = harness.observe(&envelope).await;
++-
++-    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
++-
++-    assert_eq!(replayed, first);
+++    let mut observation = harness.observe(&envelope).await;
+++
+++    for replay_index in 0..3 {
+++        let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++        assert_eq!(
+++            replayed, first,
+++            "replay {replay_index} returned a different outcome"
+++        );
+++        let next = harness.observe(&envelope).await;
+++        assert_eq!(
+++            next, observation,
+++            "replay {replay_index} changed persisted state"
+++        );
+++        observation = next;
+++    }
++     assert_eq!(
++         harness.handler.calls(),
++         1,
++         "replay must not run the handler"
++     );
++-    assert_eq!(harness.observe(&envelope).await, before);
++ }
++ 
++ #[tokio::test]
++ async fn different_digest_for_the_same_key_is_a_conflict() {
++     let harness = harness().await;
++     let envelope = envelope(TEST_COMMAND, digest(0xb1));
++     harness.coordinator.execute(envelope.clone()).await.unwrap();
++     let before = harness.observe(&envelope).await;
++ 
++     let mut conflicting = envelope.clone();
++@@ -385,20 +394,25 @@ async fn unknown_command_type_rejects_without_rows() {
++     let envelope = envelope("session.unknown", digest(0xf1));
++ 
++     let error = harness
++         .coordinator
++         .execute(envelope.clone())
++         .await
++         .unwrap_err();
++ 
++     assert_eq!(error.code(), ErrorCode::InvalidArgument);
++     assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert!(
+++        error.message().contains("session.unknown"),
+++        "message must name the unregistered command_type: {}",
+++        error.message()
+++    );
++     assert_eq!(harness.handler.calls(), 0);
++     let observed = harness.observe(&envelope).await;
++     assert!(observed.session.is_none());
++     assert!(observed.idempotency.is_none());
++     assert!(observed.unpublished.is_empty());
++ }
++ 
++ #[tokio::test]
++ async fn duplicate_registration_is_a_conflict() {
++     let clock = Arc::new(TestClock::new(SEED_MS));
+diff --git a/.spec/agentd-command-core/reports/diffs/task-CMD-000.diff b/.spec/agentd-command-core/reports/diffs/task-CMD-000.diff
+new file mode 100644
+index 0000000..e709f55
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/diffs/task-CMD-000.diff
+@@ -0,0 +1,57 @@
++diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
++index 78ad07a..d0402f2 100644
++--- a/agent-os/Cargo.lock
+++++ b/agent-os/Cargo.lock
++@@ -178,25 +178,30 @@ dependencies = [
++ [[package]]
++ name = "cfg-if"
++ version = "1.0.4"
++ source = "registry+https://github.com/rust-lang/crates.io-index"
++ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
++ 
++ [[package]]
++ name = "command-coordinator"
++ version = "0.1.0"
++ dependencies = [
+++ "async-trait",
++  "domain",
++  "errors",
++  "event-journal",
++  "events",
++  "kernel-store",
+++ "kernel-store-sqlite",
+++ "tempfile",
+++ "testkit",
+++ "tokio",
++ ]
++ 
++ [[package]]
++ name = "config-engine"
++ version = "0.1.0"
++ dependencies = [
++  "domain",
++  "errors",
++ ]
++ 
++diff --git a/agent-os/crates/command-coordinator/Cargo.toml b/agent-os/crates/command-coordinator/Cargo.toml
++index 67abbba..b627219 100644
++--- a/agent-os/crates/command-coordinator/Cargo.toml
+++++ b/agent-os/crates/command-coordinator/Cargo.toml
++@@ -4,10 +4,17 @@ version.workspace = true
++ edition.workspace = true
++ rust-version.workspace = true
++ publish.workspace = true
++ 
++ [dependencies]
++ domain.workspace = true
++ errors.workspace = true
++ event-journal.workspace = true
++ events.workspace = true
++ kernel-store.workspace = true
+++async-trait.workspace = true
+++
+++[dev-dependencies]
+++tokio.workspace = true
+++testkit.workspace = true
+++tempfile.workspace = true
+++kernel-store-sqlite.workspace = true
+diff --git a/.spec/agentd-command-core/reports/diffs/task-CMD-001A.diff b/.spec/agentd-command-core/reports/diffs/task-CMD-001A.diff
+new file mode 100644
+index 0000000..b11b690
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/diffs/task-CMD-001A.diff
+@@ -0,0 +1,193 @@
++diff --git a/agent-os/crates/domain/src/faults.rs b/agent-os/crates/domain/src/faults.rs
++index 4ed4d00..2aa39f3 100644
++--- a/agent-os/crates/domain/src/faults.rs
+++++ b/agent-os/crates/domain/src/faults.rs
++@@ -1,15 +1,24 @@
++ //! `FaultInjector` trait and the no-op implementation.
++ 
++ /// Deterministic fault trigger used by tests.
++ pub trait FaultInjector: Send + Sync + 'static {
++     /// Triggers the fault armed at `point`, if any.
++     fn trigger(&self, point: &str);
+++
+++    /// Fires `point` once if it is armed and reports whether it fired.
+++    ///
+++    /// The default implementation never fires, so implementors that predate
+++    /// this seam keep their no-op behavior.
+++    fn inject(&self, point: &str) -> bool {
+++        let _ = point;
+++        false
+++    }
++ }
++ 
++ /// Production [`FaultInjector`] that never triggers.
++ #[derive(Clone, Copy, Debug, Default)]
++ pub struct NoFaults;
++ 
++ impl FaultInjector for NoFaults {
++     fn trigger(&self, _point: &str) {}
++ }
++diff --git a/agent-os/crates/testkit/src/faults.rs b/agent-os/crates/testkit/src/faults.rs
++index 07279de..1c84071 100644
++--- a/agent-os/crates/testkit/src/faults.rs
+++++ b/agent-os/crates/testkit/src/faults.rs
++@@ -50,33 +50,44 @@ impl ArmedFaults {
++             panic!("fault point {point:?} was armed but never triggered");
++         }
++     }
++ 
++     fn states(&self) -> MutexGuard<'_, HashMap<String, FaultState>> {
++         match self.states.lock() {
++             Ok(guard) => guard,
++             Err(poisoned) => poisoned.into_inner(),
++         }
++     }
++-}
++ 
++-impl FaultInjector for ArmedFaults {
++-    fn trigger(&self, point: &str) {
+++    fn fire(&self, point: &str) -> bool {
++         if let Some(state) = self.states().get_mut(point)
++             && state.armed
++             && !state.triggered
++         {
++             state.triggered = true;
+++            true
+++        } else {
+++            false
++         }
++     }
++ }
++ 
+++impl FaultInjector for ArmedFaults {
+++    fn trigger(&self, point: &str) {
+++        let _ = self.fire(point);
+++    }
+++
+++    fn inject(&self, point: &str) -> bool {
+++        self.fire(point)
+++    }
+++}
+++
++ #[cfg(test)]
++ mod tests {
++     use domain::faults::FaultInjector;
++ 
++     use super::ArmedFaults;
++ 
++     #[test]
++     fn test_fault_fires_once() {
++         let faults = ArmedFaults::new();
++         assert!(!faults.is_triggered("io"));
++diff --git a/agent-os/crates/testkit/tests/prop_faults.rs b/agent-os/crates/testkit/tests/prop_faults.rs
++index d5aaba2..49f277e 100644
++--- a/agent-os/crates/testkit/tests/prop_faults.rs
+++++ b/agent-os/crates/testkit/tests/prop_faults.rs
++@@ -12,20 +12,107 @@ enum Action {
++     Trigger(usize),
++ }
++ 
++ fn action() -> impl Strategy<Value = Action> {
++     prop_oneof![
++         (0..POINTS.len()).prop_map(Action::Arm),
++         (0..POINTS.len()).prop_map(Action::Trigger),
++     ]
++ }
++ 
+++#[test]
+++fn inject_unarmed_point_returns_false() {
+++    let faults = ArmedFaults::new();
+++    assert!(!faults.inject("io"), "an unarmed point must not fire");
+++    assert!(!faults.is_triggered("io"));
+++}
+++
+++#[test]
+++fn inject_armed_point_fires_exactly_once() {
+++    let faults = ArmedFaults::new();
+++    faults.arm("io");
+++    assert!(faults.inject("io"), "the first inject must fire");
+++    assert!(faults.is_triggered("io"));
+++    faults.assert_triggered("io");
+++    assert!(!faults.inject("io"), "the second inject must not fire");
+++}
+++
+++#[test]
+++fn inject_rearmed_point_fires_again() {
+++    let faults = ArmedFaults::new();
+++    faults.arm("io");
+++    assert!(faults.inject("io"));
+++    faults.arm("io");
+++    assert!(!faults.is_triggered("io"), "re-arming resets the point");
+++    assert!(faults.inject("io"), "the re-armed point must fire again");
+++}
+++
+++#[test]
+++fn inject_marks_point_triggered_for_assertions() {
+++    let faults = ArmedFaults::new();
+++    faults.arm("clock");
+++    assert!(faults.inject("clock"));
+++    faults.assert_triggered("clock");
+++}
+++
+++#[derive(Clone, Copy, Debug)]
+++enum SeamAction {
+++    Arm(usize),
+++    Inject(usize),
+++}
+++
+++fn seam_action() -> impl Strategy<Value = SeamAction> {
+++    prop_oneof![
+++        (0..POINTS.len()).prop_map(SeamAction::Arm),
+++        (0..POINTS.len()).prop_map(SeamAction::Inject),
+++    ]
+++}
+++
+++proptest! {
+++    #[test]
+++    fn prop_inject_once_per_arm(actions in prop::collection::vec(seam_action(), 0..64)) {
+++        let faults = ArmedFaults::new();
+++        let mut armed = [false; POINTS.len()];
+++        let mut fired = [false; POINTS.len()];
+++
+++        for action in actions {
+++            match action {
+++                SeamAction::Arm(index) => {
+++                    faults.arm(POINTS[index]);
+++                    armed[index] = true;
+++                    fired[index] = false;
+++                }
+++                SeamAction::Inject(index) => {
+++                    let expected = armed[index] && !fired[index];
+++                    let fired_now = faults.inject(POINTS[index]);
+++                    prop_assert!(
+++                        fired_now == expected,
+++                        "inject return diverged for {}",
+++                        POINTS[index]
+++                    );
+++                    if expected {
+++                        fired[index] = true;
+++                    }
+++                }
+++            }
+++            for index in 0..POINTS.len() {
+++                prop_assert_eq!(
+++                    faults.is_triggered(POINTS[index]),
+++                    fired[index],
+++                    "point {} diverged from the model",
+++                    POINTS[index]
+++                );
+++            }
+++        }
+++    }
+++}
+++
++ proptest! {
++     #[test]
++     fn prop_faults(actions in prop::collection::vec(action(), 0..64)) {
++         let faults = ArmedFaults::new();
++         let mut armed = [false; POINTS.len()];
++         let mut fired = [false; POINTS.len()];
++ 
++         for action in actions {
++             match action {
++                 Action::Arm(index) => {
+diff --git a/.spec/agentd-command-core/reports/diffs/task-CMD-001B.diff b/.spec/agentd-command-core/reports/diffs/task-CMD-001B.diff
+new file mode 100644
+index 0000000..aba2f79
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/diffs/task-CMD-001B.diff
+@@ -0,0 +1,1019 @@
++diff --git a/agent-os/crates/command-coordinator/src/envelope.rs b/agent-os/crates/command-coordinator/src/envelope.rs
++new file mode 100644
++index 0000000..ff14ad6
++--- /dev/null
+++++ b/agent-os/crates/command-coordinator/src/envelope.rs
++@@ -0,0 +1,155 @@
+++//! Command envelope and request digest: the routing and replay-guard fields
+++//! carried by every command submission (R1.1, R2.1, R2.2, R2.3, N1).
+++
+++use std::fmt;
+++use std::str::FromStr;
+++
+++use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, IdempotencyKey, PrincipalId};
+++use errors::KernelError;
+++use errors::codes::{ErrorCode, RetryClass};
+++
+++/// 32-byte digest of the request, rendered as 64 lowercase hexadecimal
+++/// characters. Parsing accepts only the canonical lowercase form.
+++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+++pub struct RequestDigest([u8; 32]);
+++
+++impl FromStr for RequestDigest {
+++    type Err = errors::KernelError;
+++
+++    fn from_str(text: &str) -> Result<Self, Self::Err> {
+++        if text.len() != 64 {
+++            return Err(malformed_digest());
+++        }
+++        let mut bytes = [0u8; 32];
+++        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+++            let high = hex_nibble(pair[0]).ok_or_else(malformed_digest)?;
+++            let low = hex_nibble(pair[1]).ok_or_else(malformed_digest)?;
+++            bytes[index] = (high << 4) | low;
+++        }
+++        Ok(Self(bytes))
+++    }
+++}
+++
+++impl fmt::Display for RequestDigest {
+++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+++        for byte in self.0 {
+++            write!(f, "{byte:02x}")?;
+++        }
+++        Ok(())
+++    }
+++}
+++
+++fn malformed_digest() -> KernelError {
+++    KernelError::new(
+++        ErrorCode::InvalidArgument,
+++        RetryClass::Never,
+++        "request_digest must be 64 lowercase hexadecimal characters",
+++    )
+++}
+++
+++fn hex_nibble(byte: u8) -> Option<u8> {
+++    match byte {
+++        b'0'..=b'9' => Some(byte - b'0'),
+++        b'a'..=b'f' => Some(byte - b'a' + 10),
+++        _ => None,
+++    }
+++}
+++
+++/// Everything a command submission carries across the coordinator boundary.
+++#[derive(Clone, Debug)]
+++pub struct CommandEnvelope {
+++    /// Identity of this submission, recorded on the transaction.
+++    pub command_id: CommandId,
+++    /// Replay key scoped by principal.
+++    pub idempotency_key: IdempotencyKey,
+++    /// Principal on whose behalf the command runs.
+++    pub principal_id: PrincipalId,
+++    /// Actor that issued the command.
+++    pub actor_id: ActorId,
+++    /// Optional device that issued the command.
+++    pub device_id: Option<DeviceId>,
+++    /// Optional delegation chain authorizing the actor.
+++    pub delegation_chain_id: Option<DelegationChainId>,
+++    /// Digest compared on replay to detect divergent resubmissions.
+++    pub request_digest: RequestDigest,
+++    /// Optional correlation identifier for observability.
+++    pub correlation_id: Option<String>,
+++    /// Optional identifier of the command that caused this one.
+++    pub causation_id: Option<String>,
+++    /// Optional expiry deadline in UTC Unix milliseconds.
+++    pub deadline_unix_ms: Option<i64>,
+++    /// Registered command type that routes the envelope to its handler.
+++    pub command_type: String,
+++    /// Serialized command payload; never logged or echoed in errors.
+++    pub payload: Vec<u8>,
+++}
+++
+++impl CommandEnvelope {
+++    /// Rejects empty keys, malformed digests, empty command types, and past
+++    /// deadlines. Malformed digests are rejected when [`RequestDigest`] is
+++    /// parsed, before an envelope can exist.
+++    pub fn validate(&self, now_unix_ms: i64) -> errors::Result<()> {
+++        if self.idempotency_key.as_str().trim().is_empty() {
+++            return Err(KernelError::new(
+++                ErrorCode::InvalidArgument,
+++                RetryClass::Never,
+++                "idempotency_key must not be empty",
+++            ));
+++        }
+++        if self.command_type.trim().is_empty() {
+++            return Err(KernelError::new(
+++                ErrorCode::InvalidArgument,
+++                RetryClass::Never,
+++                "command_type must not be empty",
+++            ));
+++        }
+++        if let Some(deadline_unix_ms) = self.deadline_unix_ms
+++            && deadline_unix_ms < now_unix_ms
+++        {
+++            return Err(KernelError::new(
+++                ErrorCode::FailedPrecondition,
+++                RetryClass::Never,
+++                "deadline_unix_ms is in the past",
+++            ));
+++        }
+++        Ok(())
+++    }
+++}
+++
+++#[cfg(test)]
+++mod tests {
+++    use std::str::FromStr;
+++
+++    use errors::codes::ErrorCode;
+++
+++    use super::RequestDigest;
+++
+++    #[test]
+++    fn canonical_digests_round_trip_through_lowercase_hex() {
+++        let text = "ab".repeat(32);
+++        let digest = match RequestDigest::from_str(&text) {
+++            Ok(digest) => digest,
+++            Err(error) => panic!("canonical digest rejected: {error}"),
+++        };
+++        assert_eq!(digest.to_string(), text);
+++    }
+++
+++    #[test]
+++    fn malformed_digests_are_rejected() {
+++        let cases = [
+++            String::new(),
+++            "zz".repeat(32),
+++            "a".repeat(63),
+++            "a".repeat(65),
+++            "AB".repeat(32),
+++            "é".repeat(32),
+++        ];
+++        for case in cases {
+++            let error = match RequestDigest::from_str(&case) {
+++                Ok(_) => panic!("malformed digest admitted"),
+++                Err(error) => error,
+++            };
+++            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+++        }
+++    }
+++}
++diff --git a/agent-os/crates/command-coordinator/src/handler.rs b/agent-os/crates/command-coordinator/src/handler.rs
++new file mode 100644
++index 0000000..e0bb047
++--- /dev/null
+++++ b/agent-os/crates/command-coordinator/src/handler.rs
++@@ -0,0 +1,210 @@
+++//! Typed handler dispatch: the context handlers receive, the success outcome
+++//! vocabulary, the handler trait, and the command-type registry (R1.1, R1.4,
+++//! R3.1, R3.2, R3.4).
+++
+++use std::collections::HashMap;
+++use std::collections::hash_map::Entry;
+++use std::sync::Arc;
+++
+++use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, PrincipalId};
+++use errors::KernelError;
+++use errors::codes::{ErrorCode, RetryClass};
+++
+++/// Context passed to a handler: the envelope's routing fields, never the
+++/// payload digest or the transaction handle owner.
+++#[derive(Clone, Debug, PartialEq, Eq)]
+++pub struct CommandContext {
+++    /// Identity of this submission.
+++    pub command_id: CommandId,
+++    /// Principal on whose behalf the command runs.
+++    pub principal_id: PrincipalId,
+++    /// Actor that issued the command.
+++    pub actor_id: ActorId,
+++    /// Optional device that issued the command.
+++    pub device_id: Option<DeviceId>,
+++    /// Optional delegation chain authorizing the actor.
+++    pub delegation_chain_id: Option<DelegationChainId>,
+++    /// Optional correlation identifier for observability.
+++    pub correlation_id: Option<String>,
+++    /// Optional identifier of the command that caused this one.
+++    pub causation_id: Option<String>,
+++}
+++
+++/// Persisted outcome vocabulary. Only success is recorded today, so replay of
+++/// a failure is impossible by construction (design ruling 2).
+++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+++pub enum OutcomeCode {
+++    /// The command's mutations and events were applied and committed.
+++    Ok,
+++}
+++
+++impl OutcomeCode {
+++    /// Returns the stable persisted token for this code.
+++    pub const fn as_str(self) -> &'static str {
+++        match self {
+++            Self::Ok => "ok",
+++        }
+++    }
+++
+++    /// Decodes a persisted token, failing closed on values this version does
+++    /// not understand.
+++    pub fn from_stored(value: &str) -> errors::Result<Self> {
+++        match value {
+++            "ok" => Ok(Self::Ok),
+++            _ => Err(KernelError::new(
+++                ErrorCode::Internal,
+++                RetryClass::Never,
+++                "stored idempotency outcome_code is not recognized",
+++            )),
+++        }
+++    }
+++}
+++
+++/// Result of a handler run: outcome code plus callback payload.
+++#[derive(Clone, Debug, PartialEq, Eq)]
+++pub struct CommandOutcome {
+++    /// Persisted outcome code.
+++    pub code: OutcomeCode,
+++    /// Serialized outcome payload; never logged.
+++    pub payload: Vec<u8>,
+++}
+++
+++/// Command implementation bound to one command type.
+++///
+++/// Handlers see only the context and the write transaction; they stage events
+++/// through `events::outbox::stage` and never see the store.
+++#[async_trait::async_trait]
+++pub trait CommandHandler: Send + Sync + 'static {
+++    /// Applies the command's mutations inside `txn` and reports its outcome.
+++    async fn handle(
+++        &self,
+++        ctx: &CommandContext,
+++        txn: &mut dyn kernel_store::KernelTxn,
+++        payload: Vec<u8>,
+++    ) -> errors::Result<CommandOutcome>;
+++}
+++
+++/// Command-type to handler map; registration is once-only.
+++#[derive(Default)]
+++pub struct CommandRegistry {
+++    handlers: HashMap<String, Arc<dyn CommandHandler>>,
+++}
+++
+++impl CommandRegistry {
+++    /// Creates an empty registry.
+++    pub fn new() -> Self {
+++        Self::default()
+++    }
+++
+++    /// Registers `handler` for `command_type`.
+++    ///
+++    /// Returns `Conflict` when the command type is already registered, leaving
+++    /// the existing handler in place.
+++    pub fn register(
+++        &mut self,
+++        command_type: impl Into<String>,
+++        handler: Arc<dyn CommandHandler>,
+++    ) -> errors::Result<()> {
+++        let command_type = command_type.into();
+++        if command_type.trim().is_empty() {
+++            return Err(KernelError::new(
+++                ErrorCode::InvalidArgument,
+++                RetryClass::Never,
+++                "command_type must not be empty",
+++            ));
+++        }
+++        match self.handlers.entry(command_type) {
+++            Entry::Occupied(_) => Err(KernelError::new(
+++                ErrorCode::Conflict,
+++                RetryClass::Never,
+++                "command_type is already registered",
+++            )),
+++            Entry::Vacant(entry) => {
+++                entry.insert(handler);
+++                Ok(())
+++            }
+++        }
+++    }
+++
+++    /// Returns the handler registered for `command_type`, if any.
+++    pub fn get(&self, command_type: &str) -> Option<Arc<dyn CommandHandler>> {
+++        self.handlers.get(command_type).cloned()
+++    }
+++
+++    /// Returns the number of registered command types.
+++    pub fn len(&self) -> usize {
+++        self.handlers.len()
+++    }
+++
+++    /// Returns whether no command types are registered.
+++    pub fn is_empty(&self) -> bool {
+++        self.handlers.is_empty()
+++    }
+++}
+++
+++#[cfg(test)]
+++mod tests {
+++    use std::sync::Arc;
+++
+++    use errors::codes::{ErrorCode, RetryClass};
+++
+++    use super::{CommandContext, CommandHandler, CommandOutcome, CommandRegistry, OutcomeCode};
+++
+++    struct NoopHandler;
+++
+++    #[async_trait::async_trait]
+++    impl CommandHandler for NoopHandler {
+++        async fn handle(
+++            &self,
+++            _ctx: &CommandContext,
+++            _txn: &mut dyn kernel_store::KernelTxn,
+++            _payload: Vec<u8>,
+++        ) -> errors::Result<CommandOutcome> {
+++            Ok(CommandOutcome {
+++                code: OutcomeCode::Ok,
+++                payload: Vec::new(),
+++            })
+++        }
+++    }
+++
+++    #[test]
+++    fn outcome_codes_round_trip_and_fail_closed() {
+++        assert_eq!(OutcomeCode::Ok.as_str(), "ok");
+++        assert_eq!(OutcomeCode::from_stored("ok").unwrap(), OutcomeCode::Ok);
+++        let error = match OutcomeCode::from_stored("failed") {
+++            Ok(_) => panic!("unknown stored code was admitted"),
+++            Err(error) => error,
+++        };
+++        assert_eq!(error.code(), ErrorCode::Internal);
+++        assert_eq!(error.retry_class(), RetryClass::Never);
+++    }
+++
+++    #[test]
+++    fn duplicate_registration_is_a_conflict() {
+++        let mut registry = CommandRegistry::new();
+++        assert!(registry.is_empty());
+++        registry
+++            .register("session.create", Arc::new(NoopHandler))
+++            .expect("first registration succeeds");
+++        let error = match registry.register("session.create", Arc::new(NoopHandler)) {
+++            Ok(()) => panic!("duplicate registration was admitted"),
+++            Err(error) => error,
+++        };
+++        assert_eq!(error.code(), ErrorCode::Conflict);
+++        assert_eq!(error.retry_class(), RetryClass::Never);
+++        assert_eq!(registry.len(), 1);
+++        assert!(registry.get("session.create").is_some());
+++        assert!(registry.get("session.delete").is_none());
+++    }
+++
+++    #[test]
+++    fn empty_command_types_are_rejected() {
+++        let mut registry = CommandRegistry::new();
+++        let error = match registry.register("  ", Arc::new(NoopHandler)) {
+++            Ok(()) => panic!("empty command type was admitted"),
+++            Err(error) => error,
+++        };
+++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+++        assert!(registry.is_empty());
+++    }
+++}
++diff --git a/agent-os/crates/command-coordinator/src/lib.rs b/agent-os/crates/command-coordinator/src/lib.rs
++index 7f13bfa..114c7af 100644
++--- a/agent-os/crates/command-coordinator/src/lib.rs
+++++ b/agent-os/crates/command-coordinator/src/lib.rs
++@@ -1,2 +1,171 @@
++-//! Linearization, idempotency, and atomic command orchestration.
+++//! Linearization, idempotency, and atomic command orchestration (R1, R2, R4).
+++//!
+++//! [`CommandCoordinator::execute`] is the single mutation path for commands:
+++//! registry lookup, envelope validation, a fenced write transaction, replay
+++//! lookup, handler dispatch, fault points around commit, and success-only
+++//! idempotency recording. Handlers stage events through `events::outbox`;
+++//! this crate never issues SQL and never opens a transaction outside the
+++//! injected [`KernelStore`].
++ #![forbid(unsafe_code)]
+++
+++pub mod envelope;
+++pub mod handler;
+++
+++use std::sync::Arc;
+++
+++use domain::faults::FaultInjector;
+++use domain::time::Clock;
+++use errors::KernelError;
+++use errors::codes::{ErrorCode, RetryClass};
+++use kernel_store::models::NewIdempotencyRecord;
+++use kernel_store::{KernelStore, TxContext};
+++
+++use crate::envelope::CommandEnvelope;
+++use crate::handler::{CommandContext, CommandOutcome, CommandRegistry, OutcomeCode};
+++
+++/// Fault point consulted after the handler stages work and before commit.
+++pub const BEFORE_COMMIT: &str = "command.before_commit";
+++
+++/// Fault point consulted after commit and before the outcome is acknowledged.
+++pub const AFTER_COMMIT: &str = "command.after_commit";
+++
+++/// Supplies the daemon fencing epoch used to open write transactions.
+++pub trait FenceProvider: Send + Sync {
+++    /// Returns the epoch the coordinator currently holds.
+++    fn epoch(&self) -> u64;
+++}
+++
+++/// [`FenceProvider`] pinned to one epoch for composition and tests.
+++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+++pub struct FixedFence(pub u64);
+++
+++impl FenceProvider for FixedFence {
+++    fn epoch(&self) -> u64 {
+++        self.0
+++    }
+++}
+++
+++/// Executes registered commands against the kernel store.
+++pub struct CommandCoordinator {
+++    store: Arc<dyn KernelStore>,
+++    registry: Arc<CommandRegistry>,
+++    fence: Arc<dyn FenceProvider>,
+++    clock: Arc<dyn Clock>,
+++    faults: Arc<dyn FaultInjector>,
+++}
+++
+++impl CommandCoordinator {
+++    /// Wires the coordinator to its persistence, dispatch, fencing, clock,
+++    /// and fault seams.
+++    pub fn new(
+++        store: Arc<dyn KernelStore>,
+++        registry: Arc<CommandRegistry>,
+++        fence: Arc<dyn FenceProvider>,
+++        clock: Arc<dyn Clock>,
+++        faults: Arc<dyn FaultInjector>,
+++    ) -> Self {
+++        Self {
+++            store,
+++            registry,
+++            fence,
+++            clock,
+++            faults,
+++        }
+++    }
+++
+++    /// Runs the ten-step execute algorithm and returns the outcome.
+++    ///
+++    /// Fresh commands commit their mutations, staged outbox events, and an
+++    /// `ok` idempotency record atomically. An identical replay returns the
+++    /// stored outcome without touching state; a differing digest is a
+++    /// `Conflict`. The `command.before_commit` fault point rolls back, and
+++    /// `command.after_commit` reports `Unavailable` after a durable commit.
+++    pub async fn execute(&self, envelope: CommandEnvelope) -> errors::Result<CommandOutcome> {
+++        let handler = self.registry.get(&envelope.command_type).ok_or_else(|| {
+++            KernelError::new(
+++                ErrorCode::InvalidArgument,
+++                RetryClass::Never,
+++                "command_type is not registered in the coordinator",
+++            )
+++        })?;
+++
+++        envelope.validate(self.clock.now_unix_ms())?;
+++
+++        let context = CommandContext {
+++            command_id: envelope.command_id,
+++            principal_id: envelope.principal_id,
+++            actor_id: envelope.actor_id,
+++            device_id: envelope.device_id,
+++            delegation_chain_id: envelope.delegation_chain_id,
+++            correlation_id: envelope.correlation_id.clone(),
+++            causation_id: envelope.causation_id.clone(),
+++        };
+++        let mut txn = self
+++            .store
+++            .begin_write(TxContext {
+++                daemon_epoch: self.fence.epoch(),
+++                principal_id: envelope.principal_id,
+++                command_id: envelope.command_id,
+++                correlation_id: envelope.correlation_id.clone(),
+++            })
+++            .await?;
+++
+++        if let Some(stored) = txn
+++            .idempotency()
+++            .lookup(envelope.principal_id, &envelope.idempotency_key)
+++            .await?
+++        {
+++            if stored.request_digest != envelope.request_digest.to_string() {
+++                drop(txn);
+++                return Err(KernelError::new(
+++                    ErrorCode::Conflict,
+++                    RetryClass::Never,
+++                    "request_digest differs from the record stored for idempotency_key",
+++                ));
+++            }
+++            let outcome = CommandOutcome {
+++                code: OutcomeCode::from_stored(&stored.outcome_code)?,
+++                payload: stored.outcome_payload,
+++            };
+++            drop(txn);
+++            return Ok(outcome);
+++        }
+++
+++        let outcome = handler
+++            .handle(&context, &mut *txn, envelope.payload)
+++            .await?;
+++
+++        if self.faults.inject(BEFORE_COMMIT) {
+++            drop(txn);
+++            return Err(KernelError::new(
+++                ErrorCode::Unavailable,
+++                RetryClass::Safe,
+++                "command.before_commit fault point aborted the transaction",
+++            ));
+++        }
+++
+++        txn.idempotency()
+++            .insert(NewIdempotencyRecord {
+++                principal_id: envelope.principal_id,
+++                idempotency_key: envelope.idempotency_key,
+++                request_digest: envelope.request_digest.to_string(),
+++                command_id: envelope.command_id,
+++                outcome_code: outcome.code.as_str().to_owned(),
+++                outcome_payload: outcome.payload.clone(),
+++                created_at_ms: self.clock.now_unix_ms(),
+++            })
+++            .await?;
+++
+++        txn.commit().await?;
+++
+++        if self.faults.inject(AFTER_COMMIT) {
+++            return Err(KernelError::new(
+++                ErrorCode::Unavailable,
+++                RetryClass::Safe,
+++                "command.after_commit fault point fired after commit",
+++            ));
+++        }
+++
+++        Ok(outcome)
+++    }
+++}
++diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
++new file mode 100644
++index 0000000..79b7279
++--- /dev/null
+++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
++@@ -0,0 +1,459 @@
+++//! Command coordinator acceptance tests over a real SQLite kernel store:
+++//! fresh commits, idempotent replay, digest conflicts, both commit fault
+++//! points, fence staleness, registry rejection, and envelope validation
+++//! (R1-R4, N1, P1).
+++
+++use std::str::FromStr;
+++use std::sync::Arc;
+++use std::sync::atomic::{AtomicUsize, Ordering};
+++
+++use async_trait::async_trait;
+++use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
+++use command_coordinator::handler::{
+++    CommandContext, CommandHandler, CommandOutcome, CommandRegistry, OutcomeCode,
+++};
+++use command_coordinator::{AFTER_COMMIT, BEFORE_COMMIT, CommandCoordinator, FixedFence};
+++use domain::ids::{
+++    ActorId, CommandId, DaemonInstanceId, EventId, EventStreamKey, IdempotencyKey, PrincipalId,
+++    SessionId,
+++};
+++use domain::security::{RetentionClass, SensitivityClass};
+++use domain::time::Clock;
+++use errors::KernelError;
+++use errors::codes::{ErrorCode, RetryClass};
+++use events::outbox::{DraftEvent, stage};
+++use kernel_store::models::{IdempotencyRecordRow, NewSession, OutboxEventRow, SessionRow};
+++use kernel_store::{KernelStore, KernelTxn, TxContext};
+++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
+++use testkit::clock::TestClock;
+++use testkit::faults::ArmedFaults;
+++use testkit::ids::DeterministicIds;
+++
+++const SEED_MS: i64 = 1_700_000_000_000;
+++const DB_FILE: &str = "kernel.db";
+++const TEST_COMMAND: &str = "session.create";
+++
+++fn session_id_of(command_id: CommandId) -> SessionId {
+++    SessionId::from_uuid_v7(*command_id.as_uuid_v7())
+++}
+++
+++/// Representative handler: one session row, one staged outbox event, and an
+++/// `ok` outcome payload.
+++struct TestHandler {
+++    clock: Arc<TestClock>,
+++    calls: AtomicUsize,
+++}
+++
+++impl TestHandler {
+++    fn new(clock: Arc<TestClock>) -> Self {
+++        Self {
+++            clock,
+++            calls: AtomicUsize::new(0),
+++        }
+++    }
+++
+++    fn calls(&self) -> usize {
+++        self.calls.load(Ordering::SeqCst)
+++    }
+++}
+++
+++#[async_trait]
+++impl CommandHandler for TestHandler {
+++    async fn handle(
+++        &self,
+++        ctx: &CommandContext,
+++        txn: &mut dyn KernelTxn,
+++        payload: Vec<u8>,
+++    ) -> errors::Result<CommandOutcome> {
+++        self.calls.fetch_add(1, Ordering::SeqCst);
+++        let session_id = session_id_of(ctx.command_id);
+++        txn.sessions()
+++            .insert(NewSession {
+++                session_id,
+++                principal_id: ctx.principal_id,
+++                created_at_ms: self.clock.now_unix_ms(),
+++                metadata: None,
+++            })
+++            .await?;
+++        let event_id = EventId::from_uuid_v7(*ctx.command_id.as_uuid_v7());
+++        let stream_key = EventStreamKey::new(format!("session/{session_id}")).map_err(|_| {
+++            KernelError::new(
+++                ErrorCode::Internal,
+++                RetryClass::Never,
+++                "representative handler built an invalid stream key",
+++            )
+++        })?;
+++        stage(
+++            txn,
+++            DraftEvent {
+++                event_id,
+++                stream_key,
+++                event_type: "session.created".to_owned(),
+++                payload,
+++                sensitivity: SensitivityClass::Private,
+++                retention: RetentionClass::Durable,
+++                correlation_id: ctx.correlation_id.clone(),
+++                causation_id: None,
+++            },
+++        )
+++        .await?;
+++        Ok(CommandOutcome {
+++            code: OutcomeCode::Ok,
+++            payload: b"created".to_vec(),
+++        })
+++    }
+++}
+++
+++struct Harness {
+++    _dir: tempfile::TempDir,
+++    store: Arc<SqliteKernelStore>,
+++    coordinator: CommandCoordinator,
+++    clock: Arc<TestClock>,
+++    faults: Arc<ArmedFaults>,
+++    handler: Arc<TestHandler>,
+++    fence_epoch: u64,
+++}
+++
+++#[derive(Debug, PartialEq)]
+++struct Observation {
+++    session: Option<SessionRow>,
+++    idempotency: Option<IdempotencyRecordRow>,
+++    unpublished: Vec<OutboxEventRow>,
+++}
+++
+++impl Harness {
+++    async fn observe(&self, envelope: &CommandEnvelope) -> Observation {
+++        self.observe_at(self.fence_epoch, envelope).await
+++    }
+++
+++    async fn observe_at(&self, daemon_epoch: u64, envelope: &CommandEnvelope) -> Observation {
+++        let mut txn = self
+++            .store
+++            .begin_write(TxContext {
+++                daemon_epoch,
+++                principal_id: envelope.principal_id,
+++                command_id: envelope.command_id,
+++                correlation_id: None,
+++            })
+++            .await
+++            .expect("observation transaction begins under a live fence");
+++        let session = txn
+++            .sessions()
+++            .get(session_id_of(envelope.command_id))
+++            .await
+++            .unwrap();
+++        let idempotency = txn
+++            .idempotency()
+++            .lookup(envelope.principal_id, &envelope.idempotency_key)
+++            .await
+++            .unwrap();
+++        let unpublished = txn.streams().scan_unpublished(100).await.unwrap();
+++        txn.rollback().await.unwrap();
+++        Observation {
+++            session,
+++            idempotency,
+++            unpublished,
+++        }
+++    }
+++}
+++
+++async fn harness() -> Harness {
+++    let dir = tempfile::tempdir().unwrap();
+++    let path = dir.path().join(DB_FILE);
+++    let store = Arc::new(
+++        SqliteKernelStore::open(StoreConfig {
+++            path,
+++            pool_max_connections: 5,
+++            busy_timeout_ms: 5_000,
+++        })
+++        .await
+++        .unwrap(),
+++    );
+++    let provider = DeterministicIds::new(SEED_MS);
+++    let fence = store
+++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
+++        .await
+++        .unwrap();
+++    let clock = Arc::new(TestClock::new(SEED_MS));
+++    let faults = Arc::new(ArmedFaults::new());
+++    let handler = Arc::new(TestHandler::new(clock.clone()));
+++    let mut registry = CommandRegistry::new();
+++    registry.register(TEST_COMMAND, handler.clone()).unwrap();
+++    let coordinator = CommandCoordinator::new(
+++        store.clone(),
+++        Arc::new(registry),
+++        Arc::new(FixedFence(fence.epoch.0)),
+++        clock.clone(),
+++        faults.clone(),
+++    );
+++    Harness {
+++        _dir: dir,
+++        store,
+++        coordinator,
+++        clock,
+++        faults,
+++        handler,
+++        fence_epoch: fence.epoch.0,
+++    }
+++}
+++
+++fn envelope(command_type: &str, request_digest: RequestDigest) -> CommandEnvelope {
+++    let provider = DeterministicIds::new(SEED_MS);
+++    CommandEnvelope {
+++        command_id: CommandId::new(&provider),
+++        idempotency_key: IdempotencyKey::new("command-1").unwrap(),
+++        principal_id: PrincipalId::new(&provider),
+++        actor_id: ActorId::new(&provider),
+++        device_id: None,
+++        delegation_chain_id: None,
+++        request_digest,
+++        correlation_id: Some("corr-1".to_owned()),
+++        causation_id: None,
+++        deadline_unix_ms: None,
+++        command_type: command_type.to_owned(),
+++        payload: b"payload-bytes".to_vec(),
+++    }
+++}
+++
+++fn digest(byte: u8) -> RequestDigest {
+++    RequestDigest::from_str(&format!("{byte:02x}").repeat(32)).expect("valid digest")
+++}
+++
+++#[tokio::test]
+++async fn fresh_command_commits_rows_outbox_and_idempotency() {
+++    let harness = harness().await;
+++    let envelope = envelope(TEST_COMMAND, digest(0xa1));
+++
+++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++
+++    assert_eq!(outcome.code, OutcomeCode::Ok);
+++    assert_eq!(outcome.payload, b"created");
+++
+++    let observed = harness.observe(&envelope).await;
+++    let session = observed.session.expect("session row committed");
+++    assert_eq!(session.principal_id, envelope.principal_id);
+++    assert_eq!(session.created_at_ms, harness.clock.now_unix_ms());
+++    let record = observed.idempotency.expect("idempotency record committed");
+++    assert_eq!(record.principal_id, envelope.principal_id);
+++    assert_eq!(record.idempotency_key, envelope.idempotency_key);
+++    assert_eq!(record.command_id, envelope.command_id);
+++    assert_eq!(record.request_digest, envelope.request_digest.to_string());
+++    assert_eq!(record.outcome_code, "ok");
+++    assert_eq!(record.outcome_payload, b"created");
+++    assert_eq!(record.created_at_ms, harness.clock.now_unix_ms());
+++    assert_eq!(observed.unpublished.len(), 1);
+++    assert_eq!(observed.unpublished[0].event_type, "session.created");
+++    assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
+++    assert_eq!(harness.handler.calls(), 1);
+++}
+++
+++#[tokio::test]
+++async fn identical_replay_returns_the_stored_outcome_without_changes() {
+++    let harness = harness().await;
+++    let envelope = envelope(TEST_COMMAND, digest(0xa2));
+++
+++    let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++    let before = harness.observe(&envelope).await;
+++
+++    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++
+++    assert_eq!(replayed, first);
+++    assert_eq!(
+++        harness.handler.calls(),
+++        1,
+++        "replay must not run the handler"
+++    );
+++    assert_eq!(harness.observe(&envelope).await, before);
+++}
+++
+++#[tokio::test]
+++async fn different_digest_for_the_same_key_is_a_conflict() {
+++    let harness = harness().await;
+++    let envelope = envelope(TEST_COMMAND, digest(0xb1));
+++    harness.coordinator.execute(envelope.clone()).await.unwrap();
+++    let before = harness.observe(&envelope).await;
+++
+++    let mut conflicting = envelope.clone();
+++    conflicting.request_digest = digest(0xb2);
+++    let error = harness.coordinator.execute(conflicting).await.unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::Conflict);
+++    assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert_eq!(
+++        harness.handler.calls(),
+++        1,
+++        "conflict must not run the handler"
+++    );
+++    assert_eq!(harness.observe(&envelope).await, before);
+++}
+++
+++#[tokio::test]
+++async fn pre_commit_fault_rolls_back_and_resubmission_succeeds() {
+++    let harness = harness().await;
+++    let envelope = envelope(TEST_COMMAND, digest(0xc1));
+++    harness.faults.arm(BEFORE_COMMIT);
+++
+++    let error = harness
+++        .coordinator
+++        .execute(envelope.clone())
+++        .await
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::Unavailable);
+++    assert_eq!(error.retry_class(), RetryClass::Safe);
+++    harness.faults.assert_triggered(BEFORE_COMMIT);
+++    let rolled_back = harness.observe(&envelope).await;
+++    assert!(rolled_back.session.is_none());
+++    assert!(rolled_back.idempotency.is_none());
+++    assert!(rolled_back.unpublished.is_empty());
+++
+++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++
+++    assert_eq!(outcome.payload, b"created");
+++    let committed = harness.observe(&envelope).await;
+++    assert!(committed.session.is_some());
+++    assert!(committed.idempotency.is_some());
+++    assert_eq!(committed.unpublished.len(), 1);
+++    assert_eq!(harness.handler.calls(), 2);
+++}
+++
+++#[tokio::test]
+++async fn post_commit_fault_reports_unavailable_then_replay_returns_the_outcome() {
+++    let harness = harness().await;
+++    let envelope = envelope(TEST_COMMAND, digest(0xd1));
+++    harness.faults.arm(AFTER_COMMIT);
+++
+++    let error = harness
+++        .coordinator
+++        .execute(envelope.clone())
+++        .await
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::Unavailable);
+++    assert_eq!(error.retry_class(), RetryClass::Safe);
+++    harness.faults.assert_triggered(AFTER_COMMIT);
+++    let committed = harness.observe(&envelope).await;
+++    assert!(
+++        committed.session.is_some(),
+++        "work committed before the fault"
+++    );
+++    assert!(committed.idempotency.is_some());
+++    assert_eq!(committed.unpublished.len(), 1);
+++
+++    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++
+++    assert_eq!(replayed.code, OutcomeCode::Ok);
+++    assert_eq!(replayed.payload, b"created");
+++    assert_eq!(
+++        harness.handler.calls(),
+++        1,
+++        "replay must not rerun the handler"
+++    );
+++    assert_eq!(harness.observe(&envelope).await, committed);
+++}
+++
+++#[tokio::test]
+++async fn stale_fence_rejects_without_rows() {
+++    let harness = harness().await;
+++    let provider = DeterministicIds::new(SEED_MS + 1);
+++    let advanced = harness
+++        .store
+++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
+++        .await
+++        .unwrap();
+++    assert_eq!(advanced.epoch.0, harness.fence_epoch + 1);
+++
+++    let envelope = envelope(TEST_COMMAND, digest(0xe1));
+++    let error = harness
+++        .coordinator
+++        .execute(envelope.clone())
+++        .await
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+++    assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert_eq!(harness.handler.calls(), 0);
+++    let observed = harness.observe_at(advanced.epoch.0, &envelope).await;
+++    assert!(observed.session.is_none());
+++    assert!(observed.idempotency.is_none());
+++    assert!(observed.unpublished.is_empty());
+++}
+++
+++#[tokio::test]
+++async fn unknown_command_type_rejects_without_rows() {
+++    let harness = harness().await;
+++    let envelope = envelope("session.unknown", digest(0xf1));
+++
+++    let error = harness
+++        .coordinator
+++        .execute(envelope.clone())
+++        .await
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+++    assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert_eq!(harness.handler.calls(), 0);
+++    let observed = harness.observe(&envelope).await;
+++    assert!(observed.session.is_none());
+++    assert!(observed.idempotency.is_none());
+++    assert!(observed.unpublished.is_empty());
+++}
+++
+++#[tokio::test]
+++async fn duplicate_registration_is_a_conflict() {
+++    let clock = Arc::new(TestClock::new(SEED_MS));
+++    let handler = Arc::new(TestHandler::new(clock));
+++    let mut registry = CommandRegistry::new();
+++    registry.register(TEST_COMMAND, handler.clone()).unwrap();
+++
+++    let error = registry
+++        .register(TEST_COMMAND, handler.clone())
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::Conflict);
+++    assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert_eq!(registry.len(), 1);
+++    assert!(registry.get(TEST_COMMAND).is_some());
+++}
+++
+++#[tokio::test]
+++async fn malformed_digest_is_rejected() {
+++    let cases = [
+++        String::new(),
+++        "zz".repeat(32),
+++        "ab".repeat(31),
+++        "ab".repeat(33),
+++        "AB".repeat(32),
+++    ];
+++    for case in cases {
+++        let error = RequestDigest::from_str(&case).unwrap_err();
+++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+++        assert_eq!(error.retry_class(), RetryClass::Never);
+++    }
+++}
+++
+++#[tokio::test]
+++async fn past_deadline_is_rejected_without_rows() {
+++    let harness = harness().await;
+++    let mut envelope = envelope(TEST_COMMAND, digest(0x42));
+++    envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms() - 1);
+++
+++    let error = harness
+++        .coordinator
+++        .execute(envelope.clone())
+++        .await
+++        .unwrap_err();
+++
+++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+++    assert_eq!(error.retry_class(), RetryClass::Never);
+++    assert_eq!(harness.handler.calls(), 0);
+++    let observed = harness.observe(&envelope).await;
+++    assert!(observed.session.is_none());
+++    assert!(observed.idempotency.is_none());
+++    assert!(observed.unpublished.is_empty());
+++
+++    envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms());
+++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
+++
+++    assert_eq!(outcome.payload, b"created");
+++}
+diff --git a/.spec/agentd-command-core/reports/task-CMD-000.md b/.spec/agentd-command-core/reports/task-CMD-000.md
+new file mode 100644
+index 0000000..0f5c6e7
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/task-CMD-000.md
+@@ -0,0 +1,125 @@
++# Task CMD-000 Report
++
++- **Spec:** agentd-command-core
++- **Task:** CMD-000 — Declare command-coordinator dependencies
++- **Agent:** agent-cmd000
++- **Status:** DONE
++- **Commit:** `74b327a` — `chore(workspace): declare command-coordinator dependencies [CMD-000]`
++- **Branch:** `feat/agentd-microkernel-mvp`
++
++## What changed
++
++`agent-os/crates/command-coordinator/Cargo.toml` (append-only):
++
++- Added `async-trait.workspace = true` to `[dependencies]`.
++- Added a new `[dev-dependencies]` section with `tokio.workspace = true`,
++  `testkit.workspace = true`, `tempfile.workspace = true`, and
++  `kernel-store-sqlite.workspace = true`.
++
++`agent-os/Cargo.lock`: `cargo check --workspace` resolved the
++`command-coordinator` package entry to additionally list `async-trait` (normal) and
++`kernel-store-sqlite`, `tempfile`, `testkit`, `tokio` (dev); 5 added lines, no other
++package changed.
++
++All five dependencies were already declared in the root
++`[workspace.dependencies]`, so every entry uses `.workspace = true`; existing lines
++were not removed, reordered, or reformatted. The workspace `tokio` declaration
++already enables `macros`, `rt-multi-thread`, `sync`, and `time`, satisfying the
++required dev features. `testkit`/`kernel-store-sqlite` appear only as dev-dependencies,
++so no production crate depends on testkit.
++
++## Acceptance criteria
++
++The task lists no numbered criteria; the steps and referenced requirements map as:
++
++| # | Requirement / step | Met | Evidence |
++|---|---|---|---|
++| 1 | Manifest declares `async-trait` + dev `tokio`, `testkit`, `tempfile`, `kernel-store-sqlite` via `.workspace = true`, append-only | **MET** | `git diff` shows 7 added lines, 0 removed; see diff below |
++| 2 | Resolve the lock with `cargo check --workspace` | **MET** | exit 0; `Cargo.lock` gained exactly the 5 new edges |
++| 3 | `cargo test --workspace --no-run` passes | **MET** | exit 0 |
++| 4 | `cargo clippy --workspace --all-targets -- -D warnings` passes | **MET** | exit 0 |
++| 5 | `cargo fmt --check` passes | **MET** | exit 0, no output |
++| 6 | G1 — workspace gates stay green | **MET** | all four commands exit 0 |
++| 7 | N3 — no contract/schema/build-pack changes | **MET** | commit touches only `Cargo.toml` + `Cargo.lock`; no contract or schema file in `git show --stat` |
++| 8 | Commit scoped with task id | **MET** | `74b327a`, 2 files, message contains `[CMD-000]` |
++| 9 | No deferred-work markers | **MET** | diff contains no `TODO`/`FIXME`/`unimplemented!`/`todo!` |
++
++G2 was not exercised by this task (no pack validators were run; no contract lock or
++schema files were touched).
++
++## Command output (real)
++
++```
++$ rustc --version && cargo --version
++rustc 1.94.0 (4a4ef493e 2026-03-02)
++cargo 1.94.0 (85eff7c80 2026-01-15)
++
++$ cargo check --workspace
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.04s
++check_exit=0
++
++$ cargo test --workspace --no-run
++  Executable tests/prop_faults.rs (target/debug/deps/prop_faults-1baa843fe4e2f210)
++  Executable tests/store_mock.rs (target/debug/deps/store_mock-2150b0410600352e)
++  Executable unittests src/lib.rs (target/debug/deps/workspace-561d4c6a0964266a)
++test_exit=0
++
++$ cargo clippy --workspace --all-targets -- -D warnings
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.11s
++clippy_exit=0
++
++$ cargo fmt --check
++fmt_exit=0
++
++$ git log --oneline -1
++74b327a chore(workspace): declare command-coordinator dependencies [CMD-000]
++```
++
++## Manifest diff
++
++```diff
++ kernel-store.workspace = true
+++async-trait.workspace = true
+++
+++[dev-dependencies]
+++tokio.workspace = true
+++testkit.workspace = true
+++tempfile.workspace = true
+++kernel-store-sqlite.workspace = true
++```
++
++## Lock diff (condensed)
++
++```diff
++ name = "command-coordinator"
++ dependencies = [
+++ "async-trait",
++  "domain",
++  "errors",
++  "event-journal",
++  "events",
++  "kernel-store",
+++ "kernel-store-sqlite",
+++ "tempfile",
+++ "testkit",
+++ "tokio",
++ ]
++```
++
++## Files changed
++
++- `agent-os/crates/command-coordinator/Cargo.toml` (leased)
++- `agent-os/Cargo.lock` (leased)
++
++`git show --stat 74b327a` = 2 files changed, 12 insertions(+), 0 deletions.
++
++## Concerns
++
++1. `tokio` is declared as a plain `tokio.workspace = true` dev-dependency; the
++   required `macros`/`rt-multi-thread` features come from the shared workspace
++   declaration (which also adds `sync`/`time`). This matches the existing
++   convention in `kernel-store-sqlite`/`testkit`; if per-crate feature narrowing is
++   desired later, the workspace entry would need changing (not this task).
++2. `kernel-store-sqlite` and `testkit` are dev-only, as required — CMD-001A/CMD-001B
++   integration tests can now construct a real SQLite store and testkit doubles
++   without further manifest edits.
+diff --git a/.spec/agentd-command-core/reports/task-CMD-001A.md b/.spec/agentd-command-core/reports/task-CMD-001A.md
+new file mode 100644
+index 0000000..60971f7
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/task-CMD-001A.md
+@@ -0,0 +1,120 @@
++# Task CMD-001A Report
++
++- **Spec:** agentd-command-core
++- **Task:** CMD-001A — Additive fault-injection seam
++- **Agent:** agent-cmd001a
++- **Status:** DONE
++- **Commit:** `0dc0580` — `feat(faults): add defaulted inject seam [CMD-001A]`
++- **Branch:** `feat/agentd-microkernel-mvp`
++
++## What changed
++
++- `agent-os/crates/domain/src/faults.rs`: `FaultInjector` gains the additive,
++  defaulted `fn inject(&self, point: &str) -> bool` returning `false`. `NoFaults`
++  keeps its existing `trigger` override and inherits the default `inject`, so every
++  existing implementor keeps compiling unchanged.
++- `agent-os/crates/testkit/src/faults.rs`: extracted the once-per-arm state
++  transition into a private `ArmedFaults::fire(&self, point) -> bool` helper.
++  `trigger` delegates to it (discarding the result, semantics unchanged) and
++  `inject` returns it. An armed, previously unfired point flips to `triggered` and
++  returns `true`; an unarmed or already-fired point returns `false`; `arm` resets
++  the state as before.
++- `agent-os/crates/testkit/tests/prop_faults.rs`: added the failing inject tests
++  (RED first): four explicit tests plus a new model-based `prop_inject_once_per_arm`
++  property over mixed `Arm`/`Inject` sequences. The pre-existing `prop_faults`
++  property and all `trigger` unit tests are untouched.
++
++## Acceptance criteria
++
++| # | Criterion | Met | Evidence |
++|---|---|---|---|
++| 1 | R4.3 — armed points fire exactly once per arm; unarmed points are no-ops | **MET** | `inject_armed_point_fires_exactly_once`, `inject_unarmed_point_returns_false`, `prop_inject_once_per_arm` pass |
++| 2 | R4.4 — `NoFaults` and the default never fire | **MET** | default body is `false`; `NoFaults` has no `inject` override (inherits it); `cargo test -p domain` passes |
++| 3 | N2 — no sleeps; existing once-per-arm property test still passes | **MET** | no sleep/timing code added; `prop_faults` passes unmodified |
++| 4 | P2 — seam usable for pre-commit failure injection | **MET** | `inject` returns `bool` at a named point with once-per-arm semantics; RED test `inject_marks_point_triggered_for_assertions` proves `assert_triggered` works after an injected fire |
++| 5 | No file outside `files:` changed | **MET** | commit touches exactly the 3 leased paths (`git show --stat 0dc0580`) |
++| 6 | `cargo test -p domain -p testkit` passes | **MET** | exit 0; all suites green (below) |
++| 7 | `cargo clippy -p domain -p testkit --all-targets -- -D warnings` clean | **MET** | exit 0, no diagnostics |
++| 8 | `cargo fmt --check` passes | **MET** | exit 0, no output |
++| 9 | Commit scoped with task id, retry on `index.lock` | **MET** | `0dc0580`; retry loop implemented (no retry needed) |
++
++## RED output (real, before implementation)
++
++```
++$ cargo test -p testkit --test prop_faults
++error[E0599]: no method named `inject` found for struct `ArmedFaults` in the current scope
++   --> crates/testkit/tests/prop_faults.rs:25:20
++    |
++ 25 |     assert!(!faults.inject("io"), "an unarmed point must not fire");
++    |                     ^^^^^^ method not found in `ArmedFaults`
++...
++error[E0599]: no method named `inject` found for struct `ArmedFaults` in the current scope
++   --> crates/testkit/tests/prop_faults.rs:86:44
++    |
++ 86 |                     let fired_now = faults.inject(POINTS[index]);
++    |                                            ^^^^^^ method not found in `ArmedFaults`
++
++For more information about this error, try `rustc --explain E0599`.
++error: could not compile `testkit` (test "prop_faults") due to 7 previous errors
++```
++
++The 7 E0599 sites are the four explicit tests plus the property, confirming the
++tests fail for the intended reason (missing method, not a test bug).
++
++## GREEN output (real, after implementation)
++
++```
++$ cargo test -p domain -p testkit
++     Running unittests src/lib.rs (target/debug/deps/domain-658b0240d1311e5e)
++running 20 tests ... test result: ok. 20 passed; 0 failed
++     Running tests/contract_codegen.rs (target/debug/deps/contract_codegen-baff3befd5d6e26b)
++running 2 tests ... test result: ok. 2 passed; 0 failed
++     Running tests/prop_enums.rs (target/debug/deps/prop_enums-0b6a9d7bda327958)
++running 19 tests ... test result: ok. 19 passed; 0 failed
++     Running unittests src/lib.rs (target/debug/deps/testkit-8862728b6a11b641)
++running 8 tests ... test result: ok. 8 passed; 0 failed
++     Running unittests src/bin/fixture-daemon.rs (target/debug/deps/fixture_daemon-898a609e2182add3)
++running 0 tests ... test result: ok. 0 passed; 0 failed
++     Running tests/daemon_host.rs (target/debug/deps/daemon_host-29a619b98bca5417)
++running 4 tests ... test result: ok. 4 passed; 0 failed
++     Running tests/prop_faults.rs (target/debug/deps/prop_faults-47fb262311dc02ed)
++running 6 tests ... test result: ok. 6 passed; 0 failed
++     Running tests/store_mock.rs (target/debug/deps/store_mock-cab12b57ca193baf)
++running 16 tests ... test result: ok. 16 passed; 0 failed
++   Doc-tests domain: test result: ok. 0 passed; 0 failed
++   Doc-tests testkit: test result: ok. 0 passed; 0 failed
++```
++
++`prop_faults` reports 6 tests: 2 properties (the untouched `prop_faults` plus the new
++`prop_inject_once_per_arm`) and 4 explicit inject tests.
++
++```
++$ cargo clippy -p domain -p testkit --all-targets -- -D warnings
++    Checking domain v0.1.0 (/Users/jainamshah/Documents/GitHub/ai-harness/agent-os/crates/domain)
++    Checking kernel-store v0.1.0 (/Users/jainamshah/Documents/GitHub/ai-harness/agent-os/crates/kernel-store)
++    Checking testkit v0.1.0 (/Users/jainamshah/Documents/GitHub/ai-harness/agent-os/crates/testkit)
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.37s
++clippy_exit=0
++
++$ cargo fmt --check
++fmt_exit=0
++```
++
++## Files changed
++
++- `agent-os/crates/domain/src/faults.rs` (leased)
++- `agent-os/crates/testkit/src/faults.rs` (leased)
++- `agent-os/crates/testkit/tests/prop_faults.rs` (leased)
++
++`git show --stat 0dc0580` = 3 files changed, 110 insertions(+), 3 deletions(-).
++
++## Concerns
++
++1. `ArmedFaults::trigger` now delegates to the shared `fire` helper and discards
++   the boolean. Semantics are provably identical (same state transition, same
++   guards), and the unchanged unit tests plus the untouched `prop_faults` property
++   confirm it.
++2. Tests were placed in `prop_faults.rs` per the task; testkit's in-crate unit tests
++   for `trigger` were intentionally left unmodified so "existing semantics unchanged"
++   is easy to audit from the diff.
++3. No deferred-work markers (`TODO`/`FIXME`/`unimplemented!`) were introduced.
+diff --git a/.spec/agentd-command-core/reports/task-CMD-001B.md b/.spec/agentd-command-core/reports/task-CMD-001B.md
+new file mode 100644
+index 0000000..dc77bd4
+--- /dev/null
++++ b/.spec/agentd-command-core/reports/task-CMD-001B.md
+@@ -0,0 +1,222 @@
++# Task CMD-001B Report
++
++- **Spec:** agentd-command-core
++- **Task:** CMD-001B — The command coordinator
++- **Agent:** agent-cmd001b
++- **Status:** DONE
++- **Commit:** `65494f9` — `feat(command): coordinator execute path and replay semantics [CMD-001B]`
++- **Branch:** `feat/agentd-microkernel-mvp`
++
++## What changed
++
++- `agent-os/crates/command-coordinator/src/envelope.rs` (new): `RequestDigest`
++  with strict `FromStr` (64 lowercase hex characters, canonical lowercase only)
++  and lowercase-hex `Display`, plus `CommandEnvelope` with
++  `validate(now_unix_ms)` rejecting empty keys, empty command types
++  (`InvalidArgument`/`Never`) and past deadlines (`FailedPrecondition`/`Never`).
++- `agent-os/crates/command-coordinator/src/handler.rs` (new): `CommandContext`,
++  the `ok`-only `OutcomeCode` (`as_str`, fail-closed `from_stored`), the
++  `CommandOutcome` payload pair, the `CommandHandler` async trait over
++  `&CommandContext` and `&mut dyn kernel_store::KernelTxn` only, and
++  `CommandRegistry` with deterministic once-only `register` (`Conflict` on a
++  duplicate, existing handler left in place).
++- `agent-os/crates/command-coordinator/src/lib.rs`: `BEFORE_COMMIT` /
++  `AFTER_COMMIT` fault points, `FenceProvider` + `FixedFence`, and
++  `CommandCoordinator::execute` running the ten-step algorithm in the literal
++  design order: registry lookup (unknown → `InvalidArgument`, no transaction),
++  `validate(clock.now_unix_ms())`, `begin_write` with the provider epoch,
++  in-transaction idempotency lookup (same digest → stored outcome after
++  dropping the txn; different → `Conflict`), handler with context and
++  `&mut dyn KernelTxn`, `inject(BEFORE_COMMIT)` (`Unavailable`/`Safe` + drop),
++  idempotency insert with `created_at_ms` from the injected clock, `commit`,
++  `inject(AFTER_COMMIT)` (`Unavailable`/`Safe`, committed state retained), then
++  the outcome. Handlers stage events only through `events::outbox::stage`; the
++  crate contains no SQL.
++- `agent-os/crates/command-coordinator/tests/coordinator.rs` (new): the
++  representative handler (session insert through `txn.sessions()`, one outbox
++  event through `events::outbox::stage`, `CommandOutcome { Ok, b"created" }`),
++  a real `SqliteKernelStore` in a `tempfile` root with `TestClock`,
++  `DeterministicIds`, and `ArmedFaults`, and the ten required cases: fresh
++  commit, identical replay, digest conflict, pre-commit fault + resubmission,
++  post-commit fault + replay, stale fence, unknown type, duplicate
++  registration, malformed digest, and past deadline (including the boundary
++  where `deadline_unix_ms == now` is accepted).
++
++No SQL, no sleeps, no `unwrap()`/`expect()` outside tests, and no error path
++echoes payload bytes.
++
++## Acceptance criteria
++
++| # | Criterion | Met | Evidence |
++|---|---|---|---|
++| 1 | R1.1–R1.6 — single path, replay, conflict, unknown type, atomic outcome plus outbox, no query routing | **MET** | `fresh_command_commits_rows_outbox_and_idempotency`, `identical_replay_returns_the_stored_outcome_without_changes`, `different_digest_for_the_same_key_is_a_conflict`, `unknown_command_type_rejects_without_rows` pass; `execute` is the only mutating entry point |
++| 2 | R2.1–R2.5 — validation, deadline, fenced begin from the provider, zero rows on rejection | **MET** | `past_deadline_is_rejected_without_rows` (zero session/idempotency/outbox rows, `FailedPrecondition`/`Never`), `stale_fence_rejects_without_rows` (real epoch advanced to 2), `TxContext` built from `fence.epoch()` |
++| 3 | R3.1–R3.4 — handlers see context and txn only; registry rejects duplicates; test handler uses the same trait object | **MET** | `CommandHandler::handle(&CommandContext, &mut dyn KernelTxn, Vec<u8>)`; `duplicate_registration_is_a_conflict`; the test handler is registered as `Arc<dyn CommandHandler>` and invoked through the trait |
++| 4 | R4.1/R4.2 — pre-commit zero rows; post-commit replay returns the outcome | **MET** | `pre_commit_fault_rolls_back_and_resubmission_succeeds`, `post_commit_fault_reports_unavailable_then_replay_returns_the_outcome` |
++| 5 | P1 — repeated replays leave row counts unchanged | **MET** | replay test compares full session/idempotency/outbox observations before and after |
++| 6 | N1 — error messages name fields and points, never payload bytes | **MET** | messages name `idempotency_key`, `request_digest`, `command_type`, `deadline_unix_ms`, and the fault point constants; no payload is interpolated anywhere |
++| 7 | No file outside `files:` changed | **MET** | commit `65494f9` touches exactly the 4 leased paths (`git show --stat 65494f9`) |
++| 8 | `cargo test -p command-coordinator -p kernel-store-sqlite -p events` passes | **MET** | exit 0; all suites green |
++| 9 | `cargo test --workspace` passes; clippy `-D warnings`; `cargo fmt --check` clean | **MET** | workspace: 82 suites `test result: ok`, 0 failures; clippy exit 0; fmt exit 0 after `cargo fmt -p command-coordinator` |
++| 10 | Commit scoped with task id, retry on `index.lock` | **MET** | commit message carries `[CMD-001B]`; retry loop implemented (no retry needed) |
++
++## RED output (real, before implementation)
++
++```
++$ cargo test -p command-coordinator --test coordinator
++   Compiling command-coordinator v0.1.0 (/Users/jainamshah/Documents/GitHub/ai-harness/agent-os/crates/command-coordinator)
++error[E0432]: unresolved import `command_coordinator::envelope`
++  --> crates/command-coordinator/tests/coordinator.rs:11:26
++   |
++11 | use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
++   |                          ^^^^^^^^ could not find `envelope` in `command_coordinator`
++
++error[E0432]: unresolved import `command_coordinator::handler`
++  --> crates/command-coordinator/tests/coordinator.rs:12:26
++   |
++12 | use command_coordinator::handler::{
++   |                          ^^^^^^^ could not find `handler` in `command_coordinator`
++
++error[E0432]: unresolved imports `command_coordinator::BEFORE_COMMIT`, `command_coordinator::CommandCoordinator`, `command_coordinator::FixedFence`
++  --> crates/command-coordinator/tests/coordinator.rs:15:27
++   |
++15 | use command_coordinator::{BEFORE_COMMIT, CommandCoordinator, FixedFence};
++   |                           ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^ no `FixedFence` in the root
++   |                           |              |
++   |                           |              no `CommandCoordinator` in the root
++   |                           no `BEFORE_COMMIT` in the root
++
++error: could not compile `command-coordinator` (test "coordinator") due to 3 previous errors
++```
++
++## GREEN output — first four cases (after implementing envelope/handler/coordinator)
++
++```
++$ cargo test -p command-coordinator --test coordinator
++running 4 tests
++test different_digest_for_the_same_key_is_a_conflict ... ok
++test identical_replay_returns_the_stored_outcome_without_changes ... ok
++test fresh_command_commits_rows_outbox_and_idempotency ... ok
++test pre_commit_fault_rolls_back_and_resubmission_succeeds ... ok
++
++test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
++```
++
++## GREEN output — full crate after the remaining six cases
++
++```
++$ cargo test -p command-coordinator
++running 5 tests
++test envelope::tests::malformed_digests_are_rejected ... ok
++test handler::tests::duplicate_registration_is_a_conflict ... ok
++test envelope::tests::canonical_digests_round_trip_through_lowercase_hex ... ok
++test handler::tests::empty_command_types_are_rejected ... ok
++test handler::tests::outcome_codes_round_trip_and_fail_closed ... ok
++
++test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++running 10 tests
++test duplicate_registration_is_a_conflict ... ok
++test malformed_digest_is_rejected ... ok
++test past_deadline_is_rejected_without_rows ... ok
++test fresh_command_commits_rows_outbox_and_idempotency ... ok
++test identical_replay_returns_the_stored_outcome_without_changes ... ok
++test different_digest_for_the_same_key_is_a_conflict ... ok
++test stale_fence_rejects_without_rows ... ok
++test pre_commit_fault_rolls_back_and_resubmission_succeeds ... ok
++test post_commit_fault_reports_unavailable_then_replay_returns_the_outcome ... ok
++test unknown_command_type_rejects_without_rows ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
++
++Doc-tests command_coordinator: test result: ok. 0 passed; 0 failed
++```
++
++## Gate output
++
++```
++$ cargo test -p command-coordinator -p kernel-store-sqlite -p events   # exit 0, all suites ok
++$ cargo test --workspace                                               # exit 0, 82 suites "test result: ok", 0 failed
++$ cargo clippy --workspace --all-targets -- -D warnings                # exit 0, no diagnostics
++$ cargo fmt --check                                                    # exit 0, no output
++```
++
++## Files changed
++
++- `agent-os/crates/command-coordinator/src/envelope.rs`
++- `agent-os/crates/command-coordinator/src/handler.rs`
++- `agent-os/crates/command-coordinator/src/lib.rs`
++- `agent-os/crates/command-coordinator/tests/coordinator.rs`
++
++## Concerns
++
++- `OutcomeCode::from_stored` maps unrecognized persisted tokens to
++  `Internal`/`Never`, matching the storage layer's fail-closed decoding
++  convention; no new error codes were introduced.
++- Success-only idempotency means failed commands never replay (design ruling 2);
++  a future richer outcome vocabulary needs a record-format decision first.
++- The post-commit fault returns `Unavailable`/`Safe` while the work is durably
++  committed; callers must replay to observe the stored outcome, as the test
++  demonstrates.
++- `RequestDigest` parsing rejects uppercase hex, matching the repository's
++  canonical-lowercase convention for identifiers and digests.
++- The dispatched instruction referred to `testkit::ArmedFaults`; the actual
++  path is `testkit::faults::ArmedFaults` (testkit re-exports nothing at the
++  root), which the tests use.
++- `event-journal` remains a declared but unused dependency of the crate
++  (declared by CMD-000); `Cargo.toml` is outside this task's file lease, so it
++  was left untouched.
++- Span instrumentation is deliberately deferred (design ruling 3).
++
++## Fix report (review follow-up)
++
++- **Fix commit:** `4455507` — `fix(command): name the rejected command_type and loop replay asserts [CMD-001B]`
++- **Scope:** `agent-os/crates/command-coordinator/src/lib.rs`,
++  `agent-os/crates/command-coordinator/tests/coordinator.rs` (the other two
++  leased files are unchanged).
++
++**Important — R1.4 message must name the offending type.** The unknown-type
++rejection now formats the submitted value into the message:
++
++```rust
++"command_type {:?} is not registered in the coordinator"
++```
++
++and `unknown_command_type_rejects_without_rows` asserts
++`error.message().contains("session.unknown")` before checking zero rows. The
++value is routing metadata, not payload, so N1 still holds (`{:?}` escapes the
++string; no payload bytes are ever interpolated).
++
++**Minor — P1 repeat-replay coverage.** `identical_replay_returns_the_stored_outcome_without_changes`
++now re-submits the identical envelope three times after the first commit; each
++replay asserts the returned outcome equals the first and that the full
++session/idempotency/outbox observation is unchanged from the previous call,
++with the handler-call counter remaining at one.
++
++**Verification (all from `agent-os/`, exit codes checked directly):**
++
++```
++$ cargo test -p command-coordinator        # 5 unit + 10 integration passed, 0 failed
++$ cargo test --workspace                   # exit 0, 82 suites "test result: ok", 0 failed
++$ cargo clippy --workspace --all-targets -- -D warnings   # exit 0, no diagnostics
++$ cargo fmt --check                        # exit 0, no output
++```
++
++RED/GREEN note: the message assertion was written first and failed against the
++old fixed string, then passed after the `format!` change. The looped replay
++test passed both before and after (behavior was already correct; coverage was
++thin). Real RED output:
++
++```
++$ cargo test -p command-coordinator --test coordinator unknown_command_type_rejects_without_rows
++running 1 test
++test unknown_command_type_rejects_without_rows ... FAILED
++
++thread '...' panicked at crates/command-coordinator/tests/coordinator.rs:404:5:
++message must name the unregistered command_type: command_type is not registered in the coordinator
++
++test result: FAILED. 0 passed; 1 failed; 9 filtered out
++```
++
++Then, after re-applying the `format!` fix: `unknown_command_type_rejects_without_rows` and
++`identical_replay_returns_the_stored_outcome_without_changes` both pass, 5 + 10 tests green.
+diff --git a/.spec/agentd-command-core/requirements.md b/.spec/agentd-command-core/requirements.md
+new file mode 100644
+index 0000000..457d455
+--- /dev/null
++++ b/.spec/agentd-command-core/requirements.md
+@@ -0,0 +1,180 @@
++# Requirements — agentd-command-core
++
++**Status:** draft
++**Date:** 2026-09-11
++**Plan:** `plan.md` (approved)
++
++## Glossary
++
++| Term | Definition |
++|---|---|
++| Command envelope | The validated request wrapper: ids, idempotency key, request digest, deadline, command type, and payload bytes. |
++| Command type | The fully-qualified protobuf message name of the payload; the registry key. |
++| Command handler | The typed implementor that decodes a payload and applies mutations through the transaction. |
++| Command context | The authenticated and correlation fields passed to a handler; never the store. |
++| Outcome | The success code plus payload bytes recorded for replay and returned to the caller. |
++| Replay | Re-execution of an identical command whose idempotency record exists. |
++| Fault point | A named coordinator boundary that a test can arm to force a failure deterministically. |
++| Fenced transaction | A write transaction that asserts the current daemon fencing epoch at begin. |
++
++## Requirement R1: One idempotent execution path
++
++**User story:** As a kernel engineer, I want every mutation to flow through one coordinator with
++replay safety, so that retries and duplicate submissions cannot double-apply commands.
++
++**Addresses:** CMD-001, transaction recipe A, exit criterion "same key/different digest rejected".
++
++**Acceptance criteria (EARS):**
++
++1. WHEN a command envelope is submitted THE SYSTEM SHALL execute it through the single coordinator path and SHALL return exactly the committed outcome.
++2. WHEN the same principal, idempotency key, and request digest are submitted again THE SYSTEM SHALL return the stored outcome without repeating any mutation.
++3. IF the same principal and key arrive with a different request digest THEN THE SYSTEM SHALL reject with a conflict and SHALL NOT mutate state.
++4. IF the command type has no registered handler THEN THE SYSTEM SHALL reject with `InvalidArgument` naming the type and SHALL NOT open a write transaction.
++5. WHEN a command completes successfully THE SYSTEM SHALL record the outcome and every staged outbox row in the same transaction as the mutation.
++6. WHEN a query or read path needs data THE SYSTEM SHALL NOT route it through the command path.
++
++**Boundary conditions:**
++
++| Input / condition | Expected behaviour |
++|---|---|
++| fresh command | executed, outcome recorded, row counts increase |
++| identical replay | stored outcome returned, row counts unchanged |
++| same key, different digest | conflict, no rows changed |
++| unknown command type | rejected before any transaction |
++| concurrent identical submissions | one mutation commits; the other replays or conflicts |
++
++**Non-goals for R1:** command semantics of the 18 real commands; those arrive in later modules.
++
++---
++
++## Requirement R2: Envelope validation and fencing
++
++**User story:** As an operator, I want malformed or stale commands rejected before any mutation,
++so that the store only sees validated, currently fenced work.
++
++**Addresses:** CMD-001 steps 1-3, command-coordinator.md:28-30.
++
++**Acceptance criteria (EARS):**
++
++1. WHEN an envelope is submitted THE SYSTEM SHALL validate that the idempotency key is non-empty and bounded, the request digest is 64 lowercase hexadecimal characters, the command type is non-empty, and the principal and actor ids are present.
++2. IF validation fails THEN THE SYSTEM SHALL reject with `InvalidArgument` and SHALL NOT open a transaction.
++3. WHEN the envelope carries a deadline in the past THE SYSTEM SHALL reject with `FailedPrecondition` and SHALL NOT mutate.
++4. WHEN a write transaction begins THE SYSTEM SHALL assert the current daemon fencing epoch; IF stale or absent THEN THE SYSTEM SHALL reject with `FailedPrecondition` and zero rows changed.
++5. WHEN the coordinator opens a transaction THE SYSTEM SHALL use the fencing epoch from the supplied fence provider, never a caller-supplied epoch field.
++
++**Boundary conditions:**
++
++| Input / condition | Expected behaviour |
++|---|---|
++| empty idempotency key | `InvalidArgument`, no transaction |
++| malformed digest | `InvalidArgument`, no transaction |
++| past deadline | `FailedPrecondition`, no transaction |
++| stale fence | `FailedPrecondition`, zero rows |
++| absent fence | `FailedPrecondition`, zero rows |
++
++**Non-goals for R2:** digest recomputation; clients own the digest algorithm.
++
++---
++
++## Requirement R3: Handlers cannot bypass the transaction
++
++**User story:** As a security reviewer, I want handlers to receive only a transaction and
++context, so that no state-changing path can reach a raw store or escape the fenced transaction.
++
++**Addresses:** CMD-001 acceptance, port design from persistence.
++
++**Acceptance criteria (EARS):**
++
++1. WHEN a handler is invoked THE SYSTEM SHALL pass the command context and a mutable transaction reference, and SHALL NOT pass the store or any connection.
++2. WHEN handlers are registered THE SYSTEM SHALL key them by command type string and SHALL reject duplicate registrations deterministically.
++3. WHERE a test substitutes handlers THE SYSTEM SHALL compile against the same trait object used in production.
++4. WHEN a handler stages events THE SYSTEM SHALL provide that ability only through the transaction's stream repository or the events staging API.
++
++**Boundary conditions:**
++
++| Input / condition | Expected behaviour |
++|---|---|
++| duplicate registration | deterministic rejection at registration |
++| handler returns an error | transaction rolls back, no outcome recorded |
++| handler stages events then fails | no outbox rows, no mutations |
++| handler type not object safe | not representable; trait objects are the production shape |
++
++**Non-goals for R3:** handler authorization policy; later modules enforce capability checks
++inside their handlers.
++
++---
++
++## Requirement R4: Crash semantics are deterministic and atomic
++
++**User story:** As a reliability engineer, I want injected failures before and after commit to
++produce exactly the pack-required behaviours, so that replay safety is proven, not assumed.
++
++**Addresses:** CMD-001 steps 4, required tests.
++
++**Acceptance criteria (EARS):**
++
++1. WHEN a failure is injected at the pre-commit fault point THE SYSTEM SHALL roll back, leaving zero canonical rows, zero outbox rows, and zero idempotency rows.
++2. WHEN a failure is injected at the post-commit fault point THE SYSTEM SHALL return an error after the commit succeeded, and a subsequent identical replay SHALL return the stored outcome with unchanged row counts.
++3. WHEN a fault point is armed THE SYSTEM SHALL fire it exactly once per arm and SHALL otherwise behave as a no-op.
++4. WHEN no fault is injected THE SYSTEM SHALL never trigger a fault point.
++
++**Boundary conditions:**
++
++| Input / condition | Expected behaviour |
++|---|---|
++| pre-commit fault | zero rows of any kind |
++| post-commit fault | committed rows; error returned; replay returns the outcome |
++| replayed fault command | no second mutation, no second outbox row |
++| unarmed points | no-op |
++
++**Non-goals for R4:** process-level crash tests; those arrive with the verification module.
++
++---
++
++## Non-functional requirements
++
++| Id | Category | Requirement (measurable) |
++|---|---|---|
++| N1 | Security | Envelope payloads and secrets never appear in error messages or logs; validation rejects malformed input before any transaction. |
++| N2 | Testability | Every fault point is deterministic and once-per-arm; no test uses a wall-clock sleep. |
++| N3 | Compatibility | No contract, schema, or build-pack file changes; foundation and persistence quality gates stay green. |
++
++## Invariants (property-test candidates)
++
++| Id | Invariant | Derived from |
++|---|---|---|
++| P1 | For any principal, key, and digest replayed any number of times, the stored outcome is returned and canonical row counts are unchanged. | R1.2 |
++| P2 | For any command that fails before commit, no row attributable to it exists. | R4.1 |
++
++## Regression guards
++
++| Id | WHEN … THE SYSTEM SHALL CONTINUE TO … |
++|---|---|
++| G1 | WHEN the workspace quality gates run THE SYSTEM SHALL CONTINUE TO pass fmt, clippy with warnings denied, and the full test suite. |
++| G2 | WHEN the pack validators run THE SYSTEM SHALL CONTINUE TO report `BUILD PACK OK` and `OK` with the contract lock and schema unchanged. |
++
++## Requirements self-analysis
++
++- [x] **Contradictions** — R1's success-only recording and R4's post-commit replay path agree: the outcome and idempotency record commit together in the same transaction, the post-commit fault loses only the response, and the replay finds the stored outcome without re-executing.
++- [x] **Ambiguity** — every validation rule states an exact predicate and error code
++- [x] **Conflicts** — N3 versus the fault-seam change is resolved: the change is in `agent-os/` code, not in any contract or schema
++- [x] **Unstated assumptions** — all referenced concepts are in the Glossary or the plan's assumptions
++- [x] **Missing edge cases** — each requirement carries boundary rows including failure and concurrency
++- [x] **Testability** — every EARS line maps to a named integration test
++- [x] **Coverage** — every CMD-001 step and module-plan in-scope item maps to R1–R4
++
++**Findings and resolutions:**
++
++| Finding | Requirements involved | Resolution |
++|---|---|---|
++| "Fault after commit => replay returns stored outcome" requires the post-commit failure to happen after the outcome is recorded but before the caller sees it | R4.2 | Proposed: the fault point fires after `commit()` returns; the coordinator responds with `Unavailable` (retry-safe); a later identical replay finds the stored outcome. The test asserts the row counts between the two calls. |
++| Unknown command type could either open a transaction first or reject before it | R1.4 | Proposed: reject before any transaction; cheaper and leaves no trace. |
++| Duplicate handler registration could overwrite silently | R3.2 | Proposed: registration returns an error or panics in tests; overwriting is forbidden. |
++
++---
++
++## Approval
++
++**Decision:** approved
++**Approved by:** jainamshah (standing instruction to proceed without per-step confirmation)
++**Date:** 2026-09-11
+diff --git a/.spec/agentd-command-core/state.json b/.spec/agentd-command-core/state.json
+new file mode 100644
+index 0000000..ca548aa
+--- /dev/null
++++ b/.spec/agentd-command-core/state.json
+@@ -0,0 +1,8 @@
++{
++  "feature": "agentd-command-core",
++  "phase": "implement",
++  "gates": {
++    "implement": "2026-09-12T17:05:30Z"
++  },
++  "created": "2026-09-12T17:03:16Z"
++}
+diff --git a/.spec/agentd-command-core/tasks.md b/.spec/agentd-command-core/tasks.md
+new file mode 100644
+index 0000000..32e46b3
+--- /dev/null
++++ b/.spec/agentd-command-core/tasks.md
+@@ -0,0 +1,175 @@
++# Tasks — agentd-command-core
++
++**Date:** 2026-09-11
++**Requirements:** `requirements.md` (approved)
++**Design:** `design.md` (approved)
++
++## Global constraints
++
++- All Rust lives under `agent-os/`; no build-pack edits in this module.
++- From `agent-os/`: `cargo check --workspace`, `cargo test --workspace`,
++  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`.
++- From the repo root: `python3 agent-os-microkernel-mvp-buildpack/scripts/validate_buildpack.py`
++  and `python3 tools/validate_repo.py`.
++- No `unwrap()`/`expect()` outside tests; no payload or secret bytes in errors or logs; no
++  sleeps in tests; no SQL outside the SQLite crate.
++- Commit per task with the task id; retry `git commit` on `index.lock` after two seconds, up
++  to five times.
++
++## Execution contract for subagents
++
++1. Claim before writing: `python3 "$SPECFLOW" claim agentd-command-core TASK_ID AGENT_ID` then `start`.
++2. Stay inside the task's `files:` lease; `block` and report if another file is needed.
++3. `depends_on` interfaces are contracts from `design.md`; do not redesign them.
++4. Test first where the task says so; run the focused test, then the affected suite once.
++5. Report `DONE` · `DONE_WITH_CONCERNS` · `BLOCKED` · `NEEDS_CONTEXT` honestly.
++6. Never dispatch your own reviewer.
++7. Commit scoped to your files, then `review`, then write
++   `.spec/agentd-command-core/reports/task-TASK_ID.md`.
++
++---
++
++### Task CMD-000: Declare command-coordinator dependencies
++
++- status: done
++- owner: agent-cmd000
++- depends_on: none
++- files: `agent-os/crates/command-coordinator/Cargo.toml`, `agent-os/Cargo.lock`
++- requirements: N3, G1, G2
++- scope: small
++- model: cheap
++
++**Objective:** The coordinator crate resolves everything its implementation and tests need.
++
++**Context the implementer cannot infer:**
++
++- The crate already declares `domain`, `errors`, `event-journal`, `events`, `kernel-store`.
++- Add `async-trait` as a dependency. Add dev-dependencies `tokio` (macros, rt-multi-thread), `testkit`, `tempfile`, and `kernel-store-sqlite` so integration tests can run a real store and testkit doubles.
++- All five entries already exist in `[workspace.dependencies]`; use `.workspace = true`. Append only; do not reorder existing lines.
++- No production crate may depend on testkit; this is a dev-dependency only.
++
++**Steps:**
++
++- [ ] Edit the manifest; resolve the lock with `cargo check --workspace`
++- [ ] Run `cargo test --workspace --no-run`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`
++- [ ] Commit: `chore(workspace): declare command-coordinator dependencies [CMD-000]`
++
++**Acceptance criteria:**
++
++- [ ] Dependencies resolve and the lock updates
++- [ ] G1 — full workspace check, tests, clippy, and fmt still pass
++- [ ] N3 — no contract, schema, or build-pack file changed
++- [ ] No file outside `files:` changed
++
++**Verification:**
++
++- [ ] From `agent-os/`: `cargo check --workspace && cargo test --workspace --no-run` exits 0
++- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
++
++---
++
++### Task CMD-001A: Additive fault-injection seam
++
++- status: done
++- owner: agent-cmd001a
++- depends_on: CMD-000
++- files: `agent-os/crates/domain/src/faults.rs`, `agent-os/crates/testkit/src/faults.rs`, `agent-os/crates/testkit/tests/prop_faults.rs`
++- requirements: R4.3, R4.4, N2, P2
++- scope: small
++- model: standard
++
++**Objective:** A test can deterministically force a failure at a named coordinator boundary without a panic, while existing `trigger` semantics stay untouched.
++
++**Context the implementer cannot infer:**
++
++- Add to `domain::faults::FaultInjector`: `fn inject(&self, point: &str) -> bool { let _ = point; false }`. This is additive and defaulted; every existing implementor keeps compiling.
++- `testkit::ArmedFaults::inject` fires an armed point exactly once per arm (marking it triggered, as `trigger` does) and returns `true` when it fired; otherwise returns `false`. Re-arming resets the state.
++- `NoFaults` inherits the default and always returns `false`.
++- The existing `trigger`/`is_triggered`/`assert_triggered` semantics and tests must not change.
++- Test additions in `prop_faults.rs`: an unarmed point returns false; an armed point returns true exactly once; a re-armed point fires again; `inject` marks the point triggered for `assert_triggered`.
++
++**Steps:**
++
++- [ ] Write the failing inject tests first; confirm RED (missing method)
++- [ ] Implement the defaulted trait method and the `ArmedFaults` override
++- [ ] Run `cargo test -p domain -p testkit` to GREEN; keep existing fault tests passing
++- [ ] Run `cargo clippy -p domain -p testkit --all-targets -- -D warnings` and `cargo fmt --check`
++- [ ] Commit: `feat(faults): add defaulted inject seam [CMD-001A]`
++
++**Acceptance criteria:**
++
++- [ ] R4.3 — armed points fire exactly once per arm; unarmed points are no-ops
++- [ ] R4.4 — `NoFaults` and the default never fire
++- [ ] N2 — no sleeps; existing once-per-arm property test still passes
++- [ ] P2 — the seam is usable for pre-commit failure injection
++- [ ] No file outside `files:` changed
++
++**Verification:**
++
++- [ ] From `agent-os/`: `cargo test -p domain -p testkit` passes
++- [ ] `cargo clippy -p domain -p testkit --all-targets -- -D warnings` clean
++
++---
++
++### Task CMD-001B: The command coordinator
++
++- status: done
++- owner: agent-cmd001b
++- depends_on: CMD-001A
++- files: `agent-os/crates/command-coordinator/src/lib.rs`, `agent-os/crates/command-coordinator/src/envelope.rs`, `agent-os/crates/command-coordinator/src/handler.rs`, `agent-os/crates/command-coordinator/tests/coordinator.rs`
++- requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, R2.1, R2.2, R2.3, R2.4, R2.5, R3.1, R3.2, R3.3, R3.4, R4.1, R4.2, N1, P1
++- scope: large
++- model: capable
++
++**Objective:** The ten-step execute algorithm is real: validation, fenced transaction, idempotent replay, typed handler dispatch, outbox staging, outcome recording, commit, and the two fault points.
++
++**Context the implementer cannot infer:**
++
++- Exact signatures for `RequestDigest`, `CommandEnvelope`, `CommandContext`, `OutcomeCode`, `CommandOutcome`, `CommandHandler`, `CommandRegistry`, `FenceProvider`, `FixedFence`, and `CommandCoordinator` are in `design.md` Interfaces; follow them literally.
++- Execute order: registry lookup (unknown → `InvalidArgument`, no transaction); `validate(clock.now_unix_ms())`; `begin_write` with the provider epoch; idempotency lookup (same digest → return stored outcome after dropping the txn; different → `Conflict`); handler with context and `&mut dyn KernelTxn`; `inject(BEFORE_COMMIT)` → on true return `Unavailable`/`Safe` and drop; insert the idempotency record with `OutcomeCode::Ok` and the payload; `commit`; `inject(AFTER_COMMIT)` → on true return `Unavailable`/`Safe`; return the outcome.
++- The persistence port names: `KernelStore::begin_write(TxContext)`, `KernelTxn::idempotency()`, `IdempotencyRepo::lookup/insert`, `TxContext`, and the row types in `kernel-store::models`. Insert uses `created_at_ms` from the injected clock.
++- `events::outbox::stage(txn, draft)` is the only event staging path for handlers; do not construct outbox rows in this crate.
++- Tests in `tests/coordinator.rs` use a real `SqliteKernelStore` in a `tempfile` temp dir, `testkit::TestClock`, `testkit::DeterministicIds`, and `testkit::ArmedFaults`. Define the representative test handler there: it inserts a session (via `txn.sessions().insert`) and stages one outbox event via `events::outbox::stage`, returning `CommandOutcome { code: Ok, payload: b"created" }`.
++- Required cases: fresh command commits rows plus outbox plus idempotency; identical replay returns the stored outcome with unchanged counts; different digest → `Conflict`; pre-commit fault → zero rows of any kind and a re-submission succeeds afresh; post-commit fault → error returned, then replay returns the stored outcome with unchanged counts; stale fence → `FailedPrecondition` with no rows; unknown command type → `InvalidArgument` with no transaction; duplicate registration → `Conflict`; malformed digest and past deadline reject. No sleeps.
++- `CommandRegistry::register` takes an `Arc⟨dyn CommandHandler⟩`; the duplicate check must be deterministic.
++
++**Steps:**
++
++- [ ] Write the integration test file first with the representative handler and the first three cases; confirm RED
++- [ ] Implement `envelope.rs`, `handler.rs`, then the coordinator in `lib.rs`
++- [ ] Run `cargo test -p command-coordinator --test coordinator` to GREEN; add the remaining cases
++- [ ] Run `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`
++- [ ] Commit: `feat(command): coordinator execute path and replay semantics [CMD-001B]`
++
++**Acceptance criteria:**
++
++- [ ] R1.1–R1.6 — single path, replay, conflict, unknown type, atomic outcome plus outbox, no query routing
++- [ ] R2.1–R2.5 — validation, deadline, fenced begin from the provider, zero rows on rejection
++- [ ] R3.1–R3.4 — handlers see context and txn only; registry rejects duplicates; test handler uses the same trait object
++- [ ] R4.1/R4.2 — pre-commit zero rows; post-commit replay returns the outcome
++- [ ] P1 — repeated replays leave row counts unchanged
++- [ ] N1 — error messages name fields and points, never payload bytes
++- [ ] No file outside `files:` changed
++
++**Verification:**
++
++- [ ] From `agent-os/`: `cargo test -p command-coordinator -p kernel-store-sqlite -p events` passes
++- [ ] `cargo test --workspace` passes; `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean
++
++---
++
++## Checkpoints
++
++| After wave | Check | Command |
++|---|---|---|
++| 1 | Dependencies resolved; lock updated | From `agent-os/`: `cargo check --workspace` |
++| 2 | Fault seam green without regressions | From `agent-os/`: `cargo test -p domain -p testkit` |
++| 3 | Public gates | From `agent-os/`: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; from the repo root: both validators |
++
++## Rulings
++
++| # | Ruling | Why | Cost if wrong |
++|---|---|---|---|
++| 1 | The fault seam is extended additively with `inject` rather than a coordinator-local trait | One testkit seam; non-breaking default | A foundation trait edit recorded in this spec's ledger |
++| 2 | Success-only idempotency recording and `ok`-only outcome vocabulary | Failure replay is unspecified; safe default | Richer outcome codes need a record change before failures can replay |
++| 3 | The coordinator defers span instrumentation, matching the persistence observability ruling | No consumer yet; keeps the dependency surface minimal | Store and command signals stay dark until the owning module instruments them |
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 78ad07a..d0402f2 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -178,25 +178,30 @@ dependencies = [
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ 
+ [[package]]
+ name = "command-coordinator"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "event-journal",
+  "events",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "config-engine"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+ ]
+ 
+diff --git a/agent-os/crates/command-coordinator/Cargo.toml b/agent-os/crates/command-coordinator/Cargo.toml
+index 67abbba..b627219 100644
+--- a/agent-os/crates/command-coordinator/Cargo.toml
++++ b/agent-os/crates/command-coordinator/Cargo.toml
+@@ -4,10 +4,17 @@ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ event-journal.workspace = true
+ events.workspace = true
+ kernel-store.workspace = true
++async-trait.workspace = true
++
++[dev-dependencies]
++tokio.workspace = true
++testkit.workspace = true
++tempfile.workspace = true
++kernel-store-sqlite.workspace = true
+diff --git a/agent-os/crates/command-coordinator/src/envelope.rs b/agent-os/crates/command-coordinator/src/envelope.rs
+new file mode 100644
+index 0000000..ff14ad6
+--- /dev/null
++++ b/agent-os/crates/command-coordinator/src/envelope.rs
+@@ -0,0 +1,155 @@
++//! Command envelope and request digest: the routing and replay-guard fields
++//! carried by every command submission (R1.1, R2.1, R2.2, R2.3, N1).
++
++use std::fmt;
++use std::str::FromStr;
++
++use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, IdempotencyKey, PrincipalId};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++
++/// 32-byte digest of the request, rendered as 64 lowercase hexadecimal
++/// characters. Parsing accepts only the canonical lowercase form.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++pub struct RequestDigest([u8; 32]);
++
++impl FromStr for RequestDigest {
++    type Err = errors::KernelError;
++
++    fn from_str(text: &str) -> Result<Self, Self::Err> {
++        if text.len() != 64 {
++            return Err(malformed_digest());
++        }
++        let mut bytes = [0u8; 32];
++        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
++            let high = hex_nibble(pair[0]).ok_or_else(malformed_digest)?;
++            let low = hex_nibble(pair[1]).ok_or_else(malformed_digest)?;
++            bytes[index] = (high << 4) | low;
++        }
++        Ok(Self(bytes))
++    }
++}
++
++impl fmt::Display for RequestDigest {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        for byte in self.0 {
++            write!(f, "{byte:02x}")?;
++        }
++        Ok(())
++    }
++}
++
++fn malformed_digest() -> KernelError {
++    KernelError::new(
++        ErrorCode::InvalidArgument,
++        RetryClass::Never,
++        "request_digest must be 64 lowercase hexadecimal characters",
++    )
++}
++
++fn hex_nibble(byte: u8) -> Option<u8> {
++    match byte {
++        b'0'..=b'9' => Some(byte - b'0'),
++        b'a'..=b'f' => Some(byte - b'a' + 10),
++        _ => None,
++    }
++}
++
++/// Everything a command submission carries across the coordinator boundary.
++#[derive(Clone, Debug)]
++pub struct CommandEnvelope {
++    /// Identity of this submission, recorded on the transaction.
++    pub command_id: CommandId,
++    /// Replay key scoped by principal.
++    pub idempotency_key: IdempotencyKey,
++    /// Principal on whose behalf the command runs.
++    pub principal_id: PrincipalId,
++    /// Actor that issued the command.
++    pub actor_id: ActorId,
++    /// Optional device that issued the command.
++    pub device_id: Option<DeviceId>,
++    /// Optional delegation chain authorizing the actor.
++    pub delegation_chain_id: Option<DelegationChainId>,
++    /// Digest compared on replay to detect divergent resubmissions.
++    pub request_digest: RequestDigest,
++    /// Optional correlation identifier for observability.
++    pub correlation_id: Option<String>,
++    /// Optional identifier of the command that caused this one.
++    pub causation_id: Option<String>,
++    /// Optional expiry deadline in UTC Unix milliseconds.
++    pub deadline_unix_ms: Option<i64>,
++    /// Registered command type that routes the envelope to its handler.
++    pub command_type: String,
++    /// Serialized command payload; never logged or echoed in errors.
++    pub payload: Vec<u8>,
++}
++
++impl CommandEnvelope {
++    /// Rejects empty keys, malformed digests, empty command types, and past
++    /// deadlines. Malformed digests are rejected when [`RequestDigest`] is
++    /// parsed, before an envelope can exist.
++    pub fn validate(&self, now_unix_ms: i64) -> errors::Result<()> {
++        if self.idempotency_key.as_str().trim().is_empty() {
++            return Err(KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                "idempotency_key must not be empty",
++            ));
++        }
++        if self.command_type.trim().is_empty() {
++            return Err(KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                "command_type must not be empty",
++            ));
++        }
++        if let Some(deadline_unix_ms) = self.deadline_unix_ms
++            && deadline_unix_ms < now_unix_ms
++        {
++            return Err(KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                "deadline_unix_ms is in the past",
++            ));
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::str::FromStr;
++
++    use errors::codes::ErrorCode;
++
++    use super::RequestDigest;
++
++    #[test]
++    fn canonical_digests_round_trip_through_lowercase_hex() {
++        let text = "ab".repeat(32);
++        let digest = match RequestDigest::from_str(&text) {
++            Ok(digest) => digest,
++            Err(error) => panic!("canonical digest rejected: {error}"),
++        };
++        assert_eq!(digest.to_string(), text);
++    }
++
++    #[test]
++    fn malformed_digests_are_rejected() {
++        let cases = [
++            String::new(),
++            "zz".repeat(32),
++            "a".repeat(63),
++            "a".repeat(65),
++            "AB".repeat(32),
++            "é".repeat(32),
++        ];
++        for case in cases {
++            let error = match RequestDigest::from_str(&case) {
++                Ok(_) => panic!("malformed digest admitted"),
++                Err(error) => error,
++            };
++            assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        }
++    }
++}
+diff --git a/agent-os/crates/command-coordinator/src/handler.rs b/agent-os/crates/command-coordinator/src/handler.rs
+new file mode 100644
+index 0000000..e0bb047
+--- /dev/null
++++ b/agent-os/crates/command-coordinator/src/handler.rs
+@@ -0,0 +1,210 @@
++//! Typed handler dispatch: the context handlers receive, the success outcome
++//! vocabulary, the handler trait, and the command-type registry (R1.1, R1.4,
++//! R3.1, R3.2, R3.4).
++
++use std::collections::HashMap;
++use std::collections::hash_map::Entry;
++use std::sync::Arc;
++
++use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, PrincipalId};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++
++/// Context passed to a handler: the envelope's routing fields, never the
++/// payload digest or the transaction handle owner.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CommandContext {
++    /// Identity of this submission.
++    pub command_id: CommandId,
++    /// Principal on whose behalf the command runs.
++    pub principal_id: PrincipalId,
++    /// Actor that issued the command.
++    pub actor_id: ActorId,
++    /// Optional device that issued the command.
++    pub device_id: Option<DeviceId>,
++    /// Optional delegation chain authorizing the actor.
++    pub delegation_chain_id: Option<DelegationChainId>,
++    /// Optional correlation identifier for observability.
++    pub correlation_id: Option<String>,
++    /// Optional identifier of the command that caused this one.
++    pub causation_id: Option<String>,
++}
++
++/// Persisted outcome vocabulary. Only success is recorded today, so replay of
++/// a failure is impossible by construction (design ruling 2).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OutcomeCode {
++    /// The command's mutations and events were applied and committed.
++    Ok,
++}
++
++impl OutcomeCode {
++    /// Returns the stable persisted token for this code.
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Ok => "ok",
++        }
++    }
++
++    /// Decodes a persisted token, failing closed on values this version does
++    /// not understand.
++    pub fn from_stored(value: &str) -> errors::Result<Self> {
++        match value {
++            "ok" => Ok(Self::Ok),
++            _ => Err(KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "stored idempotency outcome_code is not recognized",
++            )),
++        }
++    }
++}
++
++/// Result of a handler run: outcome code plus callback payload.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CommandOutcome {
++    /// Persisted outcome code.
++    pub code: OutcomeCode,
++    /// Serialized outcome payload; never logged.
++    pub payload: Vec<u8>,
++}
++
++/// Command implementation bound to one command type.
++///
++/// Handlers see only the context and the write transaction; they stage events
++/// through `events::outbox::stage` and never see the store.
++#[async_trait::async_trait]
++pub trait CommandHandler: Send + Sync + 'static {
++    /// Applies the command's mutations inside `txn` and reports its outcome.
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn kernel_store::KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome>;
++}
++
++/// Command-type to handler map; registration is once-only.
++#[derive(Default)]
++pub struct CommandRegistry {
++    handlers: HashMap<String, Arc<dyn CommandHandler>>,
++}
++
++impl CommandRegistry {
++    /// Creates an empty registry.
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// Registers `handler` for `command_type`.
++    ///
++    /// Returns `Conflict` when the command type is already registered, leaving
++    /// the existing handler in place.
++    pub fn register(
++        &mut self,
++        command_type: impl Into<String>,
++        handler: Arc<dyn CommandHandler>,
++    ) -> errors::Result<()> {
++        let command_type = command_type.into();
++        if command_type.trim().is_empty() {
++            return Err(KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                "command_type must not be empty",
++            ));
++        }
++        match self.handlers.entry(command_type) {
++            Entry::Occupied(_) => Err(KernelError::new(
++                ErrorCode::Conflict,
++                RetryClass::Never,
++                "command_type is already registered",
++            )),
++            Entry::Vacant(entry) => {
++                entry.insert(handler);
++                Ok(())
++            }
++        }
++    }
++
++    /// Returns the handler registered for `command_type`, if any.
++    pub fn get(&self, command_type: &str) -> Option<Arc<dyn CommandHandler>> {
++        self.handlers.get(command_type).cloned()
++    }
++
++    /// Returns the number of registered command types.
++    pub fn len(&self) -> usize {
++        self.handlers.len()
++    }
++
++    /// Returns whether no command types are registered.
++    pub fn is_empty(&self) -> bool {
++        self.handlers.is_empty()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++
++    use errors::codes::{ErrorCode, RetryClass};
++
++    use super::{CommandContext, CommandHandler, CommandOutcome, CommandRegistry, OutcomeCode};
++
++    struct NoopHandler;
++
++    #[async_trait::async_trait]
++    impl CommandHandler for NoopHandler {
++        async fn handle(
++            &self,
++            _ctx: &CommandContext,
++            _txn: &mut dyn kernel_store::KernelTxn,
++            _payload: Vec<u8>,
++        ) -> errors::Result<CommandOutcome> {
++            Ok(CommandOutcome {
++                code: OutcomeCode::Ok,
++                payload: Vec::new(),
++            })
++        }
++    }
++
++    #[test]
++    fn outcome_codes_round_trip_and_fail_closed() {
++        assert_eq!(OutcomeCode::Ok.as_str(), "ok");
++        assert_eq!(OutcomeCode::from_stored("ok").unwrap(), OutcomeCode::Ok);
++        let error = match OutcomeCode::from_stored("failed") {
++            Ok(_) => panic!("unknown stored code was admitted"),
++            Err(error) => error,
++        };
++        assert_eq!(error.code(), ErrorCode::Internal);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++    }
++
++    #[test]
++    fn duplicate_registration_is_a_conflict() {
++        let mut registry = CommandRegistry::new();
++        assert!(registry.is_empty());
++        registry
++            .register("session.create", Arc::new(NoopHandler))
++            .expect("first registration succeeds");
++        let error = match registry.register("session.create", Arc::new(NoopHandler)) {
++            Ok(()) => panic!("duplicate registration was admitted"),
++            Err(error) => error,
++        };
++        assert_eq!(error.code(), ErrorCode::Conflict);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert_eq!(registry.len(), 1);
++        assert!(registry.get("session.create").is_some());
++        assert!(registry.get("session.delete").is_none());
++    }
++
++    #[test]
++    fn empty_command_types_are_rejected() {
++        let mut registry = CommandRegistry::new();
++        let error = match registry.register("  ", Arc::new(NoopHandler)) {
++            Ok(()) => panic!("empty command type was admitted"),
++            Err(error) => error,
++        };
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert!(registry.is_empty());
++    }
++}
+diff --git a/agent-os/crates/command-coordinator/src/lib.rs b/agent-os/crates/command-coordinator/src/lib.rs
+index 7f13bfa..ba4c505 100644
+--- a/agent-os/crates/command-coordinator/src/lib.rs
++++ b/agent-os/crates/command-coordinator/src/lib.rs
+@@ -1,2 +1,174 @@
+-//! Linearization, idempotency, and atomic command orchestration.
++//! Linearization, idempotency, and atomic command orchestration (R1, R2, R4).
++//!
++//! [`CommandCoordinator::execute`] is the single mutation path for commands:
++//! registry lookup, envelope validation, a fenced write transaction, replay
++//! lookup, handler dispatch, fault points around commit, and success-only
++//! idempotency recording. Handlers stage events through `events::outbox`;
++//! this crate never issues SQL and never opens a transaction outside the
++//! injected [`KernelStore`].
+ #![forbid(unsafe_code)]
++
++pub mod envelope;
++pub mod handler;
++
++use std::sync::Arc;
++
++use domain::faults::FaultInjector;
++use domain::time::Clock;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use kernel_store::models::NewIdempotencyRecord;
++use kernel_store::{KernelStore, TxContext};
++
++use crate::envelope::CommandEnvelope;
++use crate::handler::{CommandContext, CommandOutcome, CommandRegistry, OutcomeCode};
++
++/// Fault point consulted after the handler stages work and before commit.
++pub const BEFORE_COMMIT: &str = "command.before_commit";
++
++/// Fault point consulted after commit and before the outcome is acknowledged.
++pub const AFTER_COMMIT: &str = "command.after_commit";
++
++/// Supplies the daemon fencing epoch used to open write transactions.
++pub trait FenceProvider: Send + Sync {
++    /// Returns the epoch the coordinator currently holds.
++    fn epoch(&self) -> u64;
++}
++
++/// [`FenceProvider`] pinned to one epoch for composition and tests.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct FixedFence(pub u64);
++
++impl FenceProvider for FixedFence {
++    fn epoch(&self) -> u64 {
++        self.0
++    }
++}
++
++/// Executes registered commands against the kernel store.
++pub struct CommandCoordinator {
++    store: Arc<dyn KernelStore>,
++    registry: Arc<CommandRegistry>,
++    fence: Arc<dyn FenceProvider>,
++    clock: Arc<dyn Clock>,
++    faults: Arc<dyn FaultInjector>,
++}
++
++impl CommandCoordinator {
++    /// Wires the coordinator to its persistence, dispatch, fencing, clock,
++    /// and fault seams.
++    pub fn new(
++        store: Arc<dyn KernelStore>,
++        registry: Arc<CommandRegistry>,
++        fence: Arc<dyn FenceProvider>,
++        clock: Arc<dyn Clock>,
++        faults: Arc<dyn FaultInjector>,
++    ) -> Self {
++        Self {
++            store,
++            registry,
++            fence,
++            clock,
++            faults,
++        }
++    }
++
++    /// Runs the ten-step execute algorithm and returns the outcome.
++    ///
++    /// Fresh commands commit their mutations, staged outbox events, and an
++    /// `ok` idempotency record atomically. An identical replay returns the
++    /// stored outcome without touching state; a differing digest is a
++    /// `Conflict`. The `command.before_commit` fault point rolls back, and
++    /// `command.after_commit` reports `Unavailable` after a durable commit.
++    pub async fn execute(&self, envelope: CommandEnvelope) -> errors::Result<CommandOutcome> {
++        let handler = self.registry.get(&envelope.command_type).ok_or_else(|| {
++            KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                format!(
++                    "command_type {:?} is not registered in the coordinator",
++                    envelope.command_type
++                ),
++            )
++        })?;
++
++        envelope.validate(self.clock.now_unix_ms())?;
++
++        let context = CommandContext {
++            command_id: envelope.command_id,
++            principal_id: envelope.principal_id,
++            actor_id: envelope.actor_id,
++            device_id: envelope.device_id,
++            delegation_chain_id: envelope.delegation_chain_id,
++            correlation_id: envelope.correlation_id.clone(),
++            causation_id: envelope.causation_id.clone(),
++        };
++        let mut txn = self
++            .store
++            .begin_write(TxContext {
++                daemon_epoch: self.fence.epoch(),
++                principal_id: envelope.principal_id,
++                command_id: envelope.command_id,
++                correlation_id: envelope.correlation_id.clone(),
++            })
++            .await?;
++
++        if let Some(stored) = txn
++            .idempotency()
++            .lookup(envelope.principal_id, &envelope.idempotency_key)
++            .await?
++        {
++            if stored.request_digest != envelope.request_digest.to_string() {
++                drop(txn);
++                return Err(KernelError::new(
++                    ErrorCode::Conflict,
++                    RetryClass::Never,
++                    "request_digest differs from the record stored for idempotency_key",
++                ));
++            }
++            let outcome = CommandOutcome {
++                code: OutcomeCode::from_stored(&stored.outcome_code)?,
++                payload: stored.outcome_payload,
++            };
++            drop(txn);
++            return Ok(outcome);
++        }
++
++        let outcome = handler
++            .handle(&context, &mut *txn, envelope.payload)
++            .await?;
++
++        if self.faults.inject(BEFORE_COMMIT) {
++            drop(txn);
++            return Err(KernelError::new(
++                ErrorCode::Unavailable,
++                RetryClass::Safe,
++                "command.before_commit fault point aborted the transaction",
++            ));
++        }
++
++        txn.idempotency()
++            .insert(NewIdempotencyRecord {
++                principal_id: envelope.principal_id,
++                idempotency_key: envelope.idempotency_key,
++                request_digest: envelope.request_digest.to_string(),
++                command_id: envelope.command_id,
++                outcome_code: outcome.code.as_str().to_owned(),
++                outcome_payload: outcome.payload.clone(),
++                created_at_ms: self.clock.now_unix_ms(),
++            })
++            .await?;
++
++        txn.commit().await?;
++
++        if self.faults.inject(AFTER_COMMIT) {
++            return Err(KernelError::new(
++                ErrorCode::Unavailable,
++                RetryClass::Safe,
++                "command.after_commit fault point fired after commit",
++            ));
++        }
++
++        Ok(outcome)
++    }
++}
+diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
+new file mode 100644
+index 0000000..fb79a32
+--- /dev/null
++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
+@@ -0,0 +1,473 @@
++//! Command coordinator acceptance tests over a real SQLite kernel store:
++//! fresh commits, idempotent replay, digest conflicts, both commit fault
++//! points, fence staleness, registry rejection, and envelope validation
++//! (R1-R4, N1, P1).
++
++use std::str::FromStr;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++use async_trait::async_trait;
++use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
++use command_coordinator::handler::{
++    CommandContext, CommandHandler, CommandOutcome, CommandRegistry, OutcomeCode,
++};
++use command_coordinator::{AFTER_COMMIT, BEFORE_COMMIT, CommandCoordinator, FixedFence};
++use domain::ids::{
++    ActorId, CommandId, DaemonInstanceId, EventId, EventStreamKey, IdempotencyKey, PrincipalId,
++    SessionId,
++};
++use domain::security::{RetentionClass, SensitivityClass};
++use domain::time::Clock;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use events::outbox::{DraftEvent, stage};
++use kernel_store::models::{IdempotencyRecordRow, NewSession, OutboxEventRow, SessionRow};
++use kernel_store::{KernelStore, KernelTxn, TxContext};
++use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
++use testkit::clock::TestClock;
++use testkit::faults::ArmedFaults;
++use testkit::ids::DeterministicIds;
++
++const SEED_MS: i64 = 1_700_000_000_000;
++const DB_FILE: &str = "kernel.db";
++const TEST_COMMAND: &str = "session.create";
++
++fn session_id_of(command_id: CommandId) -> SessionId {
++    SessionId::from_uuid_v7(*command_id.as_uuid_v7())
++}
++
++/// Representative handler: one session row, one staged outbox event, and an
++/// `ok` outcome payload.
++struct TestHandler {
++    clock: Arc<TestClock>,
++    calls: AtomicUsize,
++}
++
++impl TestHandler {
++    fn new(clock: Arc<TestClock>) -> Self {
++        Self {
++            clock,
++            calls: AtomicUsize::new(0),
++        }
++    }
++
++    fn calls(&self) -> usize {
++        self.calls.load(Ordering::SeqCst)
++    }
++}
++
++#[async_trait]
++impl CommandHandler for TestHandler {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome> {
++        self.calls.fetch_add(1, Ordering::SeqCst);
++        let session_id = session_id_of(ctx.command_id);
++        txn.sessions()
++            .insert(NewSession {
++                session_id,
++                principal_id: ctx.principal_id,
++                created_at_ms: self.clock.now_unix_ms(),
++                metadata: None,
++            })
++            .await?;
++        let event_id = EventId::from_uuid_v7(*ctx.command_id.as_uuid_v7());
++        let stream_key = EventStreamKey::new(format!("session/{session_id}")).map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "representative handler built an invalid stream key",
++            )
++        })?;
++        stage(
++            txn,
++            DraftEvent {
++                event_id,
++                stream_key,
++                event_type: "session.created".to_owned(),
++                payload,
++                sensitivity: SensitivityClass::Private,
++                retention: RetentionClass::Durable,
++                correlation_id: ctx.correlation_id.clone(),
++                causation_id: None,
++            },
++        )
++        .await?;
++        Ok(CommandOutcome {
++            code: OutcomeCode::Ok,
++            payload: b"created".to_vec(),
++        })
++    }
++}
++
++struct Harness {
++    _dir: tempfile::TempDir,
++    store: Arc<SqliteKernelStore>,
++    coordinator: CommandCoordinator,
++    clock: Arc<TestClock>,
++    faults: Arc<ArmedFaults>,
++    handler: Arc<TestHandler>,
++    fence_epoch: u64,
++}
++
++#[derive(Debug, PartialEq)]
++struct Observation {
++    session: Option<SessionRow>,
++    idempotency: Option<IdempotencyRecordRow>,
++    unpublished: Vec<OutboxEventRow>,
++}
++
++impl Harness {
++    async fn observe(&self, envelope: &CommandEnvelope) -> Observation {
++        self.observe_at(self.fence_epoch, envelope).await
++    }
++
++    async fn observe_at(&self, daemon_epoch: u64, envelope: &CommandEnvelope) -> Observation {
++        let mut txn = self
++            .store
++            .begin_write(TxContext {
++                daemon_epoch,
++                principal_id: envelope.principal_id,
++                command_id: envelope.command_id,
++                correlation_id: None,
++            })
++            .await
++            .expect("observation transaction begins under a live fence");
++        let session = txn
++            .sessions()
++            .get(session_id_of(envelope.command_id))
++            .await
++            .unwrap();
++        let idempotency = txn
++            .idempotency()
++            .lookup(envelope.principal_id, &envelope.idempotency_key)
++            .await
++            .unwrap();
++        let unpublished = txn.streams().scan_unpublished(100).await.unwrap();
++        txn.rollback().await.unwrap();
++        Observation {
++            session,
++            idempotency,
++            unpublished,
++        }
++    }
++}
++
++async fn harness() -> Harness {
++    let dir = tempfile::tempdir().unwrap();
++    let path = dir.path().join(DB_FILE);
++    let store = Arc::new(
++        SqliteKernelStore::open(StoreConfig {
++            path,
++            pool_max_connections: 5,
++            busy_timeout_ms: 5_000,
++        })
++        .await
++        .unwrap(),
++    );
++    let provider = DeterministicIds::new(SEED_MS);
++    let fence = store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    let clock = Arc::new(TestClock::new(SEED_MS));
++    let faults = Arc::new(ArmedFaults::new());
++    let handler = Arc::new(TestHandler::new(clock.clone()));
++    let mut registry = CommandRegistry::new();
++    registry.register(TEST_COMMAND, handler.clone()).unwrap();
++    let coordinator = CommandCoordinator::new(
++        store.clone(),
++        Arc::new(registry),
++        Arc::new(FixedFence(fence.epoch.0)),
++        clock.clone(),
++        faults.clone(),
++    );
++    Harness {
++        _dir: dir,
++        store,
++        coordinator,
++        clock,
++        faults,
++        handler,
++        fence_epoch: fence.epoch.0,
++    }
++}
++
++fn envelope(command_type: &str, request_digest: RequestDigest) -> CommandEnvelope {
++    let provider = DeterministicIds::new(SEED_MS);
++    CommandEnvelope {
++        command_id: CommandId::new(&provider),
++        idempotency_key: IdempotencyKey::new("command-1").unwrap(),
++        principal_id: PrincipalId::new(&provider),
++        actor_id: ActorId::new(&provider),
++        device_id: None,
++        delegation_chain_id: None,
++        request_digest,
++        correlation_id: Some("corr-1".to_owned()),
++        causation_id: None,
++        deadline_unix_ms: None,
++        command_type: command_type.to_owned(),
++        payload: b"payload-bytes".to_vec(),
++    }
++}
++
++fn digest(byte: u8) -> RequestDigest {
++    RequestDigest::from_str(&format!("{byte:02x}").repeat(32)).expect("valid digest")
++}
++
++#[tokio::test]
++async fn fresh_command_commits_rows_outbox_and_idempotency() {
++    let harness = harness().await;
++    let envelope = envelope(TEST_COMMAND, digest(0xa1));
++
++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
++
++    assert_eq!(outcome.code, OutcomeCode::Ok);
++    assert_eq!(outcome.payload, b"created");
++
++    let observed = harness.observe(&envelope).await;
++    let session = observed.session.expect("session row committed");
++    assert_eq!(session.principal_id, envelope.principal_id);
++    assert_eq!(session.created_at_ms, harness.clock.now_unix_ms());
++    let record = observed.idempotency.expect("idempotency record committed");
++    assert_eq!(record.principal_id, envelope.principal_id);
++    assert_eq!(record.idempotency_key, envelope.idempotency_key);
++    assert_eq!(record.command_id, envelope.command_id);
++    assert_eq!(record.request_digest, envelope.request_digest.to_string());
++    assert_eq!(record.outcome_code, "ok");
++    assert_eq!(record.outcome_payload, b"created");
++    assert_eq!(record.created_at_ms, harness.clock.now_unix_ms());
++    assert_eq!(observed.unpublished.len(), 1);
++    assert_eq!(observed.unpublished[0].event_type, "session.created");
++    assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
++    assert_eq!(harness.handler.calls(), 1);
++}
++
++#[tokio::test]
++async fn identical_replay_returns_the_stored_outcome_without_changes() {
++    let harness = harness().await;
++    let envelope = envelope(TEST_COMMAND, digest(0xa2));
++
++    let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
++    let mut observation = harness.observe(&envelope).await;
++
++    for replay_index in 0..3 {
++        let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
++        assert_eq!(
++            replayed, first,
++            "replay {replay_index} returned a different outcome"
++        );
++        let next = harness.observe(&envelope).await;
++        assert_eq!(
++            next, observation,
++            "replay {replay_index} changed persisted state"
++        );
++        observation = next;
++    }
++    assert_eq!(
++        harness.handler.calls(),
++        1,
++        "replay must not run the handler"
++    );
++}
++
++#[tokio::test]
++async fn different_digest_for_the_same_key_is_a_conflict() {
++    let harness = harness().await;
++    let envelope = envelope(TEST_COMMAND, digest(0xb1));
++    harness.coordinator.execute(envelope.clone()).await.unwrap();
++    let before = harness.observe(&envelope).await;
++
++    let mut conflicting = envelope.clone();
++    conflicting.request_digest = digest(0xb2);
++    let error = harness.coordinator.execute(conflicting).await.unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(
++        harness.handler.calls(),
++        1,
++        "conflict must not run the handler"
++    );
++    assert_eq!(harness.observe(&envelope).await, before);
++}
++
++#[tokio::test]
++async fn pre_commit_fault_rolls_back_and_resubmission_succeeds() {
++    let harness = harness().await;
++    let envelope = envelope(TEST_COMMAND, digest(0xc1));
++    harness.faults.arm(BEFORE_COMMIT);
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::Unavailable);
++    assert_eq!(error.retry_class(), RetryClass::Safe);
++    harness.faults.assert_triggered(BEFORE_COMMIT);
++    let rolled_back = harness.observe(&envelope).await;
++    assert!(rolled_back.session.is_none());
++    assert!(rolled_back.idempotency.is_none());
++    assert!(rolled_back.unpublished.is_empty());
++
++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
++
++    assert_eq!(outcome.payload, b"created");
++    let committed = harness.observe(&envelope).await;
++    assert!(committed.session.is_some());
++    assert!(committed.idempotency.is_some());
++    assert_eq!(committed.unpublished.len(), 1);
++    assert_eq!(harness.handler.calls(), 2);
++}
++
++#[tokio::test]
++async fn post_commit_fault_reports_unavailable_then_replay_returns_the_outcome() {
++    let harness = harness().await;
++    let envelope = envelope(TEST_COMMAND, digest(0xd1));
++    harness.faults.arm(AFTER_COMMIT);
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::Unavailable);
++    assert_eq!(error.retry_class(), RetryClass::Safe);
++    harness.faults.assert_triggered(AFTER_COMMIT);
++    let committed = harness.observe(&envelope).await;
++    assert!(
++        committed.session.is_some(),
++        "work committed before the fault"
++    );
++    assert!(committed.idempotency.is_some());
++    assert_eq!(committed.unpublished.len(), 1);
++
++    let replayed = harness.coordinator.execute(envelope.clone()).await.unwrap();
++
++    assert_eq!(replayed.code, OutcomeCode::Ok);
++    assert_eq!(replayed.payload, b"created");
++    assert_eq!(
++        harness.handler.calls(),
++        1,
++        "replay must not rerun the handler"
++    );
++    assert_eq!(harness.observe(&envelope).await, committed);
++}
++
++#[tokio::test]
++async fn stale_fence_rejects_without_rows() {
++    let harness = harness().await;
++    let provider = DeterministicIds::new(SEED_MS + 1);
++    let advanced = harness
++        .store
++        .acquire_daemon_fence(DaemonInstanceId::new(&provider))
++        .await
++        .unwrap();
++    assert_eq!(advanced.epoch.0, harness.fence_epoch + 1);
++
++    let envelope = envelope(TEST_COMMAND, digest(0xe1));
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(harness.handler.calls(), 0);
++    let observed = harness.observe_at(advanced.epoch.0, &envelope).await;
++    assert!(observed.session.is_none());
++    assert!(observed.idempotency.is_none());
++    assert!(observed.unpublished.is_empty());
++}
++
++#[tokio::test]
++async fn unknown_command_type_rejects_without_rows() {
++    let harness = harness().await;
++    let envelope = envelope("session.unknown", digest(0xf1));
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        error.message().contains("session.unknown"),
++        "message must name the unregistered command_type: {}",
++        error.message()
++    );
++    assert_eq!(harness.handler.calls(), 0);
++    let observed = harness.observe(&envelope).await;
++    assert!(observed.session.is_none());
++    assert!(observed.idempotency.is_none());
++    assert!(observed.unpublished.is_empty());
++}
++
++#[tokio::test]
++async fn duplicate_registration_is_a_conflict() {
++    let clock = Arc::new(TestClock::new(SEED_MS));
++    let handler = Arc::new(TestHandler::new(clock));
++    let mut registry = CommandRegistry::new();
++    registry.register(TEST_COMMAND, handler.clone()).unwrap();
++
++    let error = registry
++        .register(TEST_COMMAND, handler.clone())
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(registry.len(), 1);
++    assert!(registry.get(TEST_COMMAND).is_some());
++}
++
++#[tokio::test]
++async fn malformed_digest_is_rejected() {
++    let cases = [
++        String::new(),
++        "zz".repeat(32),
++        "ab".repeat(31),
++        "ab".repeat(33),
++        "AB".repeat(32),
++    ];
++    for case in cases {
++        let error = RequestDigest::from_str(&case).unwrap_err();
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++    }
++}
++
++#[tokio::test]
++async fn past_deadline_is_rejected_without_rows() {
++    let harness = harness().await;
++    let mut envelope = envelope(TEST_COMMAND, digest(0x42));
++    envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms() - 1);
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(harness.handler.calls(), 0);
++    let observed = harness.observe(&envelope).await;
++    assert!(observed.session.is_none());
++    assert!(observed.idempotency.is_none());
++    assert!(observed.unpublished.is_empty());
++
++    envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms());
++    let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
++
++    assert_eq!(outcome.payload, b"created");
++}
+diff --git a/agent-os/crates/domain/src/faults.rs b/agent-os/crates/domain/src/faults.rs
+index 4ed4d00..2aa39f3 100644
+--- a/agent-os/crates/domain/src/faults.rs
++++ b/agent-os/crates/domain/src/faults.rs
+@@ -1,15 +1,24 @@
+ //! `FaultInjector` trait and the no-op implementation.
+ 
+ /// Deterministic fault trigger used by tests.
+ pub trait FaultInjector: Send + Sync + 'static {
+     /// Triggers the fault armed at `point`, if any.
+     fn trigger(&self, point: &str);
++
++    /// Fires `point` once if it is armed and reports whether it fired.
++    ///
++    /// The default implementation never fires, so implementors that predate
++    /// this seam keep their no-op behavior.
++    fn inject(&self, point: &str) -> bool {
++        let _ = point;
++        false
++    }
+ }
+ 
+ /// Production [`FaultInjector`] that never triggers.
+ #[derive(Clone, Copy, Debug, Default)]
+ pub struct NoFaults;
+ 
+ impl FaultInjector for NoFaults {
+     fn trigger(&self, _point: &str) {}
+ }
+diff --git a/agent-os/crates/testkit/src/faults.rs b/agent-os/crates/testkit/src/faults.rs
+index 07279de..1c84071 100644
+--- a/agent-os/crates/testkit/src/faults.rs
++++ b/agent-os/crates/testkit/src/faults.rs
+@@ -50,33 +50,44 @@ impl ArmedFaults {
+             panic!("fault point {point:?} was armed but never triggered");
+         }
+     }
+ 
+     fn states(&self) -> MutexGuard<'_, HashMap<String, FaultState>> {
+         match self.states.lock() {
+             Ok(guard) => guard,
+             Err(poisoned) => poisoned.into_inner(),
+         }
+     }
+-}
+ 
+-impl FaultInjector for ArmedFaults {
+-    fn trigger(&self, point: &str) {
++    fn fire(&self, point: &str) -> bool {
+         if let Some(state) = self.states().get_mut(point)
+             && state.armed
+             && !state.triggered
+         {
+             state.triggered = true;
++            true
++        } else {
++            false
+         }
+     }
+ }
+ 
++impl FaultInjector for ArmedFaults {
++    fn trigger(&self, point: &str) {
++        let _ = self.fire(point);
++    }
++
++    fn inject(&self, point: &str) -> bool {
++        self.fire(point)
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use domain::faults::FaultInjector;
+ 
+     use super::ArmedFaults;
+ 
+     #[test]
+     fn test_fault_fires_once() {
+         let faults = ArmedFaults::new();
+         assert!(!faults.is_triggered("io"));
+diff --git a/agent-os/crates/testkit/tests/prop_faults.rs b/agent-os/crates/testkit/tests/prop_faults.rs
+index d5aaba2..49f277e 100644
+--- a/agent-os/crates/testkit/tests/prop_faults.rs
++++ b/agent-os/crates/testkit/tests/prop_faults.rs
+@@ -12,20 +12,107 @@ enum Action {
+     Trigger(usize),
+ }
+ 
+ fn action() -> impl Strategy<Value = Action> {
+     prop_oneof![
+         (0..POINTS.len()).prop_map(Action::Arm),
+         (0..POINTS.len()).prop_map(Action::Trigger),
+     ]
+ }
+ 
++#[test]
++fn inject_unarmed_point_returns_false() {
++    let faults = ArmedFaults::new();
++    assert!(!faults.inject("io"), "an unarmed point must not fire");
++    assert!(!faults.is_triggered("io"));
++}
++
++#[test]
++fn inject_armed_point_fires_exactly_once() {
++    let faults = ArmedFaults::new();
++    faults.arm("io");
++    assert!(faults.inject("io"), "the first inject must fire");
++    assert!(faults.is_triggered("io"));
++    faults.assert_triggered("io");
++    assert!(!faults.inject("io"), "the second inject must not fire");
++}
++
++#[test]
++fn inject_rearmed_point_fires_again() {
++    let faults = ArmedFaults::new();
++    faults.arm("io");
++    assert!(faults.inject("io"));
++    faults.arm("io");
++    assert!(!faults.is_triggered("io"), "re-arming resets the point");
++    assert!(faults.inject("io"), "the re-armed point must fire again");
++}
++
++#[test]
++fn inject_marks_point_triggered_for_assertions() {
++    let faults = ArmedFaults::new();
++    faults.arm("clock");
++    assert!(faults.inject("clock"));
++    faults.assert_triggered("clock");
++}
++
++#[derive(Clone, Copy, Debug)]
++enum SeamAction {
++    Arm(usize),
++    Inject(usize),
++}
++
++fn seam_action() -> impl Strategy<Value = SeamAction> {
++    prop_oneof![
++        (0..POINTS.len()).prop_map(SeamAction::Arm),
++        (0..POINTS.len()).prop_map(SeamAction::Inject),
++    ]
++}
++
++proptest! {
++    #[test]
++    fn prop_inject_once_per_arm(actions in prop::collection::vec(seam_action(), 0..64)) {
++        let faults = ArmedFaults::new();
++        let mut armed = [false; POINTS.len()];
++        let mut fired = [false; POINTS.len()];
++
++        for action in actions {
++            match action {
++                SeamAction::Arm(index) => {
++                    faults.arm(POINTS[index]);
++                    armed[index] = true;
++                    fired[index] = false;
++                }
++                SeamAction::Inject(index) => {
++                    let expected = armed[index] && !fired[index];
++                    let fired_now = faults.inject(POINTS[index]);
++                    prop_assert!(
++                        fired_now == expected,
++                        "inject return diverged for {}",
++                        POINTS[index]
++                    );
++                    if expected {
++                        fired[index] = true;
++                    }
++                }
++            }
++            for index in 0..POINTS.len() {
++                prop_assert_eq!(
++                    faults.is_triggered(POINTS[index]),
++                    fired[index],
++                    "point {} diverged from the model",
++                    POINTS[index]
++                );
++            }
++        }
++    }
++}
++
+ proptest! {
+     #[test]
+     fn prop_faults(actions in prop::collection::vec(action(), 0..64)) {
+         let faults = ArmedFaults::new();
+         let mut armed = [false; POINTS.len()];
+         let mut fired = [false; POINTS.len()];
+ 
+         for action in actions {
+             match action {
+                 Action::Arm(index) => {

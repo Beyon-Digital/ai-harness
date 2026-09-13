@@ -1,0 +1,629 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index d0402f2..8ea624f 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -181,21 +181,20 @@ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ 
+ [[package]]
+ name = "command-coordinator"
+ version = "0.1.0"
+ dependencies = [
+  "async-trait",
+  "domain",
+  "errors",
+- "event-journal",
+  "events",
+  "kernel-store",
+  "kernel-store-sqlite",
+  "tempfile",
+  "testkit",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "config-engine"
+diff --git a/agent-os/crates/command-coordinator/Cargo.toml b/agent-os/crates/command-coordinator/Cargo.toml
+index b627219..706b02b 100644
+--- a/agent-os/crates/command-coordinator/Cargo.toml
++++ b/agent-os/crates/command-coordinator/Cargo.toml
+@@ -1,20 +1,19 @@
+ [package]
+ name = "command-coordinator"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+-event-journal.workspace = true
+ events.workspace = true
+ kernel-store.workspace = true
+ async-trait.workspace = true
+ 
+ [dev-dependencies]
+ tokio.workspace = true
+ testkit.workspace = true
+ tempfile.workspace = true
+ kernel-store-sqlite.workspace = true
+diff --git a/agent-os/crates/command-coordinator/src/envelope.rs b/agent-os/crates/command-coordinator/src/envelope.rs
+index ff14ad6..3a7fa07 100644
+--- a/agent-os/crates/command-coordinator/src/envelope.rs
++++ b/agent-os/crates/command-coordinator/src/envelope.rs
+@@ -49,21 +49,21 @@ fn malformed_digest() -> KernelError {
+ 
+ fn hex_nibble(byte: u8) -> Option<u8> {
+     match byte {
+         b'0'..=b'9' => Some(byte - b'0'),
+         b'a'..=b'f' => Some(byte - b'a' + 10),
+         _ => None,
+     }
+ }
+ 
+ /// Everything a command submission carries across the coordinator boundary.
+-#[derive(Clone, Debug)]
++#[derive(Clone)]
+ pub struct CommandEnvelope {
+     /// Identity of this submission, recorded on the transaction.
+     pub command_id: CommandId,
+     /// Replay key scoped by principal.
+     pub idempotency_key: IdempotencyKey,
+     /// Principal on whose behalf the command runs.
+     pub principal_id: PrincipalId,
+     /// Actor that issued the command.
+     pub actor_id: ActorId,
+     /// Optional device that issued the command.
+@@ -77,20 +77,41 @@ pub struct CommandEnvelope {
+     /// Optional identifier of the command that caused this one.
+     pub causation_id: Option<String>,
+     /// Optional expiry deadline in UTC Unix milliseconds.
+     pub deadline_unix_ms: Option<i64>,
+     /// Registered command type that routes the envelope to its handler.
+     pub command_type: String,
+     /// Serialized command payload; never logged or echoed in errors.
+     pub payload: Vec<u8>,
+ }
+ 
++/// Renders every routing field but only the payload length, so payload bytes
++/// cannot leak through logs or panic messages (N1).
++impl fmt::Debug for CommandEnvelope {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("CommandEnvelope")
++            .field("command_id", &self.command_id)
++            .field("idempotency_key", &self.idempotency_key)
++            .field("principal_id", &self.principal_id)
++            .field("actor_id", &self.actor_id)
++            .field("device_id", &self.device_id)
++            .field("delegation_chain_id", &self.delegation_chain_id)
++            .field("request_digest", &self.request_digest)
++            .field("correlation_id", &self.correlation_id)
++            .field("causation_id", &self.causation_id)
++            .field("deadline_unix_ms", &self.deadline_unix_ms)
++            .field("command_type", &self.command_type)
++            .field("payload_len", &self.payload.len())
++            .finish()
++    }
++}
++
+ impl CommandEnvelope {
+     /// Rejects empty keys, malformed digests, empty command types, and past
+     /// deadlines. Malformed digests are rejected when [`RequestDigest`] is
+     /// parsed, before an envelope can exist.
+     pub fn validate(&self, now_unix_ms: i64) -> errors::Result<()> {
+         if self.idempotency_key.as_str().trim().is_empty() {
+             return Err(KernelError::new(
+                 ErrorCode::InvalidArgument,
+                 RetryClass::Never,
+                 "idempotency_key must not be empty",
+@@ -113,23 +134,45 @@ impl CommandEnvelope {
+             ));
+         }
+         Ok(())
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use std::str::FromStr;
+ 
+-    use errors::codes::ErrorCode;
++    use domain::ids::{ActorId, CommandId, IdempotencyKey, PrincipalId};
++    use errors::codes::{ErrorCode, RetryClass};
++    use testkit::ids::DeterministicIds;
++
++    use super::{CommandEnvelope, RequestDigest};
++
++    const PAYLOAD_MARKER: &str = "do-not-echo-payload-marker-7c1f";
+ 
+-    use super::RequestDigest;
++    fn envelope() -> CommandEnvelope {
++        let provider = DeterministicIds::new(1_700_000_000_000);
++        CommandEnvelope {
++            command_id: CommandId::new(&provider),
++            idempotency_key: IdempotencyKey::new("command-1").expect("valid idempotency key"),
++            principal_id: PrincipalId::new(&provider),
++            actor_id: ActorId::new(&provider),
++            device_id: None,
++            delegation_chain_id: None,
++            request_digest: RequestDigest::from_str(&"a1".repeat(32)).expect("valid digest"),
++            correlation_id: None,
++            causation_id: None,
++            deadline_unix_ms: None,
++            command_type: "session.create".to_owned(),
++            payload: Vec::new(),
++        }
++    }
+ 
+     #[test]
+     fn canonical_digests_round_trip_through_lowercase_hex() {
+         let text = "ab".repeat(32);
+         let digest = match RequestDigest::from_str(&text) {
+             Ok(digest) => digest,
+             Err(error) => panic!("canonical digest rejected: {error}"),
+         };
+         assert_eq!(digest.to_string(), text);
+     }
+@@ -145,11 +188,50 @@ mod tests {
+             "é".repeat(32),
+         ];
+         for case in cases {
+             let error = match RequestDigest::from_str(&case) {
+                 Ok(_) => panic!("malformed digest admitted"),
+                 Err(error) => error,
+             };
+             assert_eq!(error.code(), ErrorCode::InvalidArgument);
+         }
+     }
++
++    #[test]
++    fn empty_command_type_is_rejected_by_validate() {
++        let mut envelope = envelope();
++        envelope.command_type = String::new();
++
++        let error = envelope.validate(0).unwrap_err();
++
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert_eq!(error.message(), "command_type must not be empty");
++    }
++
++    #[test]
++    fn whitespace_only_idempotency_key_is_rejected_by_validate() {
++        let mut envelope = envelope();
++        envelope.idempotency_key =
++            IdempotencyKey::new("   ").expect("whitespace-only key is structurally valid");
++
++        let error = envelope.validate(0).unwrap_err();
++
++        assert_eq!(error.code(), ErrorCode::InvalidArgument);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert_eq!(error.message(), "idempotency_key must not be empty");
++    }
++
++    #[test]
++    fn debug_renders_payload_length_instead_of_bytes() {
++        let mut envelope = envelope();
++        envelope.payload = PAYLOAD_MARKER.as_bytes().to_vec();
++
++        let rendered = format!("{envelope:?}");
++
++        assert!(rendered.contains(&format!("payload_len: {}", PAYLOAD_MARKER.len())));
++        assert!(
++            !rendered.contains(PAYLOAD_MARKER),
++            "payload bytes leaked through Debug: {rendered}"
++        );
++    }
+ }
+diff --git a/agent-os/crates/command-coordinator/src/handler.rs b/agent-os/crates/command-coordinator/src/handler.rs
+index e0bb047..735ee1d 100644
+--- a/agent-os/crates/command-coordinator/src/handler.rs
++++ b/agent-os/crates/command-coordinator/src/handler.rs
+@@ -1,16 +1,17 @@
+ //! Typed handler dispatch: the context handlers receive, the success outcome
+ //! vocabulary, the handler trait, and the command-type registry (R1.1, R1.4,
+ //! R3.1, R3.2, R3.4).
+ 
+ use std::collections::HashMap;
+ use std::collections::hash_map::Entry;
++use std::fmt;
+ use std::sync::Arc;
+ 
+ use domain::ids::{ActorId, CommandId, DelegationChainId, DeviceId, PrincipalId};
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ 
+ /// Context passed to a handler: the envelope's routing fields, never the
+ /// payload digest or the transaction handle owner.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct CommandContext {
+@@ -54,28 +55,39 @@ impl OutcomeCode {
+             _ => Err(KernelError::new(
+                 ErrorCode::Internal,
+                 RetryClass::Never,
+                 "stored idempotency outcome_code is not recognized",
+             )),
+         }
+     }
+ }
+ 
+ /// Result of a handler run: outcome code plus callback payload.
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, PartialEq, Eq)]
+ pub struct CommandOutcome {
+     /// Persisted outcome code.
+     pub code: OutcomeCode,
+     /// Serialized outcome payload; never logged.
+     pub payload: Vec<u8>,
+ }
+ 
++/// Renders the outcome code but only the payload length, so outcome bytes
++/// cannot leak through logs or panic messages (N1).
++impl fmt::Debug for CommandOutcome {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("CommandOutcome")
++            .field("code", &self.code)
++            .field("payload_len", &self.payload.len())
++            .finish()
++    }
++}
++
+ /// Command implementation bound to one command type.
+ ///
+ /// Handlers see only the context and the write transaction; they stage events
+ /// through `events::outbox::stage` and never see the store.
+ #[async_trait::async_trait]
+ pub trait CommandHandler: Send + Sync + 'static {
+     /// Applies the command's mutations inside `txn` and reports its outcome.
+     async fn handle(
+         &self,
+         ctx: &CommandContext,
+@@ -200,11 +212,28 @@ mod tests {
+     #[test]
+     fn empty_command_types_are_rejected() {
+         let mut registry = CommandRegistry::new();
+         let error = match registry.register("  ", Arc::new(NoopHandler)) {
+             Ok(()) => panic!("empty command type was admitted"),
+             Err(error) => error,
+         };
+         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+         assert!(registry.is_empty());
+     }
++
++    #[test]
++    fn outcome_debug_redacts_payload_bytes() {
++        const PAYLOAD: &[u8] = b"secret-outcome-payload";
++        let outcome = CommandOutcome {
++            code: OutcomeCode::Ok,
++            payload: PAYLOAD.to_vec(),
++        };
++
++        let rendered = format!("{outcome:?}");
++
++        assert!(rendered.contains(&format!("payload_len: {}", PAYLOAD.len())));
++        assert!(
++            !rendered.contains("secret-outcome-payload"),
++            "outcome payload bytes leaked through Debug: {rendered}"
++        );
++    }
+ }
+diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
+index fb79a32..647050d 100644
+--- a/agent-os/crates/command-coordinator/tests/coordinator.rs
++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
+@@ -25,20 +25,22 @@ use events::outbox::{DraftEvent, stage};
+ use kernel_store::models::{IdempotencyRecordRow, NewSession, OutboxEventRow, SessionRow};
+ use kernel_store::{KernelStore, KernelTxn, TxContext};
+ use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
+ use testkit::clock::TestClock;
+ use testkit::faults::ArmedFaults;
+ use testkit::ids::DeterministicIds;
+ 
+ const SEED_MS: i64 = 1_700_000_000_000;
+ const DB_FILE: &str = "kernel.db";
+ const TEST_COMMAND: &str = "session.create";
++const FAILING_COMMAND: &str = "session.fail";
++const PAYLOAD_MARKER: &str = "do-not-echo-payload-marker-7c1f";
+ 
+ fn session_id_of(command_id: CommandId) -> SessionId {
+     SessionId::from_uuid_v7(*command_id.as_uuid_v7())
+ }
+ 
+ /// Representative handler: one session row, one staged outbox event, and an
+ /// `ok` outcome payload.
+ struct TestHandler {
+     clock: Arc<TestClock>,
+     calls: AtomicUsize,
+@@ -97,20 +99,71 @@ impl CommandHandler for TestHandler {
+             },
+         )
+         .await?;
+         Ok(CommandOutcome {
+             code: OutcomeCode::Ok,
+             payload: b"created".to_vec(),
+         })
+     }
+ }
+ 
++/// Failing handler: stages a session and one outbox event, then returns
++/// `Internal` so the coordinator's early `?` path must roll everything back.
++struct FailingHandler;
++
++#[async_trait]
++impl CommandHandler for FailingHandler {
++    async fn handle(
++        &self,
++        ctx: &CommandContext,
++        txn: &mut dyn KernelTxn,
++        payload: Vec<u8>,
++    ) -> errors::Result<CommandOutcome> {
++        let session_id = session_id_of(ctx.command_id);
++        txn.sessions()
++            .insert(NewSession {
++                session_id,
++                principal_id: ctx.principal_id,
++                created_at_ms: 0,
++                metadata: None,
++            })
++            .await?;
++        let event_id = EventId::from_uuid_v7(*ctx.command_id.as_uuid_v7());
++        let stream_key = EventStreamKey::new(format!("session/{session_id}")).map_err(|_| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "failing handler built an invalid stream key",
++            )
++        })?;
++        stage(
++            txn,
++            DraftEvent {
++                event_id,
++                stream_key,
++                event_type: "session.failed".to_owned(),
++                payload,
++                sensitivity: SensitivityClass::Private,
++                retention: RetentionClass::Durable,
++                correlation_id: ctx.correlation_id.clone(),
++                causation_id: None,
++            },
++        )
++        .await?;
++        Err(KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            "failing handler aborted after staging work",
++        ))
++    }
++}
++
+ struct Harness {
+     _dir: tempfile::TempDir,
+     store: Arc<SqliteKernelStore>,
+     coordinator: CommandCoordinator,
+     clock: Arc<TestClock>,
+     faults: Arc<ArmedFaults>,
+     handler: Arc<TestHandler>,
+     fence_epoch: u64,
+ }
+ 
+@@ -172,20 +225,23 @@ async fn harness() -> Harness {
+     let provider = DeterministicIds::new(SEED_MS);
+     let fence = store
+         .acquire_daemon_fence(DaemonInstanceId::new(&provider))
+         .await
+         .unwrap();
+     let clock = Arc::new(TestClock::new(SEED_MS));
+     let faults = Arc::new(ArmedFaults::new());
+     let handler = Arc::new(TestHandler::new(clock.clone()));
+     let mut registry = CommandRegistry::new();
+     registry.register(TEST_COMMAND, handler.clone()).unwrap();
++    registry
++        .register(FAILING_COMMAND, Arc::new(FailingHandler))
++        .unwrap();
+     let coordinator = CommandCoordinator::new(
+         store.clone(),
+         Arc::new(registry),
+         Arc::new(FixedFence(fence.epoch.0)),
+         clock.clone(),
+         faults.clone(),
+     );
+     Harness {
+         _dir: dir,
+         store,
+@@ -204,21 +260,21 @@ fn envelope(command_type: &str, request_digest: RequestDigest) -> CommandEnvelop
+         idempotency_key: IdempotencyKey::new("command-1").unwrap(),
+         principal_id: PrincipalId::new(&provider),
+         actor_id: ActorId::new(&provider),
+         device_id: None,
+         delegation_chain_id: None,
+         request_digest,
+         correlation_id: Some("corr-1".to_owned()),
+         causation_id: None,
+         deadline_unix_ms: None,
+         command_type: command_type.to_owned(),
+-        payload: b"payload-bytes".to_vec(),
++        payload: PAYLOAD_MARKER.as_bytes().to_vec(),
+     }
+ }
+ 
+ fn digest(byte: u8) -> RequestDigest {
+     RequestDigest::from_str(&format!("{byte:02x}").repeat(32)).expect("valid digest")
+ }
+ 
+ #[tokio::test]
+ async fn fresh_command_commits_rows_outbox_and_idempotency() {
+     let harness = harness().await;
+@@ -236,21 +292,25 @@ async fn fresh_command_commits_rows_outbox_and_idempotency() {
+     let record = observed.idempotency.expect("idempotency record committed");
+     assert_eq!(record.principal_id, envelope.principal_id);
+     assert_eq!(record.idempotency_key, envelope.idempotency_key);
+     assert_eq!(record.command_id, envelope.command_id);
+     assert_eq!(record.request_digest, envelope.request_digest.to_string());
+     assert_eq!(record.outcome_code, "ok");
+     assert_eq!(record.outcome_payload, b"created");
+     assert_eq!(record.created_at_ms, harness.clock.now_unix_ms());
+     assert_eq!(observed.unpublished.len(), 1);
+     assert_eq!(observed.unpublished[0].event_type, "session.created");
+-    assert_eq!(observed.unpublished[0].payload, b"payload-bytes");
++    assert_eq!(
++        observed.unpublished[0].payload,
++        PAYLOAD_MARKER.as_bytes(),
++        "staged event must carry the envelope payload"
++    );
+     assert_eq!(harness.handler.calls(), 1);
+ }
+ 
+ #[tokio::test]
+ async fn identical_replay_returns_the_stored_outcome_without_changes() {
+     let harness = harness().await;
+     let envelope = envelope(TEST_COMMAND, digest(0xa2));
+ 
+     let first = harness.coordinator.execute(envelope.clone()).await.unwrap();
+     let mut observation = harness.observe(&envelope).await;
+@@ -354,20 +414,49 @@ async fn post_commit_fault_reports_unavailable_then_replay_returns_the_outcome()
+     assert_eq!(replayed.code, OutcomeCode::Ok);
+     assert_eq!(replayed.payload, b"created");
+     assert_eq!(
+         harness.handler.calls(),
+         1,
+         "replay must not rerun the handler"
+     );
+     assert_eq!(harness.observe(&envelope).await, committed);
+ }
+ 
++#[tokio::test]
++async fn handler_error_rolls_back_every_staged_write() {
++    let harness = harness().await;
++    let envelope = envelope(FAILING_COMMAND, digest(0x9a));
++
++    let error = harness
++        .coordinator
++        .execute(envelope.clone())
++        .await
++        .unwrap_err();
++
++    assert_eq!(error.code(), ErrorCode::Internal);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        !error.message().contains(PAYLOAD_MARKER),
++        "handler error must not echo the payload: {}",
++        error.message()
++    );
++    assert_eq!(
++        harness.observe(&envelope).await,
++        Observation {
++            session: None,
++            idempotency: None,
++            unpublished: Vec::new(),
++        },
++        "handler error must roll back sessions, outbox events, and idempotency"
++    );
++}
++
+ #[tokio::test]
+ async fn stale_fence_rejects_without_rows() {
+     let harness = harness().await;
+     let provider = DeterministicIds::new(SEED_MS + 1);
+     let advanced = harness
+         .store
+         .acquire_daemon_fence(DaemonInstanceId::new(&provider))
+         .await
+         .unwrap();
+     assert_eq!(advanced.epoch.0, harness.fence_epoch + 1);
+@@ -399,74 +488,94 @@ async fn unknown_command_type_rejects_without_rows() {
+         .await
+         .unwrap_err();
+ 
+     assert_eq!(error.code(), ErrorCode::InvalidArgument);
+     assert_eq!(error.retry_class(), RetryClass::Never);
+     assert!(
+         error.message().contains("session.unknown"),
+         "message must name the unregistered command_type: {}",
+         error.message()
+     );
++    assert!(
++        !error.message().contains(PAYLOAD_MARKER),
++        "rejection must not echo the payload: {}",
++        error.message()
++    );
+     assert_eq!(harness.handler.calls(), 0);
+     let observed = harness.observe(&envelope).await;
+     assert!(observed.session.is_none());
+     assert!(observed.idempotency.is_none());
+     assert!(observed.unpublished.is_empty());
+ }
+ 
+ #[tokio::test]
+ async fn duplicate_registration_is_a_conflict() {
+     let clock = Arc::new(TestClock::new(SEED_MS));
+     let handler = Arc::new(TestHandler::new(clock));
+     let mut registry = CommandRegistry::new();
+     registry.register(TEST_COMMAND, handler.clone()).unwrap();
+ 
+     let error = registry
+         .register(TEST_COMMAND, handler.clone())
+         .unwrap_err();
+ 
+     assert_eq!(error.code(), ErrorCode::Conflict);
+     assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        !error.message().contains(PAYLOAD_MARKER),
++        "rejection must not echo the payload: {}",
++        error.message()
++    );
+     assert_eq!(registry.len(), 1);
+     assert!(registry.get(TEST_COMMAND).is_some());
+ }
+ 
+ #[tokio::test]
+ async fn malformed_digest_is_rejected() {
+     let cases = [
+         String::new(),
+         "zz".repeat(32),
+         "ab".repeat(31),
+         "ab".repeat(33),
+         "AB".repeat(32),
+     ];
+     for case in cases {
+         let error = RequestDigest::from_str(&case).unwrap_err();
+         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+         assert_eq!(error.retry_class(), RetryClass::Never);
++        assert!(
++            !error.message().contains(PAYLOAD_MARKER),
++            "rejection must not echo the payload: {}",
++            error.message()
++        );
+     }
+ }
+ 
+ #[tokio::test]
+ async fn past_deadline_is_rejected_without_rows() {
+     let harness = harness().await;
+     let mut envelope = envelope(TEST_COMMAND, digest(0x42));
+     envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms() - 1);
+ 
+     let error = harness
+         .coordinator
+         .execute(envelope.clone())
+         .await
+         .unwrap_err();
+ 
+     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+     assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        !error.message().contains(PAYLOAD_MARKER),
++        "rejection must not echo the payload: {}",
++        error.message()
++    );
+     assert_eq!(harness.handler.calls(), 0);
+     let observed = harness.observe(&envelope).await;
+     assert!(observed.session.is_none());
+     assert!(observed.idempotency.is_none());
+     assert!(observed.unpublished.is_empty());
+ 
+     envelope.deadline_unix_ms = Some(harness.clock.now_unix_ms());
+     let outcome = harness.coordinator.execute(envelope.clone()).await.unwrap();
+ 
+     assert_eq!(outcome.payload, b"created");
