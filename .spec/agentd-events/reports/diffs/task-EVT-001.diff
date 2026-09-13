@@ -1,0 +1,1122 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 59dba39..ce9ed8f 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -413,20 +413,21 @@ dependencies = [
+ ]
+ 
+ [[package]]
+ name = "events"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
+  "kernel-store",
+  "kernel-store-sqlite",
++ "prost",
+  "serde",
+  "serde_yaml",
+  "tempfile",
+  "testkit",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "fastrand"
+ version = "2.5.0"
+diff --git a/agent-os/crates/events/Cargo.toml b/agent-os/crates/events/Cargo.toml
+index 4d38950..4d4c38e 100644
+--- a/agent-os/crates/events/Cargo.toml
++++ b/agent-os/crates/events/Cargo.toml
+@@ -2,19 +2,20 @@
+ name = "events"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
++prost.workspace = true
+ serde.workspace = true
+ serde_yaml.workspace = true
+ tokio.workspace = true
+ 
+ [dev-dependencies]
+ kernel-store-sqlite.workspace = true
+ tempfile.workspace = true
+ testkit.workspace = true
+ tokio.workspace = true
+diff --git a/agent-os/crates/events/src/cursor.rs b/agent-os/crates/events/src/cursor.rs
+new file mode 100644
+index 0000000..b01d7d3
+--- /dev/null
++++ b/agent-os/crates/events/src/cursor.rs
+@@ -0,0 +1,24 @@
++//! Durable cursors: `v1:{stream_key}:{sequence}`, opaque at boundaries.
++//!
++//! [`EventCursor`] itself lives in `domain`; this module re-exports it and
++//! anchors the canonical constructor on validated [`StreamKey`] instances.
++
++pub use domain::ids::EventCursor;
++
++use crate::stream::StreamKey;
++
++/// Constructs cursors for canonical streams.
++///
++/// `EventCursor` is a domain type, so the pairing constructor is provided as a
++/// trait; with this trait in scope it is callable as
++/// `EventCursor::for_event(&key, sequence)`.
++pub trait EventCursorExt {
++    /// Builds the canonical `v1:{stream_key}:{sequence}` cursor for `key`.
++    fn for_event(key: &StreamKey, sequence: u64) -> Self;
++}
++
++impl EventCursorExt for EventCursor {
++    fn for_event(key: &StreamKey, sequence: u64) -> Self {
++        EventCursor::new(key.event_stream_key().clone(), sequence)
++    }
++}
+diff --git a/agent-os/crates/events/src/envelope.rs b/agent-os/crates/events/src/envelope.rs
+new file mode 100644
+index 0000000..e8773f6
+--- /dev/null
++++ b/agent-os/crates/events/src/envelope.rs
+@@ -0,0 +1,407 @@
++//! Validated event envelopes: builder, classification policy, and codec.
++//!
++//! The builder is the only sanctioned constructor for durable events: it
++//! requires every field the journal and journal-first dispatcher depend on and
++//! enforces the event type's classification floor from the embedded catalog
++//! (R1.1-R1.5). The envelope mirrors `contracts/events/event.proto`; encoding
++//! and decoding preserve every field exactly (R1.6).
++
++use std::borrow::Cow;
++use std::collections::HashMap;
++use std::fmt::Display;
++use std::str::FromStr;
++
++use domain::generated::contract;
++use domain::ids::{EffectId, EventId, RunId, SessionId, TaskId};
++use domain::provider::SystemIdProvider;
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use serde::Deserialize;
++
++use crate::cursor::{EventCursor, EventCursorExt};
++use crate::stream::StreamKey;
++
++/// Minimum sensitivity an event type may carry.
++pub trait ClassificationPolicy: Send + Sync {
++    /// Returns the lowest sensitivity the event type may be assigned, or
++    /// `None` when the type has no catalog entry (and therefore no floor).
++    fn minimum(&self, event_type: &str) -> Option<SensitivityClass>;
++}
++
++#[derive(Deserialize)]
++struct CatalogDocument {
++    events: Vec<CatalogEntry>,
++}
++
++#[derive(Deserialize)]
++struct CatalogEntry {
++    id: String,
++    default_sensitivity: String,
++}
++
++/// Classification floor parsed once from the embedded event catalog.
++pub struct CatalogClassificationPolicy {
++    floors: HashMap<String, SensitivityClass>,
++}
++
++impl CatalogClassificationPolicy {
++    /// Parses `agent-os/proto/events/catalog.yaml`, embedded at compile time.
++    pub fn embedded() -> errors::Result<Self> {
++        Self::from_yaml(include_str!("../../../proto/events/catalog.yaml"))
++    }
++
++    fn from_yaml(yaml: &str) -> errors::Result<Self> {
++        let document: CatalogDocument = serde_yaml::from_str(yaml).map_err(|error| {
++            KernelError::new(
++                ErrorCode::Internal,
++                RetryClass::Never,
++                "embedded event catalog is not valid YAML",
++            )
++            .with_source(error)
++        })?;
++        let mut floors = HashMap::with_capacity(document.events.len());
++        for entry in document.events {
++            let sensitivity = catalog_sensitivity(&entry.default_sensitivity).ok_or_else(|| {
++                KernelError::new(
++                    ErrorCode::Internal,
++                    RetryClass::Never,
++                    "embedded event catalog declares an unknown sensitivity",
++                )
++            })?;
++            floors.insert(entry.id, sensitivity);
++        }
++        Ok(Self { floors })
++    }
++}
++
++impl ClassificationPolicy for CatalogClassificationPolicy {
++    fn minimum(&self, event_type: &str) -> Option<SensitivityClass> {
++        self.floors.get(event_type).copied()
++    }
++}
++
++fn catalog_sensitivity(text: &str) -> Option<SensitivityClass> {
++    match text {
++        "public" => Some(SensitivityClass::Public),
++        "internal" => Some(SensitivityClass::Internal),
++        "confidential" => Some(SensitivityClass::Confidential),
++        "secret" => Some(SensitivityClass::Secret),
++        _ => None,
++    }
++}
++
++/// Validated durable event, mirroring `contracts/events/event.proto` exactly.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct EventEnvelope {
++    /// Stable identity of the event.
++    pub event_id: EventId,
++    /// Event type name from the contracts.
++    pub event_type: String,
++    /// Version of the event type schema.
++    pub event_version: u32,
++    /// Canonical stream that owns the event.
++    pub stream_key: StreamKey,
++    /// Per-stream journal position.
++    pub sequence: u64,
++    /// Event time as Unix milliseconds.
++    pub occurred_unix_ms: i64,
++    /// Run the event belongs to, when applicable.
++    pub run_id: Option<RunId>,
++    /// Task the event belongs to, when applicable.
++    pub task_id: Option<TaskId>,
++    /// Session the event belongs to, when applicable.
++    pub session_id: Option<SessionId>,
++    /// Effect record the event belongs to, when applicable.
++    pub effect_id: Option<EffectId>,
++    /// Event that directly caused this one, when known.
++    pub causation_id: Option<String>,
++    /// Correlation identifier linking related events, when known.
++    pub correlation_id: Option<String>,
++    /// Sensitivity classification of the payload.
++    pub sensitivity: SensitivityClass,
++    /// Retention class of the event.
++    pub retention: RetentionClass,
++    /// Serialized event payload; never rendered in errors or logs.
++    pub payload: Vec<u8>,
++}
++
++impl EventEnvelope {
++    /// Encodes the envelope as protobuf wire bytes.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        prost::Message::encode_to_vec(&self.to_contract())
++    }
++
++    /// Decodes protobuf wire bytes into a validated envelope.
++    ///
++    /// Failures never echo the input bytes.
++    pub fn from_bytes(bytes: &[u8]) -> errors::Result<Self> {
++        let raw = <contract::EventEnvelope as prost::Message>::decode(bytes).map_err(|error| {
++            invalid_envelope("event envelope is not valid contract bytes").with_source(error)
++        })?;
++
++        let event_id = EventId::from_str(&raw.event_id)
++            .map_err(|_| invalid_envelope("event envelope event id is invalid"))?;
++        let stream_key = StreamKey::from_str(&raw.stream_key)
++            .map_err(|_| invalid_envelope("event envelope stream key is invalid"))?;
++        let sensitivity = SensitivityClass::from_wire(raw.sensitivity)
++            .map_err(|_| invalid_envelope("event envelope sensitivity is unknown"))?;
++        if sensitivity == SensitivityClass::Unspecified {
++            return Err(invalid_envelope("event envelope sensitivity is absent"));
++        }
++        let retention = RetentionClass::from_wire(raw.retention)
++            .map_err(|_| invalid_envelope("event envelope retention is unknown"))?;
++        if retention == RetentionClass::Unspecified {
++            return Err(invalid_envelope("event envelope retention is absent"));
++        }
++
++        Ok(Self {
++            event_id,
++            event_type: raw.event_type,
++            event_version: raw.event_version,
++            stream_key,
++            sequence: raw.sequence,
++            occurred_unix_ms: raw.occurred_unix_ms,
++            run_id: optional_id(&raw.run_id, "run id")?,
++            task_id: optional_id(&raw.task_id, "task id")?,
++            session_id: optional_id(&raw.session_id, "session id")?,
++            effect_id: optional_id(&raw.effect_id, "effect id")?,
++            causation_id: optional_text(raw.causation_id),
++            correlation_id: optional_text(raw.correlation_id),
++            sensitivity,
++            retention,
++            payload: raw.payload,
++        })
++    }
++
++    /// Returns the canonical cursor for this event's stream position.
++    pub fn cursor(&self) -> EventCursor {
++        EventCursor::for_event(&self.stream_key, self.sequence)
++    }
++
++    fn to_contract(&self) -> contract::EventEnvelope {
++        contract::EventEnvelope {
++            event_id: self.event_id.to_hyphenated(),
++            event_type: self.event_type.clone(),
++            event_version: self.event_version,
++            stream_key: self.stream_key.as_str().to_owned(),
++            sequence: self.sequence,
++            occurred_unix_ms: self.occurred_unix_ms,
++            run_id: text_of(&self.run_id),
++            task_id: text_of(&self.task_id),
++            session_id: text_of(&self.session_id),
++            effect_id: text_of(&self.effect_id),
++            causation_id: self.causation_id.clone().unwrap_or_default(),
++            correlation_id: self.correlation_id.clone().unwrap_or_default(),
++            sensitivity: self.sensitivity.to_wire(),
++            retention: self.retention.to_wire(),
++            payload: self.payload.clone(),
++        }
++    }
++}
++
++/// Builder for [`EventEnvelope`] with required-field and floor validation.
++pub struct EventBuilder {
++    event_id: EventId,
++    event_type: String,
++    event_version: u32,
++    stream_key: StreamKey,
++    sequence: Option<u64>,
++    occurred_at_ms: Option<i64>,
++    run_id: Option<RunId>,
++    task_id: Option<TaskId>,
++    session_id: Option<SessionId>,
++    effect_id: Option<EffectId>,
++    causation_id: Option<String>,
++    correlation_id: Option<String>,
++    sensitivity: Option<SensitivityClass>,
++    retention: Option<RetentionClass>,
++    payload: Option<Vec<u8>>,
++}
++
++impl EventBuilder {
++    /// Starts a builder for `event_type`. A fresh event id is drawn from the
++    /// system provider; use [`EventBuilder::event_id`] to supply one instead.
++    pub fn new(event_type: impl Into<String>, event_version: u32, stream_key: StreamKey) -> Self {
++        Self {
++            event_id: EventId::new(&SystemIdProvider),
++            event_type: event_type.into(),
++            event_version,
++            stream_key,
++            sequence: None,
++            occurred_at_ms: None,
++            run_id: None,
++            task_id: None,
++            session_id: None,
++            effect_id: None,
++            causation_id: None,
++            correlation_id: None,
++            sensitivity: None,
++            retention: None,
++            payload: None,
++        }
++    }
++
++    /// Overrides the generated event id.
++    pub fn event_id(mut self, id: EventId) -> Self {
++        self.event_id = id;
++        self
++    }
++
++    /// Sets the per-stream journal position.
++    pub fn sequence(mut self, sequence: u64) -> Self {
++        self.sequence = Some(sequence);
++        self
++    }
++
++    /// Sets the event time as Unix milliseconds.
++    pub fn occurred_at_ms(mut self, ms: i64) -> Self {
++        self.occurred_at_ms = Some(ms);
++        self
++    }
++
++    /// Sets the correlation identifier.
++    pub fn correlation_id(mut self, id: impl Into<String>) -> Self {
++        self.correlation_id = Some(id.into());
++        self
++    }
++
++    /// Sets the causing event identifier.
++    pub fn causation_id(mut self, id: impl Into<String>) -> Self {
++        self.causation_id = Some(id.into());
++        self
++    }
++
++    /// Sets the run the event belongs to.
++    pub fn run_id(mut self, id: RunId) -> Self {
++        self.run_id = Some(id);
++        self
++    }
++
++    /// Sets the task the event belongs to.
++    pub fn task_id(mut self, id: TaskId) -> Self {
++        self.task_id = Some(id);
++        self
++    }
++
++    /// Sets the session the event belongs to.
++    pub fn session_id(mut self, id: SessionId) -> Self {
++        self.session_id = Some(id);
++        self
++    }
++
++    /// Sets the effect record the event belongs to.
++    pub fn effect_id(mut self, id: EffectId) -> Self {
++        self.effect_id = Some(id);
++        self
++    }
++
++    /// Sets the sensitivity classification.
++    pub fn sensitivity(mut self, class: SensitivityClass) -> Self {
++        self.sensitivity = Some(class);
++        self
++    }
++
++    /// Sets the retention class; defaults to [`RetentionClass::Standard`].
++    pub fn retention(mut self, class: RetentionClass) -> Self {
++        self.retention = Some(class);
++        self
++    }
++
++    /// Sets the serialized payload bytes.
++    pub fn payload(mut self, bytes: Vec<u8>) -> Self {
++        self.payload = Some(bytes);
++        self
++    }
++
++    /// Validates required fields and the classification floor from `policy`.
++    pub fn build(self, policy: &dyn ClassificationPolicy) -> errors::Result<EventEnvelope> {
++        if self.event_type.trim().is_empty() {
++            return Err(invalid_envelope("event type is required"));
++        }
++        if self.event_version == 0 {
++            return Err(invalid_envelope("event version is required"));
++        }
++        let sequence = self
++            .sequence
++            .ok_or_else(|| invalid_envelope("event sequence is required"))?;
++        let occurred_unix_ms = self
++            .occurred_at_ms
++            .ok_or_else(|| invalid_envelope("event occurred time is required"))?;
++        let sensitivity = self
++            .sensitivity
++            .ok_or_else(|| invalid_envelope("event classification is required"))?;
++        if sensitivity == SensitivityClass::Unspecified {
++            return Err(invalid_envelope("event classification is required"));
++        }
++        let payload = self
++            .payload
++            .ok_or_else(|| invalid_envelope("event payload is required"))?;
++        let retention = self.retention.unwrap_or(RetentionClass::Standard);
++        if retention == RetentionClass::Unspecified {
++            return Err(invalid_envelope("event retention is required"));
++        }
++        if let Some(minimum) = policy.minimum(&self.event_type)
++            && sensitivity.to_wire() < minimum.to_wire()
++        {
++            return Err(KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                format!(
++                    "event {} requires a classification at or above {}",
++                    self.event_type,
++                    sensitivity_token(minimum)
++                ),
++            ));
++        }
++
++        Ok(EventEnvelope {
++            event_id: self.event_id,
++            event_type: self.event_type,
++            event_version: self.event_version,
++            stream_key: self.stream_key,
++            sequence,
++            occurred_unix_ms,
++            run_id: self.run_id,
++            task_id: self.task_id,
++            session_id: self.session_id,
++            effect_id: self.effect_id,
++            causation_id: self.causation_id,
++            correlation_id: self.correlation_id,
++            sensitivity,
++            retention,
++            payload,
++        })
++    }
++}
++
++fn invalid_envelope(message: impl Into<Cow<'static, str>>) -> KernelError {
++    KernelError::new(ErrorCode::InvalidArgument, RetryClass::Never, message)
++}
++
++fn optional_id<T: FromStr>(text: &str, field: &'static str) -> errors::Result<Option<T>> {
++    if text.is_empty() {
++        return Ok(None);
++    }
++    T::from_str(text)
++        .map(Some)
++        .map_err(|_| invalid_envelope(format!("event envelope {field} is invalid")))
++}
++
++fn optional_text(text: String) -> Option<String> {
++    if text.is_empty() { None } else { Some(text) }
++}
++
++fn text_of<T: Display>(value: &Option<T>) -> String {
++    value.as_ref().map(ToString::to_string).unwrap_or_default()
++}
++
++fn sensitivity_token(class: SensitivityClass) -> &'static str {
++    match class {
++        SensitivityClass::Unspecified => "unspecified",
++        SensitivityClass::Public => "public",
++        SensitivityClass::Internal => "internal",
++        SensitivityClass::Confidential => "confidential",
++        SensitivityClass::Secret => "secret",
++    }
++}
+diff --git a/agent-os/crates/events/src/lib.rs b/agent-os/crates/events/src/lib.rs
+index aa1ee68..50281f7 100644
+--- a/agent-os/crates/events/src/lib.rs
++++ b/agent-os/crates/events/src/lib.rs
+@@ -1,4 +1,13 @@
+ //! Event envelope, sequence and cursor helpers, and the live event bus.
+ #![forbid(unsafe_code)]
+ 
++pub mod cursor;
++pub mod envelope;
+ pub mod outbox;
++pub mod stream;
++
++pub use cursor::{EventCursor, EventCursorExt};
++pub use envelope::{
++    CatalogClassificationPolicy, ClassificationPolicy, EventBuilder, EventEnvelope,
++};
++pub use stream::{StreamKey, StreamKind};
+diff --git a/agent-os/crates/events/src/stream.rs b/agent-os/crates/events/src/stream.rs
+new file mode 100644
+index 0000000..998ce62
+--- /dev/null
++++ b/agent-os/crates/events/src/stream.rs
+@@ -0,0 +1,162 @@
++//! Canonical durable stream keys.
++//!
++//! The canonical forms are fixed by the event pipeline spec:
++//!
++//! ```text
++//! run/<run-id>
++//! task/<task-id>
++//! session/<session-id>
++//! effect/<effect-id>
++//! config/global
++//! adapter/<adapter-id>/<version>/<digest>
++//! security/principal/<principal-id>
++//! ```
++//!
++//! Construction and parsing are strict, so every [`StreamKey`] round-trips
++//! through [`Display`](std::fmt::Display) and [`FromStr`].
++
++use std::fmt;
++use std::str::FromStr;
++
++use domain::ids::{AdapterId, EffectId, EventStreamKey, PrincipalId, RunId, SessionId, TaskId};
++use errors::codes::{ErrorCode, RetryClass};
++
++/// Category of a canonical event stream.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub enum StreamKind {
++    /// `run/<run-id>`
++    Run,
++    /// `task/<task-id>`
++    Task,
++    /// `session/<session-id>`
++    Session,
++    /// `effect/<effect-id>`
++    Effect,
++    /// `config/global`
++    ConfigGlobal,
++    /// `adapter/<adapter-id>/<version>/<digest>`
++    Adapter,
++    /// `security/principal/<principal-id>`
++    Principal,
++}
++
++/// Validated canonical stream key.
++///
++/// The wrapped [`EventStreamKey`] enforces the canonical alphabet; the cached
++/// [`StreamKind`] is derived at construction or parse time, so [`StreamKey::kind`]
++/// is total.
++#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub struct StreamKey(EventStreamKey, StreamKind);
++
++impl StreamKey {
++    /// Canonical `run/<run-id>` key.
++    pub fn run(id: RunId) -> Self {
++        Self::assemble(&["run", &id.to_hyphenated()], StreamKind::Run)
++    }
++
++    /// Canonical `task/<task-id>` key.
++    pub fn task(id: TaskId) -> Self {
++        Self::assemble(&["task", &id.to_hyphenated()], StreamKind::Task)
++    }
++
++    /// Canonical `session/<session-id>` key.
++    pub fn session(id: SessionId) -> Self {
++        Self::assemble(&["session", &id.to_hyphenated()], StreamKind::Session)
++    }
++
++    /// Canonical `effect/<effect-id>` key.
++    pub fn effect(id: EffectId) -> Self {
++        Self::assemble(&["effect", &id.to_hyphenated()], StreamKind::Effect)
++    }
++
++    /// The single `config/global` key.
++    pub fn config_global() -> Self {
++        Self::assemble(&["config", "global"], StreamKind::ConfigGlobal)
++    }
++
++    /// Canonical `adapter/<adapter-id>/<version>/<digest>` key.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `version` or `digest` is empty or contains bytes outside the
++    /// canonical stream-key alphabet.
++    pub fn adapter(id: AdapterId, version: &str, digest: &str) -> Self {
++        Self::assemble(
++            &["adapter", &id.to_hyphenated(), version, digest],
++            StreamKind::Adapter,
++        )
++    }
++
++    /// Canonical `security/principal/<principal-id>` key.
++    pub fn principal(id: PrincipalId) -> Self {
++        Self::assemble(
++            &["security", "principal", &id.to_hyphenated()],
++            StreamKind::Principal,
++        )
++    }
++
++    /// Returns the stream category.
++    pub fn kind(&self) -> StreamKind {
++        self.1
++    }
++
++    /// Borrows the canonical text.
++    pub fn as_str(&self) -> &str {
++        self.0.as_str()
++    }
++
++    /// Borrows the underlying domain key.
++    pub(crate) fn event_stream_key(&self) -> &EventStreamKey {
++        &self.0
++    }
++
++    fn assemble(segments: &[&str], kind: StreamKind) -> Self {
++        let text = segments.join("/");
++        let Ok(key) = EventStreamKey::new(text) else {
++            panic!("stream key segments must be non-empty and canonical");
++        };
++        debug_assert_eq!(classify(key.as_str()), Some(kind));
++        Self(key, kind)
++    }
++}
++
++impl FromStr for StreamKey {
++    type Err = errors::KernelError;
++
++    fn from_str(text: &str) -> Result<Self, Self::Err> {
++        let kind = classify(text).ok_or_else(invalid_stream_key)?;
++        let key = EventStreamKey::new(text).map_err(|_| invalid_stream_key())?;
++        Ok(Self(key, kind))
++    }
++}
++
++impl fmt::Display for StreamKey {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(self.0.as_str())
++    }
++}
++
++fn classify(text: &str) -> Option<StreamKind> {
++    let segments: Vec<&str> = text.split('/').collect();
++    if segments.iter().any(|segment| segment.is_empty()) {
++        return None;
++    }
++    match segments.as_slice() {
++        ["run", _] => Some(StreamKind::Run),
++        ["task", _] => Some(StreamKind::Task),
++        ["session", _] => Some(StreamKind::Session),
++        ["effect", _] => Some(StreamKind::Effect),
++        ["config", "global"] => Some(StreamKind::ConfigGlobal),
++        ["adapter", _, _, _] => Some(StreamKind::Adapter),
++        ["security", "principal", _] => Some(StreamKind::Principal),
++        _ => None,
++    }
++}
++
++fn invalid_stream_key() -> errors::KernelError {
++    errors::KernelError::new(
++        ErrorCode::InvalidArgument,
++        RetryClass::Never,
++        "stream key is not in a canonical form",
++    )
++}
+diff --git a/agent-os/crates/events/tests/primitives.rs b/agent-os/crates/events/tests/primitives.rs
+new file mode 100644
+index 0000000..17b543b
+--- /dev/null
++++ b/agent-os/crates/events/tests/primitives.rs
+@@ -0,0 +1,436 @@
++//! EVT-001 primitives: stream keys, cursors, builder validation, and the
++//! envelope codec.
++
++use std::str::FromStr;
++
++use domain::ids::{AdapterId, EffectId, EventId, PrincipalId, RunId, SessionId, TaskId};
++use domain::security::{RetentionClass, SensitivityClass};
++use errors::codes::{ErrorCode, RetryClass};
++use events::cursor::{EventCursor, EventCursorExt};
++use events::envelope::{
++    CatalogClassificationPolicy, ClassificationPolicy, EventBuilder, EventEnvelope,
++};
++use events::{StreamKey, StreamKind};
++
++const RUN: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70";
++const TASK: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71";
++const SESSION: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e72";
++const EFFECT: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e73";
++const PRINCIPAL: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e74";
++const EVENT: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e75";
++const ADAPTER: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e76";
++const CAUSE: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e77";
++
++fn run_id() -> RunId {
++    RunId::from_str(RUN).expect("sample run id is canonical")
++}
++
++fn event_id() -> EventId {
++    EventId::from_str(EVENT).expect("sample event id is canonical")
++}
++
++fn policy() -> CatalogClassificationPolicy {
++    CatalogClassificationPolicy::embedded().expect("embedded catalog parses")
++}
++
++fn builder(event_type: &str) -> EventBuilder {
++    EventBuilder::new(event_type, 1, StreamKey::run(run_id()))
++        .event_id(event_id())
++        .sequence(7)
++        .occurred_at_ms(1_700_000_000_042)
++        .sensitivity(SensitivityClass::Internal)
++        .payload(vec![0x07, 0x08])
++}
++
++#[test]
++fn every_stream_kind_round_trips() {
++    let cases = [
++        (
++            StreamKind::Run,
++            StreamKey::run(run_id()),
++            format!("run/{RUN}"),
++        ),
++        (
++            StreamKind::Task,
++            StreamKey::task(TaskId::from_str(TASK).expect("sample task id")),
++            format!("task/{TASK}"),
++        ),
++        (
++            StreamKind::Session,
++            StreamKey::session(SessionId::from_str(SESSION).expect("sample session id")),
++            format!("session/{SESSION}"),
++        ),
++        (
++            StreamKind::Effect,
++            StreamKey::effect(EffectId::from_str(EFFECT).expect("sample effect id")),
++            format!("effect/{EFFECT}"),
++        ),
++        (
++            StreamKind::ConfigGlobal,
++            StreamKey::config_global(),
++            "config/global".to_owned(),
++        ),
++        (
++            StreamKind::Adapter,
++            StreamKey::adapter(
++                AdapterId::from_str(ADAPTER).expect("sample adapter id"),
++                "1.0.0",
++                "a1b2c3d4",
++            ),
++            format!("adapter/{ADAPTER}/1.0.0/a1b2c3d4"),
++        ),
++        (
++            StreamKind::Principal,
++            StreamKey::principal(PrincipalId::from_str(PRINCIPAL).expect("sample principal id")),
++            format!("security/principal/{PRINCIPAL}"),
++        ),
++    ];
++
++    for (kind, key, text) in cases {
++        assert_eq!(key.kind(), kind);
++        assert_eq!(key.as_str(), text);
++        assert_eq!(key.to_string(), text);
++        let parsed = StreamKey::from_str(&text).expect("canonical key parses");
++        assert_eq!(parsed, key);
++        assert_eq!(parsed.kind(), kind);
++    }
++}
++
++#[test]
++fn stream_key_parsing_rejects_non_canonical_forms() {
++    let rejected = [
++        "",
++        "run",
++        "run/",
++        "run//x",
++        "run/x/y",
++        "runs/x",
++        "task",
++        "task/",
++        "task/x/y",
++        "session/",
++        "effect//x",
++        "config",
++        "config/global/x",
++        "config/",
++        "adapter/x/1.0.0",
++        "adapter/x//1.0.0",
++        "adapter/x/1.0.0/a/b",
++        "security/principal",
++        "security/principal/",
++        "security/principal/x/y",
++        "security/other/x",
++        "Run/x",
++        "run/UPPER",
++        "unknown/x",
++    ];
++
++    for text in rejected {
++        let error =
++            StreamKey::from_str(text).expect_err("non-canonical stream key must be refused");
++        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{text:?}");
++        assert_eq!(error.retry_class(), RetryClass::Never, "{text:?}");
++    }
++}
++
++#[test]
++fn cursors_round_trip_and_malformed_forms_fail_closed() {
++    let key = StreamKey::run(run_id());
++    let cursor = EventCursor::for_event(&key, 42);
++    assert_eq!(cursor.to_string(), format!("v1:run/{RUN}:42"));
++    assert_eq!(cursor.stream_key.as_str(), key.as_str());
++    assert_eq!(cursor.sequence, 42);
++    let parsed = EventCursor::from_str(&cursor.to_string()).expect("canonical cursor parses");
++    assert_eq!(parsed, cursor);
++
++    let malformed = [
++        "",
++        "v1",
++        "v1:",
++        "v1::3",
++        "v2:run/x:1",
++        "v1:run/x",
++        "v1:run/x:",
++        "v1:run/x:00",
++        "v1:run/x:01",
++        "v1:run/x:-1",
++        "v1:run/x:1x",
++        "v1:run/x:1:extra",
++        "V1:run/x:1",
++        "v1:run/x: 1",
++    ];
++
++    for text in malformed {
++        assert!(
++            EventCursor::from_str(text).is_err(),
++            "{text:?} must be refused"
++        );
++    }
++}
++
++#[test]
++fn builder_requires_every_required_field() {
++    let cases = [
++        (
++            "event type",
++            EventBuilder::new("", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .occurred_at_ms(1)
++                .sensitivity(SensitivityClass::Internal)
++                .payload(vec![]),
++        ),
++        (
++            "event version",
++            EventBuilder::new("RunStarted", 0, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .occurred_at_ms(1)
++                .sensitivity(SensitivityClass::Internal)
++                .payload(vec![]),
++        ),
++        (
++            "sequence",
++            EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .occurred_at_ms(1)
++                .sensitivity(SensitivityClass::Internal)
++                .payload(vec![]),
++        ),
++        (
++            "occurred time",
++            EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .sensitivity(SensitivityClass::Internal)
++                .payload(vec![]),
++        ),
++        (
++            "classification",
++            EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .occurred_at_ms(1)
++                .payload(vec![]),
++        ),
++        (
++            "classification presence",
++            EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .occurred_at_ms(1)
++                .sensitivity(SensitivityClass::Unspecified)
++                .payload(vec![]),
++        ),
++        (
++            "payload",
++            EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++                .event_id(event_id())
++                .sequence(1)
++                .occurred_at_ms(1)
++                .sensitivity(SensitivityClass::Internal),
++        ),
++    ];
++
++    for (field, builder) in cases {
++        let error = builder
++            .build(&policy())
++            .expect_err("incomplete event must be refused");
++        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{field}");
++        assert_eq!(error.retry_class(), RetryClass::Never, "{field}");
++    }
++}
++
++#[test]
++fn builder_rejects_classification_downgrades() {
++    let canary = "canary-payload-bytes";
++    let principal = || StreamKey::principal(PrincipalId::from_str(PRINCIPAL).expect("principal"));
++    let incomplete = || {
++        EventBuilder::new("CapabilityRequested", 1, principal())
++            .event_id(event_id())
++            .sequence(3)
++            .occurred_at_ms(5)
++            .payload(canary.as_bytes().to_vec())
++    };
++
++    for downgrade in [SensitivityClass::Public, SensitivityClass::Internal] {
++        let error = incomplete()
++            .sensitivity(downgrade)
++            .build(&policy())
++            .expect_err("downgrade must be refused");
++        assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++        assert_eq!(error.retry_class(), RetryClass::Never);
++        assert!(
++            !error.to_string().contains(canary),
++            "payload bytes must never appear in errors: {error}"
++        );
++    }
++
++    for allowed in [SensitivityClass::Confidential, SensitivityClass::Secret] {
++        let envelope = incomplete()
++            .sensitivity(allowed)
++            .build(&policy())
++            .expect("at or above the floor is allowed");
++        assert_eq!(envelope.sensitivity, allowed);
++    }
++}
++
++#[test]
++fn embedded_policy_reads_floors_from_the_catalog() {
++    let policy = policy();
++
++    assert_eq!(
++        policy.minimum("CapabilityRequested"),
++        Some(SensitivityClass::Confidential)
++    );
++    assert_eq!(
++        policy.minimum("SecretActionPerformed"),
++        Some(SensitivityClass::Confidential)
++    );
++    assert_eq!(
++        policy.minimum("SessionCreated"),
++        Some(SensitivityClass::Internal)
++    );
++    assert_eq!(
++        policy.minimum("RunStarted"),
++        Some(SensitivityClass::Internal)
++    );
++    assert_eq!(
++        policy.minimum("AdapterRegistered"),
++        Some(SensitivityClass::Internal)
++    );
++    assert_eq!(policy.minimum("NoSuchEventType"), None);
++
++    let envelope = builder("NoSuchEventType")
++        .sensitivity(SensitivityClass::Public)
++        .build(&policy)
++        .expect("unknown event types have no floor");
++    assert_eq!(envelope.sensitivity, SensitivityClass::Public);
++}
++
++#[test]
++fn envelope_round_trips_every_field() {
++    let stream = StreamKey::effect(EffectId::from_str(EFFECT).expect("sample effect id"));
++    let payload = vec![0x00, 0xff, 0x80, 0x07, b'{', b'}'];
++    let envelope = EventBuilder::new("EffectPrepared", 1, stream.clone())
++        .event_id(event_id())
++        .sequence(9)
++        .occurred_at_ms(1_700_000_000_999)
++        .run_id(run_id())
++        .task_id(TaskId::from_str(TASK).expect("sample task id"))
++        .session_id(SessionId::from_str(SESSION).expect("sample session id"))
++        .effect_id(EffectId::from_str(EFFECT).expect("sample effect id"))
++        .causation_id(CAUSE)
++        .correlation_id("corr-9")
++        .sensitivity(SensitivityClass::Confidential)
++        .retention(RetentionClass::Audit)
++        .payload(payload.clone())
++        .build(&policy())
++        .expect("complete event builds");
++
++    let bytes = envelope.to_bytes();
++    let decoded = EventEnvelope::from_bytes(&bytes).expect("envelope bytes decode");
++    assert_eq!(decoded, envelope);
++    assert_eq!(decoded.event_id, event_id());
++    assert_eq!(decoded.event_type, "EffectPrepared");
++    assert_eq!(decoded.event_version, 1);
++    assert_eq!(decoded.stream_key, stream);
++    assert_eq!(decoded.sequence, 9);
++    assert_eq!(decoded.occurred_unix_ms, 1_700_000_000_999);
++    assert_eq!(decoded.run_id, Some(run_id()));
++    assert_eq!(
++        decoded.task_id,
++        Some(TaskId::from_str(TASK).expect("sample task id"))
++    );
++    assert_eq!(
++        decoded.session_id,
++        Some(SessionId::from_str(SESSION).expect("sample session id"))
++    );
++    assert_eq!(
++        decoded.effect_id,
++        Some(EffectId::from_str(EFFECT).expect("sample effect id"))
++    );
++    assert_eq!(decoded.causation_id.as_deref(), Some(CAUSE));
++    assert_eq!(decoded.correlation_id.as_deref(), Some("corr-9"));
++    assert_eq!(decoded.sensitivity, SensitivityClass::Confidential);
++    assert_eq!(decoded.retention, RetentionClass::Audit);
++    assert_eq!(decoded.payload, payload);
++    assert_eq!(decoded.cursor(), EventCursor::for_event(&stream, 9));
++    assert_eq!(
++        decoded.cursor().to_string(),
++        format!("v1:effect/{EFFECT}:9")
++    );
++
++    let minimal = EventBuilder::new("RunStarted", 1, StreamKey::run(run_id()))
++        .event_id(event_id())
++        .sequence(0)
++        .occurred_at_ms(0)
++        .sensitivity(SensitivityClass::Internal)
++        .payload(Vec::new())
++        .build(&policy())
++        .expect("minimal event builds");
++    let decoded_minimal =
++        EventEnvelope::from_bytes(&minimal.to_bytes()).expect("minimal envelope decodes");
++    assert_eq!(decoded_minimal, minimal);
++    assert!(decoded_minimal.run_id.is_none());
++    assert!(decoded_minimal.task_id.is_none());
++    assert!(decoded_minimal.session_id.is_none());
++    assert!(decoded_minimal.effect_id.is_none());
++    assert!(decoded_minimal.causation_id.is_none());
++    assert!(decoded_minimal.correlation_id.is_none());
++}
++
++#[test]
++fn envelope_decoding_fails_closed_without_echoing_payload() {
++    let canary = b"payload-canary";
++
++    let error = EventEnvelope::from_bytes(b"payload-canary-not-an-envelope")
++        .expect_err("bogus envelope bytes must be refused");
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert!(
++        !error.to_string().contains("payload-canary"),
++        "input bytes must never appear in errors: {error}"
++    );
++
++    let unspecified = domain::generated::contract::EventEnvelope {
++        event_id: EVENT.to_owned(),
++        event_type: "RunStarted".to_owned(),
++        event_version: 1,
++        stream_key: format!("run/{RUN}"),
++        sequence: 1,
++        occurred_unix_ms: 7,
++        run_id: String::new(),
++        task_id: String::new(),
++        session_id: String::new(),
++        effect_id: String::new(),
++        causation_id: String::new(),
++        correlation_id: String::new(),
++        sensitivity: 0,
++        retention: 2,
++        payload: canary.to_vec(),
++    };
++    let error = EventEnvelope::from_bytes(&prost::Message::encode_to_vec(&unspecified))
++        .expect_err("unspecified sensitivity must be refused");
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++    assert!(!error.to_string().contains("payload-canary"));
++
++    let unknown_retention = domain::generated::contract::EventEnvelope {
++        sensitivity: 2,
++        retention: 9,
++        ..unspecified
++    };
++    let error = EventEnvelope::from_bytes(&prost::Message::encode_to_vec(&unknown_retention))
++        .expect_err("unknown retention must be refused");
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++
++    let bad_stream_key = domain::generated::contract::EventEnvelope {
++        sensitivity: 2,
++        retention: 2,
++        stream_key: "nonsense".to_owned(),
++        ..unknown_retention
++    };
++    let error = EventEnvelope::from_bytes(&prost::Message::encode_to_vec(&bad_stream_key))
++        .expect_err("non-canonical stream key must be refused");
++    assert_eq!(error.code(), ErrorCode::InvalidArgument);
++}

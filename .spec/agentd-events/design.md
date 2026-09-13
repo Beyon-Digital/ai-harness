@@ -70,7 +70,7 @@ impl StreamKey {
     pub fn session(id: domain::ids::SessionId) -> Self;
     pub fn effect(id: domain::ids::EffectId) -> Self;
     pub fn config_global() -> Self;
-    pub fn adapter(id: domain::ids::AdapterId, version: &str, digest: &str) -> Self;
+    pub fn adapter(id: domain::ids::AdapterId, version: &str, digest: &str) -> errors::Result⟨Self⟩;
     pub fn principal(id: domain::ids::PrincipalId) -> Self;
     pub fn kind(&self) -> StreamKind;
     pub fn as_str(&self) -> &str;
@@ -92,6 +92,8 @@ impl EventCursor { pub fn for_event(key: &StreamKey, sequence: u64) -> Self; }
 pub trait ClassificationPolicy: Send + Sync {
     /// Minimum sensitivity the event type may carry.
     fn minimum(&self, event_type: &str) -> Option⟨domain::security::SensitivityClass⟩;
+    /// Default retention declared by the catalog for the event type.
+    fn default_retention(&self, event_type: &str) -> Option⟨domain::security::RetentionClass⟩;
 }
 
 pub struct CatalogClassificationPolicy { /* parsed once from the embedded catalog */ }
@@ -222,7 +224,7 @@ and its comment update.
 | Journal file unreachable | open or statement IO error | `Unavailable`, `Safe`; dispatcher backs off | R3.4 |
 | Classification downgrade | policy check in `build` | `FailedPrecondition`, `Never` | R1.4 |
 | Malformed stream key or cursor | parse at construction | `InvalidArgument`, `Never` | R1.2, R1.3 |
-| Unknown event type | policy has no entry | allowed with the type's implicit internal floor; the dispatcher logs the type only | R1.4 |
+| Unknown event type | policy has no entry | allowed with no floor; the catalog is the source of truth for catalogued types | R1.4 |
 | Broadcast lag | `RecvError::Lagged` | `LiveItem::Lagged` with the last delivered cursor; subscription ends | R4.2 |
 
 **Error taxonomy:** `errors` crate; no new codes.

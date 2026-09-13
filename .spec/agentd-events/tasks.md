@@ -114,13 +114,14 @@
 
 ### Task EVT-001: Event primitives
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-evt001d
 - depends_on: EVT-G0
-- files: `agent-os/crates/events/src/stream.rs`, `agent-os/crates/events/src/cursor.rs`, `agent-os/crates/events/src/envelope.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/primitives.rs`
+- files: `agent-os/crates/events/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/events/src/stream.rs`, `agent-os/crates/events/src/cursor.rs`, `agent-os/crates/events/src/envelope.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/primitives.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, N1
 - scope: large
 - model: capable
+- blocked_reason: need agent-os/crates/events/Cargo.toml: events has no prost dependency and domain does not re-export prost, so envelope.rs cannot name the prost::Message trait to implement to_bytes/from_bytes on domain::generated::contract::EventEnvelope as design.md and the task require. Amendment: add 'prost.workspace = true' to [dependencies]; cargo will then refresh the events edge in agent-os/Cargo.lock (also outside lease).
 
 **Objective:** Canonical stream keys, cursor wiring, and a validated event builder whose classification floor comes from the embedded catalog.
 

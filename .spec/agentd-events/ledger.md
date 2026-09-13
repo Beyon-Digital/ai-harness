@@ -17,3 +17,19 @@
 - 2026-09-13T02:35:22Z EVT-G0 -> review (@agent-evtg0b)
 - 2026-09-13T02:38:21Z EVT-G0 -> done (@agent-evtg0b)
 - 2026-09-13T02:38:21Z EVT-G0 approved; vocabulary reconciled across proto, schema, lock, mirror, domain, and usages. 2/6 done.
+- 2026-09-13T02:38:28Z EVT-001 -> claimed (@agent-evt001)
+- 2026-09-13T02:38:35Z EVT-001 -> in_progress (@agent-evt001)
+- 2026-09-13T02:47:25Z EVT-001 -> pending (@agent-evt001)
+- 2026-09-13T02:47:43Z EVT-001 -> claimed (@agent-evt001b)
+- 2026-09-13T02:47:49Z EVT-001 -> in_progress (@agent-evt001b)
+- 2026-09-13T02:57:49Z EVT-001 -> blocked (@agent-evt001b) — need agent-os/crates/events/Cargo.toml: events has no prost dependency and domain does not re-export prost, so envelope.rs cannot name the prost::Message trait to implement to_bytes/from_bytes on domain::generated::contract::EventEnvelope as design.md and the task require. Amendment: add 'prost.workspace = true' to [dependencies]; cargo will then refresh the events edge in agent-os/Cargo.lock (also outside lease).
+- 2026-09-13T02:59:54Z EVT-001 -> pending (@agent-evt001b)
+- 2026-09-13T03:00:13Z Ruling: EVT-001's lease was amended to include the events manifest and lock after TDD revealed a missing prost dependency; single-owner manifest discipline yields to the discovering task. Cost if wrong: two tasks can edit the manifest, but they are dependency-ordered.
+- 2026-09-13T03:01:15Z EVT-001 -> claimed (@agent-evt001c)
+- 2026-09-13T03:01:17Z EVT-001 -> in_progress (@agent-evt001c)
+- 2026-09-13T03:33:15Z EVT-001 -> pending (@agent-evt001c)
+- 2026-09-13T03:33:50Z EVT-001 -> claimed (@agent-evt001d)
+- 2026-09-13T03:34:02Z EVT-001 -> in_progress (@agent-evt001d)
+- 2026-09-13T04:00:14Z EVT-001 -> review (@agent-evt001d)
+- 2026-09-13T04:27:03Z EVT-001 -> done (@agent-evt001d)
+- 2026-09-13T04:27:03Z EVT-001 approved after one fix round (redacted Debug, fallible adapter keys, catalog retention defaults). 3/6 done.
