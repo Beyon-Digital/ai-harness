@@ -1,0 +1,534 @@
+diff --git a/agent-os-microkernel-mvp-buildpack/MANIFEST.json b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+index e3ccbef..922c1c8 100644
+--- a/agent-os-microkernel-mvp-buildpack/MANIFEST.json
++++ b/agent-os-microkernel-mvp-buildpack/MANIFEST.json
+@@ -104,21 +104,21 @@
+       "sha256": "c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0"
+     },
+     {
+       "path": "contracts/config/agent-os.schema.json",
+       "bytes": 7632,
+       "sha256": "f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625"
+     },
+     {
+       "path": "contracts/contract-lock.sha256",
+       "bytes": 2954,
+-      "sha256": "4c2799ae3d6025954b559c6d911ae8b505ac529981ca99288e499eaddccbf78b"
++      "sha256": "1afa7c848a36f8e1f350e1334989778b8cc1cd46fcbd03354f3f4502b45c89fa"
+     },
+     {
+       "path": "contracts/control-api/commands.proto",
+       "bytes": 2907,
+       "sha256": "fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f"
+     },
+     {
+       "path": "contracts/control-api/mvp_control.proto",
+       "bytes": 2994,
+       "sha256": "89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e"
+@@ -143,22 +143,22 @@
+       "bytes": 581,
+       "sha256": "924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c"
+     },
+     {
+       "path": "contracts/events/catalog.yaml",
+       "bytes": 12137,
+       "sha256": "33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a"
+     },
+     {
+       "path": "contracts/events/event.proto",
+-      "bytes": 594,
+-      "sha256": "eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799"
++      "bytes": 589,
++      "sha256": "854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f"
+     },
+     {
+       "path": "contracts/manifests/extension.schema.json",
+       "bytes": 1501,
+       "sha256": "819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea"
+     },
+     {
+       "path": "contracts/ports/agent_loop.proto",
+       "bytes": 608,
+       "sha256": "92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7"
+@@ -368,22 +368,22 @@
+       "bytes": 1494,
+       "sha256": "956694784c1fc2b0e75ee882f9dda6f093033f7b649f786f927f1ecde2e158b4"
+     },
+     {
+       "path": "specs/identity-delegation.md",
+       "bytes": 998,
+       "sha256": "67afa23ff7114fd3caca4067782aa9d471393265bec5224bbd8d702a512cc982"
+     },
+     {
+       "path": "specs/kernel-store-schema.sql",
+-      "bytes": 20296,
+-      "sha256": "22d739d91e733d680fa0c62d6a16b459912f1c17c7d63a1f98184abde95fcc60"
++      "bytes": 20286,
++      "sha256": "42a49db9007781613db59d453e8e55df57d13f99e2538dfe3c03331730a14a03"
+     },
+     {
+       "path": "specs/kernel-store.md",
+       "bytes": 3829,
+       "sha256": "3ca923e4a3ffd46f1646f00eb4c93147de85433e74ee214d289b04b4fa342c10"
+     },
+     {
+       "path": "specs/lifecycle.md",
+       "bytes": 1313,
+       "sha256": "8b1623f8bc5b3c1b8110ffd82f281d465921ae4cdf234dfa04fae5150426e3cf"
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256 b/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
+index 8471860..a0d4c1d 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
++++ b/agent-os-microkernel-mvp-buildpack/contracts/contract-lock.sha256
+@@ -3,21 +3,21 @@ d1ea4acacd677d0a53d0ad2a628e9364a52c5d03e1c1147f7bb70a9317b03956  ./capabilities
+ d4a122b7c690840ec6b0aaef5cf42242e18f70a88049a25346d1f8a041fdaa3b  ./capabilities/security-capabilities.yaml
+ c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0  ./catalog.yaml
+ f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625  ./config/agent-os.schema.json
+ fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/commands.proto
+ 89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e  ./control-api/mvp_control.proto
+ 0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f  ./domain/core.proto
+ 157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb  ./domain/effects.proto
+ 41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc  ./domain/entities.proto
+ 924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
+ 33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
+-eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799  ./events/event.proto
++854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f  ./events/event.proto
+ 819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
+ 92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
+ 16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto
+ a2f02b6baf3a5b0177ba5d65d6db725d7fe589f36c95befe369c0f83aa2386fe  ./ports/common.proto
+ afec5f2df4c8d029155df1de4fa3dbf62fc90d3d8f4cab27e1048094c1ad5aab  ./ports/context.proto
+ bf6f9a72f5b76e603a7b8f82fdf5bd674ec6a099126745d3b1d17b3c58df4605  ./ports/event_journal.proto
+ 0a6ae3992bbfca0b67cef7f99753b826147d42319bc9288d7f1d785b152b5bae  ./ports/kernel_store.proto
+ 2d268f1b76b957df101938039448465d5557951db6580ce7a5df24823331fbd8  ./ports/memory_store.proto
+ 3dba75ac41b8ee9b835fe68b764cd7c232945a9d96ae842e7218bda108e7ef38  ./ports/message_queue.proto
+ 2504c73fc48510d7facf0a98e9ac4e9149636b01e1b4ca7784e2277ebe5b7006  ./ports/model.proto
+diff --git a/agent-os-microkernel-mvp-buildpack/contracts/events/event.proto b/agent-os-microkernel-mvp-buildpack/contracts/events/event.proto
+index 5a6d574..b375dab 100644
+--- a/agent-os-microkernel-mvp-buildpack/contracts/events/event.proto
++++ b/agent-os-microkernel-mvp-buildpack/contracts/events/event.proto
+@@ -1,10 +1,10 @@
+ syntax = "proto3";
+ package agentos.spec.v1;
+-enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; PRIVATE=3; SECRET=4; }
+-enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; SESSION=2; AUDIT=3; DURABLE=4; }
++enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; CONFIDENTIAL=3; SECRET=4; }
++enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; STANDARD=2; AUDIT=3; }
+ message EventEnvelope {
+   string event_id=1; string event_type=2; uint32 event_version=3; string stream_key=4; uint64 sequence=5;
+   int64 occurred_unix_ms=6; string run_id=7; string task_id=8; string session_id=9; string effect_id=10;
+   string causation_id=11; string correlation_id=12; Sensitivity sensitivity=13; RetentionClass retention=14;
+   bytes payload=15;
+ }
+diff --git a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+index 2d39fc9..1ee98c8 100644
+--- a/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
++++ b/agent-os-microkernel-mvp-buildpack/specs/kernel-store-schema.sql
+@@ -348,50 +348,50 @@ CREATE TABLE IF NOT EXISTS outbox_events (
+   event_version INTEGER NOT NULL,
+   stream_key TEXT NOT NULL,
+   sequence INTEGER NOT NULL,
+   occurred_at_ms INTEGER NOT NULL,
+   run_id TEXT,
+   task_id TEXT,
+   session_id TEXT,
+   effect_id TEXT,
+   causation_id TEXT,
+   correlation_id TEXT,
+-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
+   -- 0=SENSITIVITY_UNSPECIFIED is never persisted.
+   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
+-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
+   -- 0=RETENTION_UNSPECIFIED is never persisted.
+-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
+   payload BLOB NOT NULL,
+   journal_published_at_ms INTEGER,
+   live_published_at_ms INTEGER,
+   UNIQUE (stream_key, sequence)
+ );
+ CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+   ON outbox_events(journal_published_at_ms, stream_key, sequence);
+ 
+ -- ---------------------------------------------------------------------------
+ -- GC-3 new durable records (design.md Data model, R5.1)
+ -- ---------------------------------------------------------------------------
+ 
+ CREATE TABLE IF NOT EXISTS artifacts (
+   artifact_id TEXT PRIMARY KEY,
+   uri TEXT NOT NULL UNIQUE,
+   digest TEXT NOT NULL,
+   media_type TEXT NOT NULL,
+   size_bytes INTEGER NOT NULL,
+   origin_run_id TEXT NOT NULL,
+   origin_effect_id TEXT,
+-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
+   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
+-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
+-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
+   locator TEXT NOT NULL,
+   created_at_ms INTEGER NOT NULL,
+   FOREIGN KEY (origin_run_id) REFERENCES runs(run_id),
+   FOREIGN KEY (origin_effect_id) REFERENCES effects(effect_id)
+ );
+ 
+ CREATE TABLE IF NOT EXISTS workspaces (
+   workspace_id TEXT PRIMARY KEY,
+   kind TEXT NOT NULL,
+   base_revision TEXT,
+diff --git a/agent-os/crates/command-coordinator/tests/coordinator.rs b/agent-os/crates/command-coordinator/tests/coordinator.rs
+index 647050d..4b979aa 100644
+--- a/agent-os/crates/command-coordinator/tests/coordinator.rs
++++ b/agent-os/crates/command-coordinator/tests/coordinator.rs
+@@ -85,22 +85,22 @@ impl CommandHandler for TestHandler {
+                 "representative handler built an invalid stream key",
+             )
+         })?;
+         stage(
+             txn,
+             DraftEvent {
+                 event_id,
+                 stream_key,
+                 event_type: "session.created".to_owned(),
+                 payload,
+-                sensitivity: SensitivityClass::Private,
+-                retention: RetentionClass::Durable,
++                sensitivity: SensitivityClass::Confidential,
++                retention: RetentionClass::Standard,
+                 correlation_id: ctx.correlation_id.clone(),
+                 causation_id: None,
+             },
+         )
+         .await?;
+         Ok(CommandOutcome {
+             code: OutcomeCode::Ok,
+             payload: b"created".to_vec(),
+         })
+     }
+@@ -135,22 +135,22 @@ impl CommandHandler for FailingHandler {
+                 "failing handler built an invalid stream key",
+             )
+         })?;
+         stage(
+             txn,
+             DraftEvent {
+                 event_id,
+                 stream_key,
+                 event_type: "session.failed".to_owned(),
+                 payload,
+-                sensitivity: SensitivityClass::Private,
+-                retention: RetentionClass::Durable,
++                sensitivity: SensitivityClass::Confidential,
++                retention: RetentionClass::Standard,
+                 correlation_id: ctx.correlation_id.clone(),
+                 causation_id: None,
+             },
+         )
+         .await?;
+         Err(KernelError::new(
+             ErrorCode::Internal,
+             RetryClass::Never,
+             "failing handler aborted after staging work",
+         ))
+diff --git a/agent-os/crates/domain/src/security.rs b/agent-os/crates/domain/src/security.rs
+index e2c2670..432cd35 100644
+--- a/agent-os/crates/domain/src/security.rs
++++ b/agent-os/crates/domain/src/security.rs
+@@ -3,33 +3,32 @@
+ pub use crate::run::{UnknownEnumValue, UnknownStateValue};
+ 
+ use crate::run::{mirror_enum, state_enum};
+ 
+ mirror_enum! {
+     /// Sensitivity of an event, mirroring `contract::Sensitivity`.
+     SensitivityClass, "SensitivityClass", {
+         Unspecified = 0,
+         Public = 1,
+         Internal = 2,
+-        Private = 3,
++        Confidential = 3,
+         Secret = 4,
+     }
+ }
+ 
+ mirror_enum! {
+     /// Retention class of an event, mirroring `contract::RetentionClass`.
+     RetentionClass, "RetentionClass", {
+         Unspecified = 0,
+         Ephemeral = 1,
+-        Session = 2,
++        Standard = 2,
+         Audit = 3,
+-        Durable = 4,
+     }
+ }
+ 
+ state_enum! {
+     /// Trust state of a registered adapter.
+     TrustState, "TrustState", {
+         Trusted = 1 => "trusted",
+         Untrusted = 2 => "untrusted",
+     }
+ }
+@@ -48,33 +47,37 @@ state_enum! {
+     ApprovalState, "ApprovalState", {
+         Pending = 1 => "pending",
+         Approved = 2 => "approved",
+         Denied = 3 => "denied",
+         Expired = 4 => "expired",
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{ApprovalState, ConformanceState, SensitivityClass, TrustState};
++    use super::{ApprovalState, ConformanceState, RetentionClass, SensitivityClass, TrustState};
+ 
+     #[test]
+     fn wire_mapping_matches_the_persisted_state_order() {
++        assert_eq!(SensitivityClass::Confidential.to_wire(), 3);
+         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
++        assert_eq!(RetentionClass::Standard.to_wire(), 2);
++        assert_eq!(RetentionClass::Audit.to_wire(), 3);
+         assert_eq!(TrustState::Untrusted.to_wire(), 2);
+         assert_eq!(ConformanceState::Passed.to_wire(), 2);
+         assert_eq!(ApprovalState::Expired.to_wire(), 4);
+     }
+ 
+     #[test]
+     fn unknown_values_are_not_guessed() {
+         assert!(SensitivityClass::from_wire(5).is_err());
++        assert!(RetentionClass::from_wire(4).is_err());
+         assert!(TrustState::from_wire(0).is_err());
+         assert!(TrustState::from_wire(3).is_err());
+         assert!(ConformanceState::from_wire(4).is_err());
+         assert!(ApprovalState::from_wire(0).is_err());
+         assert!(ApprovalState::from_wire(5).is_err());
+     }
+ 
+     #[test]
+     fn persisted_state_strings_round_trip() {
+         assert_eq!(TrustState::Trusted.as_str(), "trusted");
+diff --git a/agent-os/crates/domain/tests/prop_enums.rs b/agent-os/crates/domain/tests/prop_enums.rs
+index b3f488e..a2755b8 100644
+--- a/agent-os/crates/domain/tests/prop_enums.rs
++++ b/agent-os/crates/domain/tests/prop_enums.rs
+@@ -213,28 +213,28 @@ mod prop_enums {
+         assert_eq!(
+             ReconciliationSemantics::DeterministicInspection.to_wire(),
+             3
+         );
+         assert_eq!(ReconciliationSemantics::Impossible.to_wire(), 4);
+         assert_eq!(ReconciliationSemantics::UnknownReconciliation.to_wire(), 5);
+ 
+         assert_eq!(SensitivityClass::Unspecified.to_wire(), 0);
+         assert_eq!(SensitivityClass::Public.to_wire(), 1);
+         assert_eq!(SensitivityClass::Internal.to_wire(), 2);
+-        assert_eq!(SensitivityClass::Private.to_wire(), 3);
++        assert_eq!(SensitivityClass::Confidential.to_wire(), 3);
+         assert_eq!(SensitivityClass::Secret.to_wire(), 4);
+ 
+         assert_eq!(RetentionClass::Unspecified.to_wire(), 0);
+         assert_eq!(RetentionClass::Ephemeral.to_wire(), 1);
+-        assert_eq!(RetentionClass::Session.to_wire(), 2);
++        assert_eq!(RetentionClass::Standard.to_wire(), 2);
+         assert_eq!(RetentionClass::Audit.to_wire(), 3);
+-        assert_eq!(RetentionClass::Durable.to_wire(), 4);
++        assert!(RetentionClass::from_wire(4).is_err());
+ 
+         assert_eq!(TrustState::Trusted.to_wire(), 1);
+         assert_eq!(TrustState::Untrusted.to_wire(), 2);
+ 
+         assert_eq!(ConformanceState::Untested.to_wire(), 1);
+         assert_eq!(ConformanceState::Passed.to_wire(), 2);
+         assert_eq!(ConformanceState::Failed.to_wire(), 3);
+ 
+         assert_eq!(ApprovalState::Pending.to_wire(), 1);
+         assert_eq!(ApprovalState::Approved.to_wire(), 2);
+diff --git a/agent-os/crates/events/src/outbox.rs b/agent-os/crates/events/src/outbox.rs
+index dc3fd0d..47b04ed 100644
+--- a/agent-os/crates/events/src/outbox.rs
++++ b/agent-os/crates/events/src/outbox.rs
+@@ -102,42 +102,42 @@ mod tests {
+         }
+     }
+ 
+     #[test]
+     fn draft_projects_onto_the_immutable_outbox_row() {
+         let draft = DraftEvent {
+             event_id: event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70"),
+             stream_key: stream_key("run/018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70"),
+             event_type: "run.created".to_owned(),
+             payload: vec![0x07, 0x08],
+-            sensitivity: SensitivityClass::Private,
+-            retention: RetentionClass::Durable,
++            sensitivity: SensitivityClass::Confidential,
++            retention: RetentionClass::Standard,
+             correlation_id: Some("corr-1".to_owned()),
+             causation_id: Some(event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71")),
+         };
+ 
+         let event = draft.into_new(7, 1_700_000_000_042);
+ 
+         assert_eq!(
+             event.event_id,
+             event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70")
+         );
+         assert_eq!(event.event_type, "run.created");
+         assert_eq!(event.event_version, 1);
+         assert_eq!(
+             event.stream_key,
+             stream_key("run/018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70")
+         );
+         assert_eq!(event.sequence, 7);
+         assert_eq!(event.occurred_at_ms, 1_700_000_000_042);
+-        assert_eq!(event.sensitivity, SensitivityClass::Private);
+-        assert_eq!(event.retention, RetentionClass::Durable);
++        assert_eq!(event.sensitivity, SensitivityClass::Confidential);
++        assert_eq!(event.retention, RetentionClass::Standard);
+         assert_eq!(event.correlation_id.as_deref(), Some("corr-1"));
+         assert_eq!(
+             event.causation_id,
+             Some(event_id("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e71"))
+         );
+         assert_eq!(event.payload, vec![0x07, 0x08]);
+         assert!(event.run_id.is_none());
+         assert!(event.task_id.is_none());
+         assert!(event.session_id.is_none());
+         assert!(event.effect_id.is_none());
+diff --git a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+index d2eecee..0109483 100644
+--- a/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
++++ b/agent-os/crates/kernel-store-sqlite/tests/repos_remaining.rs
+@@ -889,21 +889,21 @@ async fn artifact_repo_crud() {
+     txn.artifacts()
+         .insert(NewArtifact {
+             artifact_id: artifact,
+             uri: "artifact://report-1".to_owned(),
+             digest: "digest-1".to_owned(),
+             media_type: "application/octet-stream".to_owned(),
+             size_bytes: 128,
+             origin_run_id: seeded.run,
+             origin_effect_id: None,
+             sensitivity: SensitivityClass::Internal,
+-            retention: RetentionClass::Session,
++            retention: RetentionClass::Standard,
+             locator: "file:///var/artifacts/1".to_owned(),
+             created_at_ms: 20,
+         })
+         .await
+         .unwrap();
+     let duplicate = txn
+         .artifacts()
+         .insert(NewArtifact {
+             artifact_id: ArtifactId::new(&provider),
+             uri: "artifact://report-1".to_owned(),
+diff --git a/agent-os/proto/contract-lock.sha256 b/agent-os/proto/contract-lock.sha256
+index 8471860..a0d4c1d 100644
+--- a/agent-os/proto/contract-lock.sha256
++++ b/agent-os/proto/contract-lock.sha256
+@@ -3,21 +3,21 @@ d1ea4acacd677d0a53d0ad2a628e9364a52c5d03e1c1147f7bb70a9317b03956  ./capabilities
+ d4a122b7c690840ec6b0aaef5cf42242e18f70a88049a25346d1f8a041fdaa3b  ./capabilities/security-capabilities.yaml
+ c3ecfd82474df6435d871e63d341bba3c457caeb0f6d030a003475452649baa0  ./catalog.yaml
+ f8d75d96dd6c137716c62a35c14ab742f3448259965ada3d74936062e1177625  ./config/agent-os.schema.json
+ fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/commands.proto
+ 89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e  ./control-api/mvp_control.proto
+ 0c58df1808a20b44a6a9271959dffd7a92709aba7015a227857a4460e368729f  ./domain/core.proto
+ 157a28978ce45b2d41b3e7e01c7d7298239bd246831c8c7b771b9a833bc513fb  ./domain/effects.proto
+ 41d4f292a4f887cea208f636254db3227cd1f48b7852f6d3d3abbbbb9544b2fc  ./domain/entities.proto
+ 924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
+ 33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
+-eff847542c28cd9fe4a4a0b2887f51350826750185c21a38f08ca6a3249fd799  ./events/event.proto
++854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f  ./events/event.proto
+ 819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
+ 92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
+ 16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto
+ a2f02b6baf3a5b0177ba5d65d6db725d7fe589f36c95befe369c0f83aa2386fe  ./ports/common.proto
+ afec5f2df4c8d029155df1de4fa3dbf62fc90d3d8f4cab27e1048094c1ad5aab  ./ports/context.proto
+ bf6f9a72f5b76e603a7b8f82fdf5bd674ec6a099126745d3b1d17b3c58df4605  ./ports/event_journal.proto
+ 0a6ae3992bbfca0b67cef7f99753b826147d42319bc9288d7f1d785b152b5bae  ./ports/kernel_store.proto
+ 2d268f1b76b957df101938039448465d5557951db6580ce7a5df24823331fbd8  ./ports/memory_store.proto
+ 3dba75ac41b8ee9b835fe68b764cd7c232945a9d96ae842e7218bda108e7ef38  ./ports/message_queue.proto
+ 2504c73fc48510d7facf0a98e9ac4e9149636b01e1b4ca7784e2277ebe5b7006  ./ports/model.proto
+diff --git a/agent-os/proto/events/event.proto b/agent-os/proto/events/event.proto
+index 5a6d574..b375dab 100644
+--- a/agent-os/proto/events/event.proto
++++ b/agent-os/proto/events/event.proto
+@@ -1,10 +1,10 @@
+ syntax = "proto3";
+ package agentos.spec.v1;
+-enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; PRIVATE=3; SECRET=4; }
+-enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; SESSION=2; AUDIT=3; DURABLE=4; }
++enum Sensitivity { SENSITIVITY_UNSPECIFIED=0; PUBLIC=1; INTERNAL=2; CONFIDENTIAL=3; SECRET=4; }
++enum RetentionClass { RETENTION_UNSPECIFIED=0; EPHEMERAL=1; STANDARD=2; AUDIT=3; }
+ message EventEnvelope {
+   string event_id=1; string event_type=2; uint32 event_version=3; string stream_key=4; uint64 sequence=5;
+   int64 occurred_unix_ms=6; string run_id=7; string task_id=8; string session_id=9; string effect_id=10;
+   string causation_id=11; string correlation_id=12; Sensitivity sensitivity=13; RetentionClass retention=14;
+   bytes payload=15;
+ }
+diff --git a/agent-os/schema/kernel_store.sql b/agent-os/schema/kernel_store.sql
+index 2d39fc9..1ee98c8 100644
+--- a/agent-os/schema/kernel_store.sql
++++ b/agent-os/schema/kernel_store.sql
+@@ -348,50 +348,50 @@ CREATE TABLE IF NOT EXISTS outbox_events (
+   event_version INTEGER NOT NULL,
+   stream_key TEXT NOT NULL,
+   sequence INTEGER NOT NULL,
+   occurred_at_ms INTEGER NOT NULL,
+   run_id TEXT,
+   task_id TEXT,
+   session_id TEXT,
+   effect_id TEXT,
+   causation_id TEXT,
+   correlation_id TEXT,
+-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
+   -- 0=SENSITIVITY_UNSPECIFIED is never persisted.
+   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
+-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
+   -- 0=RETENTION_UNSPECIFIED is never persisted.
+-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
+   payload BLOB NOT NULL,
+   journal_published_at_ms INTEGER,
+   live_published_at_ms INTEGER,
+   UNIQUE (stream_key, sequence)
+ );
+ CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
+   ON outbox_events(journal_published_at_ms, stream_key, sequence);
+ 
+ -- ---------------------------------------------------------------------------
+ -- GC-3 new durable records (design.md Data model, R5.1)
+ -- ---------------------------------------------------------------------------
+ 
+ CREATE TABLE IF NOT EXISTS artifacts (
+   artifact_id TEXT PRIMARY KEY,
+   uri TEXT NOT NULL UNIQUE,
+   digest TEXT NOT NULL,
+   media_type TEXT NOT NULL,
+   size_bytes INTEGER NOT NULL,
+   origin_run_id TEXT NOT NULL,
+   origin_effect_id TEXT,
+-  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=PRIVATE, 4=SECRET.
++  -- Sensitivity (contracts/events/event.proto): 1=PUBLIC, 2=INTERNAL, 3=CONFIDENTIAL, 4=SECRET.
+   sensitivity INTEGER NOT NULL CHECK (sensitivity BETWEEN 1 AND 4),
+-  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=SESSION, 3=AUDIT, 4=DURABLE.
+-  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 4),
++  -- RetentionClass (contracts/events/event.proto): 1=EPHEMERAL, 2=STANDARD, 3=AUDIT.
++  retention INTEGER NOT NULL CHECK (retention BETWEEN 1 AND 3),
+   locator TEXT NOT NULL,
+   created_at_ms INTEGER NOT NULL,
+   FOREIGN KEY (origin_run_id) REFERENCES runs(run_id),
+   FOREIGN KEY (origin_effect_id) REFERENCES effects(effect_id)
+ );
+ 
+ CREATE TABLE IF NOT EXISTS workspaces (
+   workspace_id TEXT PRIMARY KEY,
+   kind TEXT NOT NULL,
+   base_revision TEXT,
