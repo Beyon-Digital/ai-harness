@@ -1,0 +1,489 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index ce9ed8f..b071b2a 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -411,20 +411,21 @@ dependencies = [
+  "parking",
+  "pin-project-lite",
+ ]
+ 
+ [[package]]
+ name = "events"
+ version = "0.1.0"
+ dependencies = [
+  "domain",
+  "errors",
++ "event-journal-sqlite",
+  "kernel-store",
+  "kernel-store-sqlite",
+  "prost",
+  "serde",
+  "serde_yaml",
+  "tempfile",
+  "testkit",
+  "tokio",
+ ]
+ 
+diff --git a/agent-os/crates/events/Cargo.toml b/agent-os/crates/events/Cargo.toml
+index 4d4c38e..013d9e6 100644
+--- a/agent-os/crates/events/Cargo.toml
++++ b/agent-os/crates/events/Cargo.toml
+@@ -8,14 +8,15 @@ publish.workspace = true
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
+ prost.workspace = true
+ serde.workspace = true
+ serde_yaml.workspace = true
+ tokio.workspace = true
+ 
+ [dev-dependencies]
++event-journal-sqlite.workspace = true
+ kernel-store-sqlite.workspace = true
+ tempfile.workspace = true
+ testkit.workspace = true
+ tokio.workspace = true
+diff --git a/agent-os/crates/events/src/lib.rs b/agent-os/crates/events/src/lib.rs
+index 72a1416..2315ec3 100644
+--- a/agent-os/crates/events/src/lib.rs
++++ b/agent-os/crates/events/src/lib.rs
+@@ -1,16 +1,18 @@
+ //! Event envelope, sequence and cursor helpers, and the live event bus.
+ #![forbid(unsafe_code)]
+ 
+ pub mod cursor;
+ pub mod dispatcher;
+ pub mod envelope;
+ pub mod journal;
++pub mod live_bus;
+ pub mod outbox;
+ pub mod stream;
+ 
+ pub use cursor::{EventCursor, EventCursorExt};
+ pub use envelope::{
+     CatalogClassificationPolicy, ClassificationPolicy, EventBuilder, EventEnvelope,
+ };
+ pub use journal::{AppendResult, EventJournalPort, ReadResult};
++pub use live_bus::LiveItem;
+ pub use stream::{StreamKey, StreamKind};
+diff --git a/agent-os/crates/events/src/live_bus.rs b/agent-os/crates/events/src/live_bus.rs
+new file mode 100644
+index 0000000..30a4bea
+--- /dev/null
++++ b/agent-os/crates/events/src/live_bus.rs
+@@ -0,0 +1,177 @@
++//! Bounded live delivery with explicit lag, plus a lossy ephemeral channel.
++//!
++//! [`LiveBus`] fans journal-backed events out to subscribers over a bounded
++//! `tokio::sync::broadcast` channel. A subscriber that falls behind the
++//! capacity receives exactly one [`LiveItem::Lagged`] carrying the last
++//! journal-backed cursor it actually delivered, and the subscription is then
++//! terminal: the client resumes through the durable journal from that cursor
++//! and no cursor is ever fabricated (R4.1-R4.3, R4.5).
++//!
++//! [`EphemeralBus`] is a separate, lossy, counted channel for transient bytes.
++//! Its overflow never touches durable cursors or durable delivery (R4.4, P3).
++
++use std::sync::atomic::{AtomicU64, Ordering};
++
++use tokio::sync::broadcast;
++use tokio::sync::mpsc;
++
++use crate::cursor::EventCursor;
++use crate::dispatcher::LiveSink;
++use crate::envelope::EventEnvelope;
++
++/// One item produced by a live subscription.
++///
++/// `Event` carries the envelope inline so normal delivery stays allocation
++/// free; the rare `Lagged` variant makes the enum intentionally asymmetric.
++#[allow(clippy::large_enum_variant)]
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum LiveItem {
++    /// A journal-backed event, delivered in publication order.
++    Event(EventEnvelope),
++    /// The subscription fell behind; resume the journal from this cursor.
++    ///
++    /// The cursor is the last one the subscription actually delivered, so a
++    /// journal read strictly after it recovers every missed event with no gap
++    /// and no duplicate.
++    Lagged { resume_from: EventCursor },
++}
++
++/// Bounded in-process fan-out of journal-backed events.
++pub struct LiveBus {
++    sender: broadcast::Sender<EventEnvelope>,
++}
++
++impl LiveBus {
++    /// Creates a bus whose per-subscriber buffer holds `capacity` events.
++    ///
++    /// # Panics
++    ///
++    /// Panics when `capacity` is zero; a bus with no buffer could never
++    /// deliver an event before lagging.
++    pub fn new(capacity: usize) -> Self {
++        let (sender, _receiver) = broadcast::channel(capacity);
++        Self { sender }
++    }
++
++    /// Broadcasts an already-journaled event to every live subscriber.
++    ///
++    /// Publishing with no subscribers is a no-op; the event remains durable in
++    /// the journal, and nothing is fabricated for live delivery.
++    pub fn publish(&self, event: &EventEnvelope) {
++        let _ = self.sender.send(event.clone());
++    }
++
++    /// Registers a new subscription positioned at the current tail.
++    ///
++    /// The subscription tracks the last cursor it delivers, starting from none:
++    /// only events received after this call can advance it.
++    pub fn subscribe(&self) -> LiveSubscription {
++        LiveSubscription {
++            receiver: self.sender.subscribe(),
++            last_delivered: None,
++            ended: false,
++        }
++    }
++
++    /// Number of subscriptions currently registered.
++    pub fn subscriber_count(&self) -> usize {
++        self.sender.receiver_count()
++    }
++}
++
++impl LiveSink for LiveBus {
++    fn publish(&self, event: &EventEnvelope) {
++        LiveBus::publish(self, event);
++    }
++}
++
++/// A live subscription over one [`LiveBus`].
++pub struct LiveSubscription {
++    receiver: broadcast::Receiver<EventEnvelope>,
++    last_delivered: Option<EventCursor>,
++    ended: bool,
++}
++
++impl LiveSubscription {
++    /// Awaits the next live item.
++    ///
++    /// Delivery is ordered. When the bounded buffer overflows, the
++    /// subscription reports [`LiveItem::Lagged`] once, carrying the last
++    /// journal-backed cursor it delivered, and becomes terminal; later calls
++    /// panic. A subscription that overflows before delivering anything has no
++    /// journal-backed cursor to report and panics rather than fabricating one.
++    ///
++    /// # Panics
++    ///
++    /// Panics on any call after the subscription reported lag, when the
++    /// subscription overflows before its first delivery, or when the owning
++    /// [`LiveBus`] has been dropped.
++    pub async fn next(&mut self) -> LiveItem {
++        assert!(
++            !self.ended,
++            "live subscription is terminal after reporting lag"
++        );
++        match self.receiver.recv().await {
++            Ok(event) => {
++                self.last_delivered = Some(event.cursor());
++                LiveItem::Event(event)
++            }
++            Err(broadcast::error::RecvError::Lagged(_)) => {
++                self.ended = true;
++                let Some(resume_from) = self.last_delivered.clone() else {
++                    panic!("live subscription lagged before delivering any journal-backed cursor");
++                };
++                LiveItem::Lagged { resume_from }
++            }
++            Err(broadcast::error::RecvError::Closed) => {
++                self.ended = true;
++                panic!("live bus was dropped while a subscription was live");
++            }
++        }
++    }
++}
++
++/// Bounded, lossy channel for ephemeral bytes.
++///
++/// Overflow and withdrawal are counted; nothing published here can advance a
++/// durable cursor or affect [`LiveBus`] delivery.
++pub struct EphemeralBus {
++    sender: mpsc::Sender<Vec<u8>>,
++    _receiver: mpsc::Receiver<Vec<u8>>,
++    dropped: AtomicU64,
++}
++
++impl EphemeralBus {
++    /// Creates a bus whose buffer holds `capacity` ephemeral messages.
++    ///
++    /// # Panics
++    ///
++    /// Panics when `capacity` is zero.
++    pub fn new(capacity: usize) -> Self {
++        let (sender, receiver) = mpsc::channel(capacity);
++        Self {
++            sender,
++            _receiver: receiver,
++            dropped: AtomicU64::new(0),
++        }
++    }
++
++    /// Attempts a non-blocking publish.
++    ///
++    /// Returns `true` when the message entered the buffer and `false` when it
++    /// was dropped because the buffer was full, incrementing [`Self::dropped`].
++    pub fn try_publish(&self, bytes: Vec<u8>) -> bool {
++        match self.sender.try_send(bytes) {
++            Ok(()) => true,
++            Err(_) => {
++                self.dropped.fetch_add(1, Ordering::Relaxed);
++                false
++            }
++        }
++    }
++
++    /// Number of messages dropped by [`Self::try_publish`].
++    pub fn dropped(&self) -> u64 {
++        self.dropped.load(Ordering::Relaxed)
++    }
++}
+diff --git a/agent-os/crates/events/tests/live_bus.rs b/agent-os/crates/events/tests/live_bus.rs
+new file mode 100644
+index 0000000..5a89494
+--- /dev/null
++++ b/agent-os/crates/events/tests/live_bus.rs
+@@ -0,0 +1,231 @@
++//! EVT-004 live bus integration tests.
++//!
++//! The bus is exercised through deterministic capacity pressure: a slow
++//! subscriber is driven past the broadcast capacity with a healthy subscriber
++//! consuming in step, so lag is capacity-driven rather than time-driven. The
++//! resume test replays the missed range through a real `SqliteEventJournal`
++//! in a temp runtime root. There are no sleeps.
++
++use std::str::FromStr;
++use std::time::Duration;
++
++use domain::ids::{EventId, RunId};
++use domain::security::{RetentionClass, SensitivityClass};
++use event_journal_sqlite::{JournalConfig, SqliteEventJournal};
++use events::StreamKey;
++use events::dispatcher::LiveSink;
++use events::envelope::{CatalogClassificationPolicy, EventBuilder, EventEnvelope};
++use events::journal::EventJournalPort;
++use events::live_bus::{EphemeralBus, LiveBus, LiveItem, LiveSubscription};
++use tempfile::TempDir;
++
++const NOW_MS: i64 = 1_700_000_000_000;
++const EVENT_TYPE: &str = "evt004.spec.recorded";
++const RUN: &str = "018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e70";
++
++fn policy() -> CatalogClassificationPolicy {
++    CatalogClassificationPolicy::embedded().expect("embedded catalog parses")
++}
++
++fn event_id(byte: u8) -> EventId {
++    EventId::from_str(&format!("018f2b9c-4a1e-7c3d-9f00-2b7a1c5d6e{byte:02x}"))
++        .expect("sample event id is canonical")
++}
++
++fn run_stream() -> StreamKey {
++    StreamKey::run(RunId::from_str(RUN).expect("sample run id is canonical"))
++}
++
++fn envelope(sequence: u64) -> EventEnvelope {
++    EventBuilder::new(EVENT_TYPE, 1, run_stream())
++        .event_id(event_id(sequence as u8))
++        .sequence(sequence)
++        .occurred_at_ms(NOW_MS + sequence as i64)
++        .sensitivity(SensitivityClass::Internal)
++        .retention(RetentionClass::Standard)
++        .payload(vec![sequence as u8])
++        .build(&policy())
++        .expect("sample envelope builds")
++}
++
++fn envelopes(sequences: impl IntoIterator<Item = u64>) -> Vec<EventEnvelope> {
++    sequences.into_iter().map(envelope).collect()
++}
++
++async fn receive(subscription: &mut LiveSubscription) -> LiveItem {
++    tokio::time::timeout(Duration::from_secs(10), subscription.next())
++        .await
++        .expect("a live item is delivered within the bounded wait")
++}
++
++fn expect_event(item: LiveItem) -> EventEnvelope {
++    match item {
++        LiveItem::Event(event) => event,
++        LiveItem::Lagged { resume_from } => {
++            panic!("expected a delivered event, got lag at {resume_from}")
++        }
++    }
++}
++
++#[tokio::test]
++async fn subscribers_receive_published_events_in_order() {
++    let bus = LiveBus::new(4);
++    let mut subscription = bus.subscribe();
++    assert_eq!(bus.subscriber_count(), 1);
++
++    let events = envelopes(1..=3);
++    for event in &events {
++        bus.publish(event);
++    }
++
++    assert_eq!(expect_event(receive(&mut subscription).await), events[0]);
++    assert_eq!(expect_event(receive(&mut subscription).await), events[1]);
++    assert_eq!(expect_event(receive(&mut subscription).await), events[2]);
++
++    drop(subscription);
++    assert_eq!(bus.subscriber_count(), 0);
++}
++
++#[tokio::test]
++async fn live_bus_implements_the_dispatcher_sink_seam() {
++    let bus = LiveBus::new(2);
++    let sink: &dyn LiveSink = &bus;
++    let mut subscription = bus.subscribe();
++
++    let event = envelope(1);
++    sink.publish(&event);
++
++    assert_eq!(expect_event(receive(&mut subscription).await), event);
++}
++
++#[tokio::test]
++async fn slow_subscriber_reports_lag_with_its_last_delivered_cursor() {
++    let bus = LiveBus::new(2);
++    let mut slow = bus.subscribe();
++    let mut healthy = bus.subscribe();
++
++    let events = envelopes(1..=5);
++    bus.publish(&events[0]);
++    assert_eq!(expect_event(receive(&mut slow).await), events[0]);
++    assert_eq!(expect_event(receive(&mut healthy).await), events[0]);
++
++    // The healthy subscriber consumes in step; the slow one falls behind the
++    // two-slot buffer without any wait.
++    bus.publish(&events[1]);
++    assert_eq!(expect_event(receive(&mut healthy).await), events[1]);
++    bus.publish(&events[2]);
++    assert_eq!(expect_event(receive(&mut healthy).await), events[2]);
++    bus.publish(&events[3]);
++
++    let lagged = receive(&mut slow).await;
++    assert_eq!(
++        lagged,
++        LiveItem::Lagged {
++            resume_from: events[0].cursor()
++        }
++    );
++
++    // The healthy subscriber keeps receiving after its peer lagged.
++    assert_eq!(expect_event(receive(&mut healthy).await), events[3]);
++    bus.publish(&events[4]);
++    assert_eq!(expect_event(receive(&mut healthy).await), events[4]);
++
++    let handle = tokio::spawn(async move { slow.next().await });
++    let error = handle.await.expect_err("a lagged subscription is terminal");
++    assert!(error.is_panic());
++}
++
++#[tokio::test]
++async fn lag_before_any_delivery_never_fabricates_a_cursor() {
++    let bus = LiveBus::new(1);
++    let mut subscription = bus.subscribe();
++    bus.publish(&envelope(1));
++    bus.publish(&envelope(2));
++
++    let handle = tokio::spawn(async move { subscription.next().await });
++    let error = handle
++        .await
++        .expect_err("lag without a delivered cursor is terminal");
++    assert!(error.is_panic());
++}
++
++#[tokio::test]
++async fn resume_from_lag_reads_exactly_the_missed_journal_events() {
++    let dir = TempDir::new().expect("temp runtime root");
++    let journal = SqliteEventJournal::open(JournalConfig {
++        path: dir.path().join("events.db"),
++        busy_timeout_ms: 5_000,
++    })
++    .await
++    .expect("journal opens");
++
++    let stream = run_stream();
++    let events = envelopes(1..=5);
++    journal
++        .append(&stream, 0, &events)
++        .await
++        .expect("journal appends the contiguous batch");
++
++    let bus = LiveBus::new(1);
++    let mut subscription = bus.subscribe();
++    bus.publish(&events[0]);
++    assert_eq!(expect_event(receive(&mut subscription).await), events[0]);
++
++    for event in &events[1..] {
++        bus.publish(event);
++    }
++
++    let LiveItem::Lagged { resume_from } = receive(&mut subscription).await else {
++        panic!("expected the slow subscription to lag");
++    };
++    assert_eq!(resume_from, events[0].cursor());
++
++    let resumed = journal
++        .read_stream(&stream, resume_from.sequence, 64)
++        .await
++        .expect("resume read succeeds");
++    assert!(!resumed.retention_gap, "the inception journal has no gaps");
++    assert_eq!(resumed.events, events[1..].to_vec());
++    assert_eq!(
++        resumed
++            .events
++            .iter()
++            .map(|event| event.sequence)
++            .collect::<Vec<_>>(),
++        vec![2, 3, 4, 5]
++    );
++    assert!(
++        resumed
++            .events
++            .iter()
++            .all(|event| event.sequence > resume_from.sequence)
++    );
++    assert!(
++        resumed
++            .events
++            .windows(2)
++            .all(|pair| pair[0].event_id != pair[1].event_id),
++        "resumed range contains no duplicate events"
++    );
++}
++
++#[tokio::test]
++async fn ephemeral_overflow_counts_drops_and_spares_the_durable_bus() {
++    let ephemeral = EphemeralBus::new(2);
++    assert!(ephemeral.try_publish(vec![0x01]));
++    assert!(ephemeral.try_publish(vec![0x02]));
++    assert_eq!(ephemeral.dropped(), 0);
++
++    assert!(!ephemeral.try_publish(vec![0x03]));
++    assert!(!ephemeral.try_publish(vec![0x04]));
++    assert_eq!(ephemeral.dropped(), 2);
++
++    let durable = LiveBus::new(2);
++    let mut subscription = durable.subscribe();
++    let event = envelope(1);
++    durable.publish(&event);
++    assert!(!ephemeral.try_publish(vec![0x05]));
++    assert_eq!(ephemeral.dropped(), 3);
++
++    assert_eq!(expect_event(receive(&mut subscription).await), event);
++}

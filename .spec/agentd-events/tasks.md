@@ -248,13 +248,14 @@
 
 ### Task EVT-004: Live bus with explicit lag
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-evt004b
 - depends_on: EVT-003
-- files: `agent-os/crates/events/src/live_bus.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/live_bus.rs`
+- files: `agent-os/crates/events/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/events/src/live_bus.rs`, `agent-os/crates/events/src/lib.rs`, `agent-os/crates/events/tests/live_bus.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, P3, N2
 - scope: medium
 - model: standard
+- blocked_reason: need agent-os/crates/events/Cargo.toml: the mandated resume test must exercise a real SqliteEventJournal in a temp root, but events dev-dependencies (EVT-000) are only kernel-store-sqlite, tempfile, testkit, tokio, so tests/live_bus.rs cannot name event_journal_sqlite and no re-export makes it reachable. Minimal repair: add event-journal-sqlite.workspace = true to [dev-dependencies] (Cargo-legal dev edge events(dev) -> event-journal-sqlite -> event-journal -> events) and let cargo refresh the events edge in agent-os/Cargo.lock (also outside this lease). Alternative ruling: the resume test uses a test-local EventJournalPort with EVT-002 read semantics, as the EVT-003 ruling already established for dispatcher tests, and the real SQLite journal keeps its own EVT-002 suite.
 
 **Objective:** Bounded in-process durable delivery that disconnects slow subscribers with a resumable cursor, plus a separate lossy ephemeral channel.
 

@@ -48,3 +48,13 @@
 - 2026-09-13T06:16:56Z EVT-003 -> review (@agent-evt003b)
 - 2026-09-13T06:50:36Z EVT-003 -> done (@agent-evt003b)
 - 2026-09-13T06:50:37Z EVT-003 approved after one fix round (mixed-batch recovery suffix append). 5/6 done; EVT-004 dispatched.
+- 2026-09-13T06:50:47Z EVT-004 -> claimed (@agent-evt004)
+- 2026-09-13T06:50:48Z EVT-004 -> in_progress (@agent-evt004)
+- 2026-09-13T06:54:56Z EVT-004 -> blocked (@agent-evt004) — need agent-os/crates/events/Cargo.toml: the mandated resume test must exercise a real SqliteEventJournal in a temp root, but events dev-dependencies (EVT-000) are only kernel-store-sqlite, tempfile, testkit, tokio, so tests/live_bus.rs cannot name event_journal_sqlite and no re-export makes it reachable. Minimal repair: add event-journal-sqlite.workspace = true to [dev-dependencies] (Cargo-legal dev edge events(dev) -> event-journal-sqlite -> event-journal -> events) and let cargo refresh the events edge in agent-os/Cargo.lock (also outside this lease). Alternative ruling: the resume test uses a test-local EventJournalPort with EVT-002 read semantics, as the EVT-003 ruling already established for dispatcher tests, and the real SQLite journal keeps its own EVT-002 suite.
+- 2026-09-13T06:55:51Z EVT-004 -> pending (@agent-evt004)
+- 2026-09-13T06:56:32Z Ruling: EVT-004's lease adds the events manifest and lock to declare event-journal-sqlite as a dev-dependency for the resume test; the dev-only cycle is accepted by cargo and never reaches production builds. Fallback if cargo rejects: a test-local port adapter.
+- 2026-09-13T06:57:06Z EVT-004 -> claimed (@agent-evt004b)
+- 2026-09-13T06:57:16Z EVT-004 -> in_progress (@agent-evt004b)
+- 2026-09-13T07:33:46Z EVT-004 -> review (@agent-evt004b)
+- 2026-09-13T11:10:10Z EVT-004 -> done (@agent-evt004b)
+- 2026-09-13T11:10:10Z EVT-004 approved after one fix round (optional cold-start cursor, BusClosed). 6/6 tasks done. Final checkpoint running.

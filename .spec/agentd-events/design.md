@@ -167,7 +167,10 @@ impl EventJournalPort for SqliteEventJournal;   // BEGIN IMMEDIATE, embedded sch
 pub enum LiveItem {
     Event(events::EventEnvelope),
     /// The subscription fell behind; resume the journal from this cursor.
-    Lagged { resume_from: events::EventCursor },
+    /// `None` means no event was ever delivered: resume from stream inception.
+    Lagged { resume_from: Option⟨events::EventCursor⟩ },
+    /// The bus was dropped or closed; the subscription ends without a cursor.
+    BusClosed,
 }
 
 pub struct LiveBus { /* tokio broadcast sender, capacity */ }

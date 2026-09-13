@@ -1,0 +1,326 @@
+diff --git a/agent-os/crates/events/src/live_bus.rs b/agent-os/crates/events/src/live_bus.rs
+index 30a4bea..1639f14 100644
+--- a/agent-os/crates/events/src/live_bus.rs
++++ b/agent-os/crates/events/src/live_bus.rs
+@@ -1,46 +1,54 @@
+ //! Bounded live delivery with explicit lag, plus a lossy ephemeral channel.
+ //!
+ //! [`LiveBus`] fans journal-backed events out to subscribers over a bounded
+ //! `tokio::sync::broadcast` channel. A subscriber that falls behind the
+ //! capacity receives exactly one [`LiveItem::Lagged`] carrying the last
+-//! journal-backed cursor it actually delivered, and the subscription is then
+-//! terminal: the client resumes through the durable journal from that cursor
+-//! and no cursor is ever fabricated (R4.1-R4.3, R4.5).
++//! journal-backed cursor it actually delivered (`None` when it delivered
++//! none), and the subscription is then terminal: the client resumes through
++//! the durable journal from that cursor, or from stream inception, and no
++//! cursor is ever fabricated (R4.1-R4.3, R4.5). Dropping the bus yields
++//! [`LiveItem::BusClosed`].
+ //!
+ //! [`EphemeralBus`] is a separate, lossy, counted channel for transient bytes.
+ //! Its overflow never touches durable cursors or durable delivery (R4.4, P3).
+ 
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ use tokio::sync::broadcast;
+ use tokio::sync::mpsc;
+ 
+ use crate::cursor::EventCursor;
+ use crate::dispatcher::LiveSink;
+ use crate::envelope::EventEnvelope;
+ 
+ /// One item produced by a live subscription.
+ ///
+ /// `Event` carries the envelope inline so normal delivery stays allocation
+-/// free; the rare `Lagged` variant makes the enum intentionally asymmetric.
++/// free; the rare terminal variants make the enum intentionally asymmetric.
+ #[allow(clippy::large_enum_variant)]
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum LiveItem {
+     /// A journal-backed event, delivered in publication order.
+     Event(EventEnvelope),
+     /// The subscription fell behind; resume the journal from this cursor.
+     ///
+-    /// The cursor is the last one the subscription actually delivered, so a
+-    /// journal read strictly after it recovers every missed event with no gap
+-    /// and no duplicate.
+-    Lagged { resume_from: EventCursor },
++    /// `resume_from` is the last cursor the subscription actually delivered,
++    /// so a journal read strictly after it recovers every missed event with no
++    /// gap and no duplicate. `None` means no event was ever delivered: the
++    /// consumer resumes from stream inception.
++    Lagged { resume_from: Option<EventCursor> },
++    /// The bus was dropped while the subscription was live.
++    ///
++    /// The subscription ends without a resume cursor; no event is fabricated
++    /// and no cursor is invented.
++    BusClosed,
+ }
+ 
+ /// Bounded in-process fan-out of journal-backed events.
+ pub struct LiveBus {
+     sender: broadcast::Sender<EventEnvelope>,
+ }
+ 
+ impl LiveBus {
+     /// Creates a bus whose per-subscriber buffer holds `capacity` events.
+     ///
+@@ -51,20 +59,23 @@ impl LiveBus {
+     pub fn new(capacity: usize) -> Self {
+         let (sender, _receiver) = broadcast::channel(capacity);
+         Self { sender }
+     }
+ 
+     /// Broadcasts an already-journaled event to every live subscriber.
+     ///
+     /// Publishing with no subscribers is a no-op; the event remains durable in
+     /// the journal, and nothing is fabricated for live delivery.
+     pub fn publish(&self, event: &EventEnvelope) {
++        if self.sender.receiver_count() == 0 {
++            return;
++        }
+         let _ = self.sender.send(event.clone());
+     }
+ 
+     /// Registers a new subscription positioned at the current tail.
+     ///
+     /// The subscription tracks the last cursor it delivers, starting from none:
+     /// only events received after this call can advance it.
+     pub fn subscribe(&self) -> LiveSubscription {
+         LiveSubscription {
+             receiver: self.sender.subscribe(),
+@@ -90,58 +101,56 @@ pub struct LiveSubscription {
+     receiver: broadcast::Receiver<EventEnvelope>,
+     last_delivered: Option<EventCursor>,
+     ended: bool,
+ }
+ 
+ impl LiveSubscription {
+     /// Awaits the next live item.
+     ///
+     /// Delivery is ordered. When the bounded buffer overflows, the
+     /// subscription reports [`LiveItem::Lagged`] once, carrying the last
+-    /// journal-backed cursor it delivered, and becomes terminal; later calls
+-    /// panic. A subscription that overflows before delivering anything has no
+-    /// journal-backed cursor to report and panics rather than fabricating one.
++    /// journal-backed cursor it delivered (`None` when it never delivered
++    /// one), and becomes terminal. When the owning [`LiveBus`] is dropped it
++    /// reports [`LiveItem::BusClosed`] and becomes terminal. No cursor is ever
++    /// fabricated.
+     ///
+     /// # Panics
+     ///
+-    /// Panics on any call after the subscription reported lag, when the
+-    /// subscription overflows before its first delivery, or when the owning
+-    /// [`LiveBus`] has been dropped.
++    /// Panics on any call after the subscription became terminal.
+     pub async fn next(&mut self) -> LiveItem {
+         assert!(
+             !self.ended,
+-            "live subscription is terminal after reporting lag"
++            "live subscription is terminal after lag or bus closure"
+         );
+         match self.receiver.recv().await {
+             Ok(event) => {
+                 self.last_delivered = Some(event.cursor());
+                 LiveItem::Event(event)
+             }
+             Err(broadcast::error::RecvError::Lagged(_)) => {
+                 self.ended = true;
+-                let Some(resume_from) = self.last_delivered.clone() else {
+-                    panic!("live subscription lagged before delivering any journal-backed cursor");
+-                };
+-                LiveItem::Lagged { resume_from }
++                LiveItem::Lagged {
++                    resume_from: self.last_delivered.take(),
++                }
+             }
+             Err(broadcast::error::RecvError::Closed) => {
+                 self.ended = true;
+-                panic!("live bus was dropped while a subscription was live");
++                LiveItem::BusClosed
+             }
+         }
+     }
+ }
+ 
+ /// Bounded, lossy channel for ephemeral bytes.
+ ///
+-/// Overflow and withdrawal are counted; nothing published here can advance a
+-/// durable cursor or affect [`LiveBus`] delivery.
++/// Dropped messages are counted; nothing published here can advance a durable
++/// cursor or affect [`LiveBus`] delivery.
+ pub struct EphemeralBus {
+     sender: mpsc::Sender<Vec<u8>>,
+     _receiver: mpsc::Receiver<Vec<u8>>,
+     dropped: AtomicU64,
+ }
+ 
+ impl EphemeralBus {
+     /// Creates a bus whose buffer holds `capacity` ephemeral messages.
+     ///
+     /// # Panics
+@@ -152,21 +161,22 @@ impl EphemeralBus {
+         Self {
+             sender,
+             _receiver: receiver,
+             dropped: AtomicU64::new(0),
+         }
+     }
+ 
+     /// Attempts a non-blocking publish.
+     ///
+     /// Returns `true` when the message entered the buffer and `false` when it
+-    /// was dropped because the buffer was full, incrementing [`Self::dropped`].
++    /// was dropped because the buffer was full or the channel was closed,
++    /// incrementing [`Self::dropped`].
+     pub fn try_publish(&self, bytes: Vec<u8>) -> bool {
+         match self.sender.try_send(bytes) {
+             Ok(()) => true,
+             Err(_) => {
+                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                 false
+             }
+         }
+     }
+ 
+diff --git a/agent-os/crates/events/tests/live_bus.rs b/agent-os/crates/events/tests/live_bus.rs
+index 5a89494..5a8ae9d 100644
+--- a/agent-os/crates/events/tests/live_bus.rs
++++ b/agent-os/crates/events/tests/live_bus.rs
+@@ -55,22 +55,23 @@ fn envelopes(sequences: impl IntoIterator<Item = u64>) -> Vec<EventEnvelope> {
+ async fn receive(subscription: &mut LiveSubscription) -> LiveItem {
+     tokio::time::timeout(Duration::from_secs(10), subscription.next())
+         .await
+         .expect("a live item is delivered within the bounded wait")
+ }
+ 
+ fn expect_event(item: LiveItem) -> EventEnvelope {
+     match item {
+         LiveItem::Event(event) => event,
+         LiveItem::Lagged { resume_from } => {
+-            panic!("expected a delivered event, got lag at {resume_from}")
++            panic!("expected a delivered event, got lag at {resume_from:?}")
+         }
++        LiveItem::BusClosed => panic!("expected a delivered event, got a closed bus"),
+     }
+ }
+ 
+ #[tokio::test]
+ async fn subscribers_receive_published_events_in_order() {
+     let bus = LiveBus::new(4);
+     let mut subscription = bus.subscribe();
+     assert_eq!(bus.subscriber_count(), 1);
+ 
+     let events = envelopes(1..=3);
+@@ -114,48 +115,77 @@ async fn slow_subscriber_reports_lag_with_its_last_delivered_cursor() {
+     bus.publish(&events[1]);
+     assert_eq!(expect_event(receive(&mut healthy).await), events[1]);
+     bus.publish(&events[2]);
+     assert_eq!(expect_event(receive(&mut healthy).await), events[2]);
+     bus.publish(&events[3]);
+ 
+     let lagged = receive(&mut slow).await;
+     assert_eq!(
+         lagged,
+         LiveItem::Lagged {
+-            resume_from: events[0].cursor()
++            resume_from: Some(events[0].cursor())
+         }
+     );
+ 
+     // The healthy subscriber keeps receiving after its peer lagged.
+     assert_eq!(expect_event(receive(&mut healthy).await), events[3]);
+     bus.publish(&events[4]);
+     assert_eq!(expect_event(receive(&mut healthy).await), events[4]);
+ 
+     let handle = tokio::spawn(async move { slow.next().await });
+     let error = handle.await.expect_err("a lagged subscription is terminal");
+     assert!(error.is_panic());
+ }
+ 
+ #[tokio::test]
+-async fn lag_before_any_delivery_never_fabricates_a_cursor() {
++async fn cold_start_lag_reports_no_resume_cursor() {
+     let bus = LiveBus::new(1);
+     let mut subscription = bus.subscribe();
+     bus.publish(&envelope(1));
+     bus.publish(&envelope(2));
+ 
++    assert_eq!(
++        receive(&mut subscription).await,
++        LiveItem::Lagged { resume_from: None },
++        "an undelivered subscription resumes from stream inception"
++    );
++
+     let handle = tokio::spawn(async move { subscription.next().await });
+-    let error = handle
+-        .await
+-        .expect_err("lag without a delivered cursor is terminal");
++    let error = handle.await.expect_err("a lagged subscription is terminal");
+     assert!(error.is_panic());
+ }
+ 
++#[tokio::test]
++async fn dropping_the_bus_closes_live_subscriptions() {
++    let bus = LiveBus::new(2);
++    let mut subscription = bus.subscribe();
++    drop(bus);
++
++    assert_eq!(receive(&mut subscription).await, LiveItem::BusClosed);
++
++    let handle = tokio::spawn(async move { subscription.next().await });
++    let error = handle.await.expect_err("a closed subscription is terminal");
++    assert!(error.is_panic());
++}
++
++#[tokio::test]
++async fn publishing_without_subscribers_is_a_no_op() {
++    let bus = LiveBus::new(2);
++    bus.publish(&envelope(1));
++
++    let mut subscription = bus.subscribe();
++    let event = envelope(2);
++    bus.publish(&event);
++
++    assert_eq!(expect_event(receive(&mut subscription).await), event);
++}
++
+ #[tokio::test]
+ async fn resume_from_lag_reads_exactly_the_missed_journal_events() {
+     let dir = TempDir::new().expect("temp runtime root");
+     let journal = SqliteEventJournal::open(JournalConfig {
+         path: dir.path().join("events.db"),
+         busy_timeout_ms: 5_000,
+     })
+     .await
+     .expect("journal opens");
+ 
+@@ -168,22 +198,25 @@ async fn resume_from_lag_reads_exactly_the_missed_journal_events() {
+ 
+     let bus = LiveBus::new(1);
+     let mut subscription = bus.subscribe();
+     bus.publish(&events[0]);
+     assert_eq!(expect_event(receive(&mut subscription).await), events[0]);
+ 
+     for event in &events[1..] {
+         bus.publish(event);
+     }
+ 
+-    let LiveItem::Lagged { resume_from } = receive(&mut subscription).await else {
+-        panic!("expected the slow subscription to lag");
++    let LiveItem::Lagged {
++        resume_from: Some(resume_from),
++    } = receive(&mut subscription).await
++    else {
++        panic!("expected the slow subscription to lag with a delivered cursor");
+     };
+     assert_eq!(resume_from, events[0].cursor());
+ 
+     let resumed = journal
+         .read_stream(&stream, resume_from.sequence, 64)
+         .await
+         .expect("resume read succeeds");
+     assert!(!resumed.retention_gap, "the inception journal has no gaps");
+     assert_eq!(resumed.events, events[1..].to_vec());
+     assert_eq!(
