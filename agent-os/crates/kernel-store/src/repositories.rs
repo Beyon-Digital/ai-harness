@@ -16,10 +16,10 @@ use domain::resource::{ReservationState, TimerState};
 use errors::Result;
 
 use crate::models::{
-    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow,
-    AgentSpecRow, ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow,
-    ConfigGenerationRow, ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch,
-    EffectRow, IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
+    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow, AgentSpecRow,
+    ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow, ConfigGenerationRow,
+    ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch, EffectRow,
+    IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
     NewAdapterRegistration, NewAgentSpec, NewApprovalRequest, NewApprovalResponse, NewArtifact,
     NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
     NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewReservation,

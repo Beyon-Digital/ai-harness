@@ -29,13 +29,14 @@
 
 ### Task RUN-000: Runtime entities and creation commands
 
-- status: pending
-- owner: -
+- status: in_progress
+- owner: agent-run000c
 - depends_on: none
-- files: `agent-os/crates/runtime/Cargo.toml`, `agent-os/crates/run-graph/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/runtime/src/agent_spec.rs`, `agent-os/crates/runtime/src/session.rs`, `agent-os/crates/runtime/src/task.rs`, `agent-os/crates/runtime/src/create_run.rs`, `agent-os/crates/runtime/tests/entities.rs`
+- files: `agent-os/crates/runtime/Cargo.toml`, `agent-os/crates/run-graph/Cargo.toml`, `agent-os/crates/agentd/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/kernel-store/src/repositories.rs`, `agent-os/crates/kernel-store/src/txn.rs`, `agent-os/crates/kernel-store-sqlite/src/txn.rs`, `agent-os/crates/testkit/src/store.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/agent_specs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/mod.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/runtime/src/agent_spec.rs`, `agent-os/crates/runtime/src/session.rs`, `agent-os/crates/runtime/src/task.rs`, `agent-os/crates/runtime/src/create_run.rs`, `agent-os/crates/runtime/tests/entities.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6, R1.7, N1, N3, G1, G2
 - scope: large
 - model: capable
+- blocked_reason: need agent-os/crates/kernel-store/src/repositories.rs and agent-os/crates/kernel-store/src/txn.rs: no AgentSpecRepo/AgentSpecRead trait and no agent_specs() accessor on KernelTxn/KernelReadTxn, so handlers receiving &mut dyn KernelTxn cannot persist immutable agent specs; also need agent-os/crates/kernel-store-sqlite/src/txn.rs and agent-os/crates/testkit/src/store.rs to wire/extend the new trait. Models AgentSpecRow/NewAgentSpec already exist in kernel-store/src/models.rs.
 
 **Objective:** Sessions, immutable agent specs, tasks with graph heads, and `Created` runs are created atomically through the coordinator.
 

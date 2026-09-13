@@ -291,6 +291,7 @@ Paths relative to `agent-os/`.
 | Path | Create or modify | Responsibility | Owner task |
 |---|---|---|---|
 | `crates/runtime/Cargo.toml`, `crates/run-graph/Cargo.toml`, `crates/agentd/Cargo.toml`, `Cargo.lock` | modify | dependencies (incl. proptest dev) | RUN-000 |
+| `crates/kernel-store/src/repositories.rs`, `crates/kernel-store/src/txn.rs`, `crates/kernel-store-sqlite/src/txn.rs`, `crates/testkit/src/store.rs` | modify | agent-spec port trait, transaction accessors, concrete wiring, mock parity | RUN-000 |
 | `crates/kernel-store-sqlite/src/repos/agent_specs.rs` | create | insert-only spec repository | RUN-000 |
 | `crates/kernel-store-sqlite/src/repos/mod.rs` | modify | declare `agent_specs` | RUN-000 |
 | `crates/runtime/src/lib.rs` | modify | modules and `register_handlers` | RUN-000, RUN-003, RUN-004 |

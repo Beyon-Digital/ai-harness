@@ -65,9 +65,11 @@ impl CommandHandler for PutAgentSpecRevisionHandler {
         txn: &mut dyn KernelTxn,
         payload: Vec<u8>,
     ) -> errors::Result<CommandOutcome> {
-        let raw = decode_contract::<contract::PutAgentSpecRevision>("PutAgentSpecRevision", &payload)?;
+        let raw =
+            decode_contract::<contract::PutAgentSpecRevision>("PutAgentSpecRevision", &payload)?;
         let spec_id = optional_id::<AgentSpecId>("agent_spec_id", &raw.agent_spec_id)?;
-        let spec_id = spec_id.unwrap_or_else(|| AgentSpecId::from_uuid_v7(*ctx.command_id.as_uuid_v7()));
+        let spec_id =
+            spec_id.unwrap_or_else(|| AgentSpecId::from_uuid_v7(*ctx.command_id.as_uuid_v7()));
         let now_ms = self.deps.now_unix_ms();
         let already_stored = match txn.agent_specs().get(spec_id, &raw.version).await? {
             Some(stored) => stored.digest == raw.body_digest && stored.body == raw.body_bytes,

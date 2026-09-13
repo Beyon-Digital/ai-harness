@@ -19,8 +19,8 @@ use domain::security::{RetentionClass, SensitivityClass};
 use domain::time::Clock;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::{
-    AgentSpecRow, NewSession, OutboxEventRow, RunCas, RunGraphHeadRow, RunPatch, RunRow, SessionRow,
-    TaskRow,
+    AgentSpecRow, NewSession, OutboxEventRow, RunCas, RunGraphHeadRow, RunPatch, RunRow,
+    SessionRow, TaskRow,
 };
 use kernel_store::{KernelStore, KernelTxn, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
@@ -154,7 +154,10 @@ impl Harness {
         row
     }
 
-    async fn record(&self, envelope: &CommandEnvelope) -> Option<kernel_store::models::IdempotencyRecordRow> {
+    async fn record(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Option<kernel_store::models::IdempotencyRecordRow> {
         let mut txn = self.write_txn().await;
         let row = txn
             .idempotency()
@@ -167,7 +170,11 @@ impl Harness {
 
     async fn events(&self) -> Vec<OutboxEventRow> {
         let mut txn = self.write_txn().await;
-        let rows = txn.streams().scan_unpublished(1_000).await.expect("outbox read");
+        let rows = txn
+            .streams()
+            .scan_unpublished(1_000)
+            .await
+            .expect("outbox read");
         txn.rollback().await.expect("rollback");
         rows
     }
@@ -315,7 +322,10 @@ async fn create_session_binds_principal_and_stages_event() {
 
     assert_eq!(outcome.code, OutcomeCode::Ok);
     assert_eq!(outcome.payload, session_id.to_string().into_bytes());
-    let session = harness.session(session_id).await.expect("session persisted");
+    let session = harness
+        .session(session_id)
+        .await
+        .expect("session persisted");
     assert_eq!(session.principal_id, harness.principal);
     assert_eq!(session.created_at_ms, harness.clock.now_unix_ms());
     assert_eq!(session.metadata.as_deref(), None);
@@ -330,7 +340,10 @@ async fn create_session_binds_principal_and_stages_event() {
     let events = harness.events().await;
     let created = events_of_type(&events, "SessionCreated");
     assert_eq!(created.len(), 1);
-    assert_eq!(created[0].stream_key.as_str(), format!("session/{session_id}"));
+    assert_eq!(
+        created[0].stream_key.as_str(),
+        format!("session/{session_id}")
+    );
     assert_eq!(created[0].sequence, 1);
     assert_eq!(created[0].sensitivity, SensitivityClass::Internal);
     assert_eq!(created[0].retention, RetentionClass::Standard);
@@ -343,11 +356,7 @@ async fn create_session_binds_principal_and_stages_event() {
 #[tokio::test]
 async fn create_session_without_id_derives_it_from_the_command() {
     let harness = Harness::new().await;
-    let mut envelope = harness.envelope(
-        CMD_CREATE_SESSION,
-        "session-derived",
-        Vec::new(),
-    );
+    let mut envelope = harness.envelope(CMD_CREATE_SESSION, "session-derived", Vec::new());
     envelope.payload = contract::CreateSession {
         session_id: String::new(),
         metadata: Vec::new(),
@@ -396,7 +405,14 @@ async fn replayed_create_session_returns_the_stored_outcome_without_new_events()
 
     let events = harness.events().await;
     assert_eq!(events_of_type(&events, "SessionCreated").len(), 1);
-    assert_eq!(harness.session(session_id).await.expect("row").created_at_ms, SEED_MS);
+    assert_eq!(
+        harness
+            .session(session_id)
+            .await
+            .expect("row")
+            .created_at_ms,
+        SEED_MS
+    );
 }
 
 #[tokio::test]
@@ -478,7 +494,9 @@ async fn create_task_run_persists_task_head_and_created_run() {
     harness.seed_session(session_id).await;
     let spec_id = AgentSpecId::new(harness.ids.as_ref());
     let spec_body = b"spec-body";
-    harness.seed_spec(spec_id, "1", spec_body, &"c3".repeat(32)).await;
+    harness
+        .seed_spec(spec_id, "1", spec_body, &"c3".repeat(32))
+        .await;
     let spec = harness.spec(spec_id, "1").await.expect("seeded spec");
     let task_id = TaskId::new(harness.ids.as_ref());
     let run_id = RunId::new(harness.ids.as_ref());
@@ -533,7 +551,10 @@ async fn create_task_run_persists_task_head_and_created_run() {
     let events = harness.events().await;
     let created_tasks = events_of_type(&events, "TaskCreated");
     assert_eq!(created_tasks.len(), 1);
-    assert_eq!(created_tasks[0].stream_key.as_str(), format!("task/{task_id}"));
+    assert_eq!(
+        created_tasks[0].stream_key.as_str(),
+        format!("task/{task_id}")
+    );
     assert_eq!(created_tasks[0].sequence, 1);
     assert_eq!(created_tasks[0].sensitivity, SensitivityClass::Internal);
     assert_eq!(created_tasks[0].retention, RetentionClass::Standard);
@@ -601,8 +622,14 @@ async fn second_run_on_the_same_task_does_not_recreate_it() {
 
     assert_eq!(harness.task(task_id).await.expect("task"), task_before);
     assert_eq!(harness.head(task_id).await.expect("head").graph_revision, 0);
-    assert_eq!(harness.run(first_run).await.expect("run").state, RunState::Created);
-    assert_eq!(harness.run(second_run).await.expect("run").state, RunState::Created);
+    assert_eq!(
+        harness.run(first_run).await.expect("run").state,
+        RunState::Created
+    );
+    assert_eq!(
+        harness.run(second_run).await.expect("run").state,
+        RunState::Created
+    );
     let events = harness.events().await;
     assert_eq!(
         events_of_type(&events, "TaskCreated").len(),
@@ -762,7 +789,9 @@ async fn unknown_or_mismatched_agent_spec_reference_is_rejected() {
     let session_id = SessionId::new(harness.ids.as_ref());
     harness.seed_session(session_id).await;
     let spec_id = AgentSpecId::new(harness.ids.as_ref());
-    harness.seed_spec(spec_id, "1", b"body", &"d4".repeat(32)).await;
+    harness
+        .seed_spec(spec_id, "1", b"body", &"d4".repeat(32))
+        .await;
     let spec = harness.spec(spec_id, "1").await.expect("seeded spec");
 
     let unknown_spec = AgentSpecRow {

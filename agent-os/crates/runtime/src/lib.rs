@@ -175,8 +175,8 @@ mod tests {
 
     #[test]
     fn malformed_identifiers_are_invalid_arguments_without_echoing_values() {
-        let error =
-            required_id::<domain::ids::RunId>("run_id", "do-not-echo-run-id-marker-7c1f").unwrap_err();
+        let error = required_id::<domain::ids::RunId>("run_id", "do-not-echo-run-id-marker-7c1f")
+            .unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert_eq!(error.retry_class(), RetryClass::Never);
         assert!(!error.message().contains("do-not-echo"));

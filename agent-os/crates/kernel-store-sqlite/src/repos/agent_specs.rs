@@ -61,7 +61,11 @@ async fn fetch_spec(
 
 #[async_trait]
 impl AgentSpecRead for SqliteAgentSpecRepo {
-    async fn get(&mut self, id: AgentSpecId, version: &str) -> errors::Result<Option<AgentSpecRow>> {
+    async fn get(
+        &mut self,
+        id: AgentSpecId,
+        version: &str,
+    ) -> errors::Result<Option<AgentSpecRow>> {
         let mut guard = self.conn.lock().await;
         fetch_spec(guard.connection()?, id, version).await
     }

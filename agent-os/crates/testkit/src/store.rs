@@ -805,7 +805,11 @@ impl SessionRepo for MockSessionRepo {
 
 #[async_trait]
 impl AgentSpecRead for MockAgentSpecRepo {
-    async fn get(&mut self, id: AgentSpecId, version: &str) -> errors::Result<Option<AgentSpecRow>> {
+    async fn get(
+        &mut self,
+        id: AgentSpecId,
+        version: &str,
+    ) -> errors::Result<Option<AgentSpecRow>> {
         Ok(lock(&self.state)?
             .agent_specs
             .get(&(id, version.to_owned()))

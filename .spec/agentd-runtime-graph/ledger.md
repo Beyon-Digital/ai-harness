@@ -3,3 +3,14 @@
 - 2026-09-13T14:53:39Z spec initialized
 - 2026-09-13T14:55:56Z gate passed: implement
 - 2026-09-13T14:56:05Z Plan/requirements/design authored and approved under standing instruction; 6 tasks validated across 6 waves. Implementation starting.
+- 2026-09-13T14:56:13Z RUN-000 -> claimed (@agent-run000)
+- 2026-09-13T14:56:17Z RUN-000 -> in_progress (@agent-run000)
+- 2026-09-13T14:57:51Z RUN-000 -> blocked (@agent-run000) — need agent-os/crates/kernel-store/src/repositories.rs and agent-os/crates/kernel-store/src/txn.rs: no AgentSpecRepo/AgentSpecRead trait and no agent_specs() accessor on KernelTxn/KernelReadTxn, so handlers receiving &mut dyn KernelTxn cannot persist immutable agent specs; also need agent-os/crates/kernel-store-sqlite/src/txn.rs and agent-os/crates/testkit/src/store.rs to wire/extend the new trait. Models AgentSpecRow/NewAgentSpec already exist in kernel-store/src/models.rs.
+- 2026-09-13T14:58:17Z RUN-000 -> pending (@agent-run000)
+- 2026-09-13T14:58:44Z Ruling: RUN-000's lease adds the agent-spec port trait/accessors plus SQLite and mock wiring (the design's file list assumed the port already had them). Cost if wrong: two modules edit the port, but dependency-ordered.
+- 2026-09-13T14:59:22Z RUN-000 -> claimed (@agent-run000b)
+- 2026-09-13T14:59:23Z RUN-000 -> in_progress (@agent-run000b)
+- 2026-09-13T15:59:13Z RUN-000 -> pending (@agent-run000b)
+- 2026-09-13T15:59:31Z RUN-000 -> claimed (@agent-run000c)
+- 2026-09-13T15:59:31Z RUN-000 -> in_progress (@agent-run000c)
+- 2026-09-13T16:53:23Z Recovery: RUN-000's implementing session was interrupted repeatedly after writing all files; the controller verified fmt/clippy/full workspace suite (87 targets ok, 0 failures), applied rustfmt, and committed the work for independent review.
