@@ -146,8 +146,8 @@
 
 ### Task RUN-003: Readiness and atomic claims
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-run003
 - depends_on: RUN-002
 - files: `agent-os/crates/run-graph/src/readiness.rs`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/runtime/src/claim.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/tests/readiness.rs`, `agent-os/crates/runtime/tests/claim.rs`, `agent-os/crates/runtime/tests/state_machine.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, R4.6, P2, N2

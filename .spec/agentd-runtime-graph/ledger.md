@@ -32,3 +32,8 @@
 - 2026-09-13T19:07:21Z RUN-002 -> review (@agent-run002b)
 - 2026-09-13T19:44:54Z RUN-002 -> done (@agent-run002b)
 - 2026-09-13T19:44:56Z RUN-002 approved. Deferred minors: duplicate-after-target-moved returns FailedPrecondition instead of idempotent Ok; cycle property lacks a non-vacuous positive assertion; SystemIdProvider minting is inert vs RuntimeDeps.ids; O(N) duplicate scan. 3/6 done.
+- 2026-09-13T19:45:16Z RUN-003 -> claimed (@agent-run003)
+- 2026-09-13T19:45:17Z RUN-003 -> in_progress (@agent-run003)
+- 2026-09-13T20:13:24Z RUN-003 -> review (@agent-run003)
+- 2026-09-13T20:18:20Z RUN-003 -> done (@agent-run003)
+- 2026-09-13T20:18:21Z RUN-003 approved; the RUN-001 #[path] follow-up is closed. Deferred minors: SystemIdProvider tokens, i63 masking, no correlation on claim events. 4/6 done.
