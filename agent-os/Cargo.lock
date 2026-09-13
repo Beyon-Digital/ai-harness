@@ -418,6 +418,7 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "event-journal-sqlite",
  "kernel-store",
  "kernel-store-sqlite",
  "prost",
