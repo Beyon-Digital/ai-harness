@@ -47,3 +47,7 @@
 - 2026-09-13T21:22:00Z RUN-004 -> review (@agent-run004)
 - 2026-09-13T21:23:38Z RUN-004 -> done (@agent-run004)
 - 2026-09-13T21:23:38Z RUN-004 approved after one fix round (direct Created->Cancelled with pack correction; strict registry guard). 5/6 done; RUN-005 dispatched.
+- 2026-09-13T21:23:44Z RUN-005 -> claimed (@agent-run005)
+- 2026-09-13T21:23:45Z RUN-005 -> in_progress (@agent-run005)
+- 2026-09-13T22:12:23Z RUN-005 -> review (@agent-run005)
+- 2026-09-13T22:33:20Z RUN-005 -> done (@agent-run005)

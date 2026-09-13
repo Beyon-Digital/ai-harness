@@ -1,0 +1,142 @@
+diff --git a/agent-os/crates/runtime/src/recovery.rs b/agent-os/crates/runtime/src/recovery.rs
+index f1117b9..afbe5e8 100644
+--- a/agent-os/crates/runtime/src/recovery.rs
++++ b/agent-os/crates/runtime/src/recovery.rs
+@@ -1,19 +1,23 @@
+ //! Startup reconstruction: classification and persistence of recovery
+ //! dispositions.
+ //!
+ //! [`reconstruct`] enumerates every non-terminal run under the acquired daemon
+ //! epoch, loads its effects, timers, and frozen environment bindings, and
+ //! assigns exactly one [`RecoveryDisposition`] per the normative recovery
+-//! matrix (`specs/recovery-table.md`, R6.2). Precedence is first-match:
+-//! blocked-unknown-effect, then reconciliation, then missing resource, then
+-//! the ordinary run-state row (D5). A `(run state, effect state)` pair no row
+-//! assigns fails closed with `Internal` before any disposition is written
+-//! (R6.3, D8).
++//! matrix (`specs/recovery-table.md`, R6.2). The matrix is implemented for the
++//! rows the current read surface reaches: effects, timers, and adapter
++//! bindings. The `WaitingHuman` expired-approval row is deferred to the
++//! approvals module because the port has no approvals-by-run read, so a
++//! `WaitingHuman` run currently always classifies `Normal` (see [`matrix`]).
++//! Precedence is first-match: blocked-unknown-effect, then reconciliation,
++//! then missing resource, then the ordinary run-state row (D5). A
++//! `(run state, effect state)` pair no row assigns fails closed with
++//! `Internal` before any disposition is written (R6.3, D8).
+ //!
+ //! Changed dispositions are persisted with a revision-bumping patch and a
+ //! catalogued `RunRecoveryDispositionChanged` event; run state is never
+ //! touched and terminal runs are never enumerated (R6.4-R6.6, D7).
+ 
+ use std::sync::Arc;
+ 
+ use domain::effect::{EffectState, IdempotencySemantics, ReconciliationSemantics};
+@@ -284,26 +288,35 @@ fn dispatched_is_unsafe(effect: &EffectRow) -> bool {
+ 
+ /// Assigns the disposition a matrix row names, or `None` when no row covers
+ /// the pair.
+ ///
+ /// Matrix C (terminal owning run) is unreachable here: terminal runs are never
+ /// enumerated, so a terminal state reaching classification is treated as
+ /// unmapped rather than guessed. The `WaitingChild` arm is a placeholder that
+ /// [`classify`] refines with the declared-condition check.
++///
++/// The `WaitingHuman` arm implements the pending-approval row only. The
++/// expired-approval row selects `RecoveryDisposition::RequiresHumanDecision`
++/// but is deferred to the approvals module because the port has no
++/// approvals-by-run read, so an expired approval currently classifies
++/// `Normal`. `Suspended` genuinely selects `RequiresHumanDecision` (no resume
++/// path exists, design D8) and is implemented.
+ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition> {
+     use EffectClass as E;
+     use RecoveryDisposition as D;
+     use RunState as S;
+ 
+     let disposition = match (run_state, class) {
+         (S::Created | S::Ready, E::None) => D::Normal,
+         (S::Running, E::None) => D::Recovering,
+         (S::WaitingTool, E::None) => D::Normal,
+         (S::WaitingChild, E::None) => D::Normal,
++        // Pending-approval row only; the expired-approval `RequiresHumanDecision`
++        // row is deferred to the approvals module (no approvals-by-run read yet).
+         (S::WaitingHuman, E::None) => D::Normal,
+         (
+             S::Suspended,
+             E::None | E::Prepared | E::Claimed | E::Acknowledged | E::DispatchedSafe,
+         ) => D::RequiresHumanDecision,
+         (S::Running | S::WaitingTool, E::Prepared) => D::Normal,
+         (S::Running | S::WaitingTool | S::Cancelling, E::Claimed | E::Acknowledged) => {
+             D::Recovering
+diff --git a/agent-os/crates/runtime/tests/recovery.rs b/agent-os/crates/runtime/tests/recovery.rs
+index c3fc097..ac80808 100644
+--- a/agent-os/crates/runtime/tests/recovery.rs
++++ b/agent-os/crates/runtime/tests/recovery.rs
+@@ -1,12 +1,17 @@
+ //! Startup recovery acceptance tests (R6.1-R6.6, P4): enumeration of
+-//! non-terminal runs, matrix classification over the real SQLite store,
++//! non-terminal runs, matrix classification over the real SQLite store for the
++//! rows the read surface reaches (effects, timers, adapter bindings),
+ //! fail-closed unmapped combinations, disposition persistence, and the
+ //! guarantee that an ambiguous effect never leaves a run resumable.
++//!
++//! The `WaitingHuman` expired-approval row is deferred to the approvals module
++//! (no approvals-by-run read yet); the matrix table test pins the deferred
++//! pending-approval behaviour explicitly.
+ 
+ use std::sync::Arc;
+ 
+ use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
+ use domain::generated::contract;
+ use domain::ids::{
+     AdapterId, AgentSpecId, ConfigGenerationId, DaemonInstanceId, DecisionId, EnvironmentId,
+     EventCursor, EventStreamKey, PrincipalId, RunId, TaskId, TimerId,
+@@ -614,23 +619,28 @@ async fn terminal_runs_are_never_enumerated() {
+         let row = harness.run(terminal).await.expect("terminal run persists");
+         assert_eq!(row.recovery, RecoveryDisposition::Normal);
+         assert_eq!(row.run_revision, 0);
+         assert!(stream_events_for(&harness.events().await, terminal).is_empty());
+     }
+ }
+ 
+ #[tokio::test]
+-async fn classification_follows_the_recovery_matrix() {
++async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
+     struct Case {
+         run_state: RunState,
+         effect: Option<(EffectState, ReconciliationSemantics, IdempotencySemantics)>,
+         expected: RecoveryDisposition,
+     }
+ 
++    // Coverage is complete for the rows the current read surface reaches
++    // (effects, timers, adapter bindings). The `WaitingHuman`
++    // expired-approval row is deferred to the approvals module because the
++    // port has no approvals-by-run read; the case below pins the deferred
++    // pending-approval behaviour.
+     let cases = vec![
+         Case {
+             run_state: RunState::Created,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
+             run_state: RunState::Ready,
+@@ -643,16 +653,19 @@ async fn classification_follows_the_recovery_matrix() {
+             expected: RecoveryDisposition::Recovering,
+         },
+         Case {
+             run_state: RunState::WaitingTool,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
++            // Deferred: an expired approval must select `RequiresHumanDecision`
++            // once approvals-by-run exists; until then `WaitingHuman`
++            // classifies `Normal` (pending-approval row).
+             run_state: RunState::WaitingHuman,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
+             run_state: RunState::Suspended,
+             effect: None,
+             expected: RecoveryDisposition::RequiresHumanDecision,

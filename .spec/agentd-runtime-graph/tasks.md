@@ -218,8 +218,8 @@
 
 ### Task RUN-005: Startup reconstruction and recovery dispositions
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-run005
 - depends_on: RUN-004
 - files: `agent-os/crates/kernel-store/src/repositories.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/runs.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/effects.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/timers.rs`, `agent-os/crates/testkit/src/store.rs`, `agent-os/crates/runtime/src/recovery.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/agentd/src/recovery.rs`, `agent-os/crates/runtime/tests/recovery.rs`
 - requirements: R6.1, R6.2, R6.3, R6.4, R6.5, R6.6, P4, N2
