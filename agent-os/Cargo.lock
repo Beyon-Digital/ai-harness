@@ -38,6 +38,7 @@ dependencies = [
  "events",
  "kernel-store",
  "observability",
+ "runtime",
  "tokio",
 ]
 
@@ -1489,17 +1490,29 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "events",
  "kernel-store",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "command-coordinator",
  "domain",
  "errors",
+ "events",
  "kernel-store",
+ "kernel-store-sqlite",
+ "proptest",
+ "prost",
  "run-graph",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]

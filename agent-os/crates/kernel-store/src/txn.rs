@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use domain::ids::DaemonInstanceId;
 
 use crate::repositories::{
-    AdapterRepo, ArtifactRepo, ConfigRepo, EffectRepo, EnvironmentRepo, GraphRepo, IdempotencyRepo,
-    LoopRepo, ResourceRepo, RunRepo, SecurityRepo, SessionRepo, StreamRepo, TaskRepo, TimerRepo,
-    WorkspaceRepo,
+    AdapterRepo, AgentSpecRepo, ArtifactRepo, ConfigRepo, EffectRepo, EnvironmentRepo, GraphRepo,
+    IdempotencyRepo, LoopRepo, ResourceRepo, RunRepo, SecurityRepo, SessionRepo, StreamRepo,
+    TaskRepo, TimerRepo, WorkspaceRepo,
 };
 use crate::types::{DaemonFence, TxContext};
 
@@ -27,6 +27,7 @@ pub trait KernelTxn: Send + Sync {
     fn runs(&mut self) -> &mut dyn RunRepo;
     fn tasks(&mut self) -> &mut dyn TaskRepo;
     fn sessions(&mut self) -> &mut dyn SessionRepo;
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo;
     fn graph(&mut self) -> &mut dyn GraphRepo;
     fn environments(&mut self) -> &mut dyn EnvironmentRepo;
     fn effects(&mut self) -> &mut dyn EffectRepo;
@@ -50,6 +51,7 @@ pub trait KernelReadTxn: Send + Sync {
     fn runs(&mut self) -> &mut dyn crate::repositories::RunRead;
     fn tasks(&mut self) -> &mut dyn crate::repositories::TaskRead;
     fn sessions(&mut self) -> &mut dyn crate::repositories::SessionRead;
+    fn agent_specs(&mut self) -> &mut dyn crate::repositories::AgentSpecRead;
     fn graph(&mut self) -> &mut dyn crate::repositories::GraphRead;
     fn environments(&mut self) -> &mut dyn crate::repositories::EnvironmentRead;
     fn effects(&mut self) -> &mut dyn crate::repositories::EffectRead;
@@ -90,6 +92,10 @@ mod tests {
         }
 
         fn sessions(&mut self) -> &mut dyn crate::SessionRepo {
+            panic!("object-safety stub")
+        }
+
+        fn agent_specs(&mut self) -> &mut dyn crate::AgentSpecRepo {
             panic!("object-safety stub")
         }
 

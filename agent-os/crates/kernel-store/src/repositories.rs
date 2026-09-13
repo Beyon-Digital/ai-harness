@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use domain::effect::EffectState;
 use domain::ids::{
-    AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+    AdapterId, AdapterInstanceId, AgentSpecId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
     ConfigGenerationId, DecisionId, DelegationChainId, EffectId, EnvironmentId, EventId,
     EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId, RunId, SessionId, TaskId,
     TimerId, TurnId, WorkspaceId,
@@ -17,10 +17,10 @@ use errors::Result;
 
 use crate::models::{
     ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow,
-    ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow, ConfigGenerationRow,
-    ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch, EffectRow,
-    IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
-    NewAdapterRegistration, NewApprovalRequest, NewApprovalResponse, NewArtifact,
+    AgentSpecRow, ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow,
+    ConfigGenerationRow, ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch,
+    EffectRow, IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
+    NewAdapterRegistration, NewAgentSpec, NewApprovalRequest, NewApprovalResponse, NewArtifact,
     NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
     NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewReservation,
     NewResolvedBinding, NewResolvedEnvironment, NewRun, NewRunDependency, NewSession, NewTask,
@@ -69,6 +69,19 @@ pub trait SessionRead: Send + Sync {
 #[async_trait]
 pub trait SessionRepo: SessionRead {
     async fn insert(&mut self, session: NewSession) -> Result<()>;
+}
+
+#[async_trait]
+pub trait AgentSpecRead: Send + Sync {
+    async fn get(&mut self, id: AgentSpecId, version: &str) -> Result<Option<AgentSpecRow>>;
+}
+
+#[async_trait]
+pub trait AgentSpecRepo: AgentSpecRead {
+    /// Inserts an immutable revision. Re-inserting the identical
+    /// `(id, version)` with the same digest and body is idempotent; any other
+    /// collision conflicts and leaves the stored revision untouched.
+    async fn insert(&mut self, spec: NewAgentSpec) -> Result<()>;
 }
 
 #[async_trait]

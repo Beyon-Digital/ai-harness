@@ -1,12 +1,14 @@
 //! Repository implementations over a shared SQLite connection.
 //!
-//! The groups implemented by the SQLite store are [`adapters`], [`artifacts`],
-//! [`config`], [`effects`], [`environments`], [`graph`], [`idempotency`],
-//! [`loop_turns`], [`resources`], [`runs`], [`security`], [`sessions`],
-//! [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each repository
-//! view shares the connection owned by its transaction through [`SharedConn`].
+//! The groups implemented by the SQLite store are [`adapters`], [`agent_specs`],
+//! [`artifacts`], [`config`], [`effects`], [`environments`], [`graph`],
+//! [`idempotency`], [`loop_turns`], [`resources`], [`runs`], [`security`],
+//! [`sessions`], [`streams`], [`tasks`], [`timers`], and [`workspaces`]; each
+//! repository view shares the connection owned by its transaction through
+//! [`SharedConn`].
 
 pub(crate) mod adapters;
+pub(crate) mod agent_specs;
 pub(crate) mod artifacts;
 pub(crate) mod config;
 pub(crate) mod effects;

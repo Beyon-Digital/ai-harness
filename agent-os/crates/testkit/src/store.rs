@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use domain::ids::{
-    AdapterId, AdapterInstanceId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+    AdapterId, AdapterInstanceId, AgentSpecId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
     ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
     EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
@@ -46,6 +46,7 @@ struct MockState {
     daemon_epoch: u64,
     daemon_fence: Option<DaemonFence>,
     sessions: HashMap<SessionId, SessionRow>,
+    agent_specs: HashMap<(AgentSpecId, String), AgentSpecRow>,
     tasks: HashMap<TaskId, TaskRow>,
     environments: HashMap<EnvironmentId, ResolvedEnvironmentRow>,
     bindings: HashMap<(EnvironmentId, String), ResolvedBindingRow>,
@@ -96,6 +97,10 @@ struct MockState {
 ///   `untested|passed|failed`), conformance reports (`pass|fail`), and
 ///   approval responses (`approve|deny`), on insert and on state patches,
 ///   failing `FailedPrecondition`/`Never`;
+/// - agent spec inserts are insert-only: an identical `(id, version, digest,
+///   body)` is idempotent, a differing body or digest conflicts, and one
+///   digest cannot bind to two revisions, mirroring the schema key and unique
+///   constraints;
 /// - foreign-key existence is checked for artifacts (origin run and effect),
 ///   timers (run), leases (workspace and owner run), turns (run), decisions
 ///   (run and turn), grants (run and delegating grant), delegation hops
@@ -290,6 +295,7 @@ repo_handle!(
     MockRunRepo,
     MockTaskRepo,
     MockSessionRepo,
+    MockAgentSpecRepo,
     MockGraphRepo,
     MockEnvironmentRepo,
     MockEffectRepo,
@@ -313,6 +319,7 @@ struct MockWriteTxn {
     runs: MockRunRepo,
     tasks: MockTaskRepo,
     sessions: MockSessionRepo,
+    agent_specs: MockAgentSpecRepo,
     graph: MockGraphRepo,
     environments: MockEnvironmentRepo,
     effects: MockEffectRepo,
@@ -343,6 +350,7 @@ impl MockWriteTxn {
             runs: MockRunRepo::new(state.clone()),
             tasks: MockTaskRepo::new(state.clone()),
             sessions: MockSessionRepo::new(state.clone()),
+            agent_specs: MockAgentSpecRepo::new(state.clone()),
             graph: MockGraphRepo::new(state.clone()),
             environments: MockEnvironmentRepo::new(state.clone()),
             effects: MockEffectRepo::new(state.clone()),
@@ -364,6 +372,7 @@ struct MockReadTxn {
     runs: MockRunRepo,
     tasks: MockTaskRepo,
     sessions: MockSessionRepo,
+    agent_specs: MockAgentSpecRepo,
     graph: MockGraphRepo,
     environments: MockEnvironmentRepo,
     effects: MockEffectRepo,
@@ -383,6 +392,7 @@ impl MockReadTxn {
             runs: MockRunRepo::new(state.clone()),
             tasks: MockTaskRepo::new(state.clone()),
             sessions: MockSessionRepo::new(state.clone()),
+            agent_specs: MockAgentSpecRepo::new(state.clone()),
             graph: MockGraphRepo::new(state.clone()),
             environments: MockEnvironmentRepo::new(state.clone()),
             effects: MockEffectRepo::new(state.clone()),
@@ -458,6 +468,10 @@ impl KernelTxn for MockWriteTxn {
 
     fn sessions(&mut self) -> &mut dyn SessionRepo {
         &mut self.sessions
+    }
+
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo {
+        &mut self.agent_specs
     }
 
     fn graph(&mut self) -> &mut dyn GraphRepo {
@@ -550,6 +564,10 @@ impl KernelReadTxn for MockReadTxn {
 
     fn sessions(&mut self) -> &mut dyn SessionRead {
         &mut self.sessions
+    }
+
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRead {
+        &mut self.agent_specs
     }
 
     fn graph(&mut self) -> &mut dyn GraphRead {
@@ -782,6 +800,54 @@ impl SessionRepo for MockSessionRepo {
             row,
             "duplicate session id",
         )
+    }
+}
+
+#[async_trait]
+impl AgentSpecRead for MockAgentSpecRepo {
+    async fn get(&mut self, id: AgentSpecId, version: &str) -> errors::Result<Option<AgentSpecRow>> {
+        Ok(lock(&self.state)?
+            .agent_specs
+            .get(&(id, version.to_owned()))
+            .cloned())
+    }
+}
+
+#[async_trait]
+impl AgentSpecRepo for MockAgentSpecRepo {
+    async fn insert(&mut self, spec: NewAgentSpec) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        if let Some(stored) = state
+            .agent_specs
+            .get(&(spec.agent_spec_id, spec.version.clone()))
+        {
+            if stored.digest == spec.digest && stored.body == spec.body {
+                return Ok(());
+            }
+            return Err(conflict(
+                "agent spec revision conflicts with the stored revision",
+            ));
+        }
+        if state
+            .agent_specs
+            .values()
+            .any(|row| row.digest == spec.digest)
+        {
+            return Err(conflict(
+                "agent spec digest is already bound to another revision",
+            ));
+        }
+        let row = AgentSpecRow {
+            agent_spec_id: spec.agent_spec_id,
+            version: spec.version,
+            digest: spec.digest,
+            body: spec.body,
+            created_at_ms: spec.created_at_ms,
+        };
+        state
+            .agent_specs
+            .insert((row.agent_spec_id, row.version.clone()), row);
+        Ok(())
     }
 }
 

@@ -9,3 +9,8 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
+events.workspace = true
+
+[dev-dependencies]
+testkit.workspace = true
+tokio.workspace = true

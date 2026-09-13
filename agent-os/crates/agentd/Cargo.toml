@@ -11,3 +11,4 @@ tokio.workspace = true
 errors.workspace = true
 events.workspace = true
 kernel-store.workspace = true
+runtime.workspace = true

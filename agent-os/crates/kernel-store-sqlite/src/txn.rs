@@ -24,9 +24,10 @@ use sqlx::Sqlite;
 use crate::SqliteKernelStore;
 use crate::mapping;
 use crate::repos::{
-    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, artifacts::SqliteArtifactRepo,
-    config::SqliteConfigRepo, effects::SqliteEffectRepo, environments::SqliteEnvironmentRepo,
-    graph::SqliteGraphRepo, idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo,
+    ReadConn, SharedConn, WriteConn, adapters::SqliteAdapterRepo, agent_specs::SqliteAgentSpecRepo,
+    artifacts::SqliteArtifactRepo, config::SqliteConfigRepo, effects::SqliteEffectRepo,
+    environments::SqliteEnvironmentRepo, graph::SqliteGraphRepo,
+    idempotency::SqliteIdempotencyRepo, loop_turns::SqliteLoopRepo,
     resources::SqliteResourceRepo, runs::SqliteRunRepo, security::SqliteSecurityRepo,
     sessions::SqliteSessionRepo, streams::SqliteStreamRepo, tasks::SqliteTaskRepo,
     timers::SqliteTimerRepo, workspaces::SqliteWorkspaceRepo,
@@ -39,6 +40,7 @@ pub(crate) struct SqliteWriteTxn {
     runs: SqliteRunRepo,
     tasks: SqliteTaskRepo,
     sessions: SqliteSessionRepo,
+    agent_specs: SqliteAgentSpecRepo,
     graph: SqliteGraphRepo,
     environments: SqliteEnvironmentRepo,
     effects: SqliteEffectRepo,
@@ -64,6 +66,7 @@ impl SqliteWriteTxn {
             runs: SqliteRunRepo::new(shared.clone()),
             tasks: SqliteTaskRepo::new(shared.clone()),
             sessions: SqliteSessionRepo::new(shared.clone()),
+            agent_specs: SqliteAgentSpecRepo::new(shared.clone()),
             graph: SqliteGraphRepo::new(shared.clone()),
             environments: SqliteEnvironmentRepo::new(shared.clone()),
             effects: SqliteEffectRepo::new(shared.clone()),
@@ -108,6 +111,10 @@ impl KernelTxn for SqliteWriteTxn {
 
     fn sessions(&mut self) -> &mut dyn SessionRepo {
         &mut self.sessions
+    }
+
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRepo {
+        &mut self.agent_specs
     }
 
     fn graph(&mut self) -> &mut dyn GraphRepo {
@@ -178,6 +185,7 @@ pub(crate) struct SqliteReadTxn {
     runs: SqliteRunRepo,
     tasks: SqliteTaskRepo,
     sessions: SqliteSessionRepo,
+    agent_specs: SqliteAgentSpecRepo,
     graph: SqliteGraphRepo,
     environments: SqliteEnvironmentRepo,
     effects: SqliteEffectRepo,
@@ -198,6 +206,7 @@ impl SqliteReadTxn {
             runs: SqliteRunRepo::new(shared.clone()),
             tasks: SqliteTaskRepo::new(shared.clone()),
             sessions: SqliteSessionRepo::new(shared.clone()),
+            agent_specs: SqliteAgentSpecRepo::new(shared.clone()),
             graph: SqliteGraphRepo::new(shared.clone()),
             environments: SqliteEnvironmentRepo::new(shared.clone()),
             effects: SqliteEffectRepo::new(shared.clone()),
@@ -225,6 +234,10 @@ impl KernelReadTxn for SqliteReadTxn {
 
     fn sessions(&mut self) -> &mut dyn SessionRead {
         &mut self.sessions
+    }
+
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRead {
+        &mut self.agent_specs
     }
 
     fn graph(&mut self) -> &mut dyn GraphRead {
