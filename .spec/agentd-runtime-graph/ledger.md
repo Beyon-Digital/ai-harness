@@ -17,3 +17,8 @@
 - 2026-09-13T16:53:24Z RUN-000 -> review (@controller)
 - 2026-09-13T17:08:28Z RUN-000 -> done (@controller)
 - 2026-09-13T17:08:29Z RUN-000 approved (recovered work, controller-verified). Deferred minors: session metadata staged in the event but not persisted on the row; stage_catalogued bypasses the builder hint for sequence allocation. 1/6 done.
+- 2026-09-13T17:08:47Z RUN-001 -> claimed (@agent-run001)
+- 2026-09-13T17:08:48Z RUN-001 -> in_progress (@agent-run001)
+- 2026-09-13T18:00:03Z RUN-001 -> review (@agent-run001)
+- 2026-09-13T18:07:51Z RUN-001 -> done (@agent-run001)
+- 2026-09-13T18:07:51Z RUN-001 approved; its two minors are carried into RUN-003 (declare modules, drop #[path]) and deferred (RunPatch has no updated_at_ms). 2/6 done.

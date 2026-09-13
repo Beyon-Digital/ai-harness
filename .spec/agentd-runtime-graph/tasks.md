@@ -72,8 +72,8 @@
 
 ### Task RUN-001: Run state machine and revision rules
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-run001
 - depends_on: RUN-000
 - files: `agent-os/crates/runtime/src/state.rs`, `agent-os/crates/runtime/src/run.rs`, `agent-os/crates/runtime/tests/state_machine.rs`
 - requirements: R2.1, R2.2, R2.3, R2.4, R2.5
@@ -148,7 +148,7 @@
 - status: pending
 - owner: -
 - depends_on: RUN-002
-- files: `agent-os/crates/run-graph/src/readiness.rs`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/runtime/src/claim.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/tests/readiness.rs`, `agent-os/crates/runtime/tests/claim.rs`
+- files: `agent-os/crates/run-graph/src/readiness.rs`, `agent-os/crates/run-graph/src/lib.rs`, `agent-os/crates/runtime/src/claim.rs`, `agent-os/crates/runtime/src/lib.rs`, `agent-os/crates/run-graph/tests/readiness.rs`, `agent-os/crates/runtime/tests/claim.rs`, `agent-os/crates/runtime/tests/state_machine.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, R4.6, P2, N2
 - scope: large
 - model: capable
@@ -159,7 +159,7 @@
 
 - `condition_met` implements `completed_successfully` (COMPLETED), `any_terminal` (any terminal state), `completed_or_cancelled` (COMPLETED or CANCELLED). `dependencies_satisfied` loads the target's dependencies (`GraphRepo::list_dependencies`) and each source run.
 - `claim` requires state `Ready`, recovery `Normal`, no live unexpired claim, and satisfied dependencies; it CAS-updates `Ready -> Running` with owner, token (fresh UUIDv7 via the id provider), expiry, and daemon epoch, bumping the revision and staging `RunClaimed` plus `RunStarted`. Expired claims are reclaimable only when recovery is `Normal`.
-- `ClaimReadyRunHandler` decodes its payload and calls `claim`; register it in `register_handlers` alongside the RUN-000 handlers.
+- `ClaimReadyRunHandler` decodes its payload and calls `claim`; register it in `register_handlers` alongside the RUN-000 handlers. Also declare `pub mod state; pub mod run;` in `runtime/src/lib.rs` and switch `tests/state_machine.rs` from its `#[path]` includes to `use runtime::{run, state};`, deleting both include lines (RUN-001 review follow-up).
 - Tests: all condition combinations; claim blocked by unmet dependencies, non-Normal recovery, and a live claim; expired-claim reclaim; 100 barrier-synchronized claimants with exactly one `Ok` and one persisted claim. Seed `Ready` runs through repository scaffolding inside a test transaction (documented as test-only).
 
 **Steps:**
