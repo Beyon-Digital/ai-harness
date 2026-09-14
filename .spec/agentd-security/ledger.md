@@ -18,3 +18,8 @@
 - 2026-09-14T08:04:12Z SEC-002 -> review (@agent-sec002)
 - 2026-09-14T08:40:24Z SEC-002 -> done (@agent-sec002)
 - 2026-09-14T08:40:25Z SEC-002 approved after one fix round (grant-scope enforcement + digest binding + tightened joint rule). 3/5 done; SEC-003 dispatched.
+- 2026-09-14T08:43:20Z SEC-003 -> claimed (@agent-sec003)
+- 2026-09-14T08:43:21Z SEC-003 -> in_progress (@agent-sec003)
+- 2026-09-14T09:33:51Z SEC-003 -> review (@agent-sec003)
+- 2026-09-14T09:56:31Z SEC-003 -> done (@agent-sec003)
+- 2026-09-14T09:56:33Z SEC-003 approved. Deferred minor: catalogued ApprovalResolved (produced_by RespondApproval) is not staged; terminal-wins-over-expiry; Responder.device_id optional type vs NOT NULL. 4/5 done; SEC-004 dispatched.

@@ -140,8 +140,8 @@
 
 ### Task SEC-003: Immutable approval flow
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-sec003
 - depends_on: SEC-002
 - files: `agent-os/crates/approvals/src/lib.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/security.rs`, `agent-os/crates/approvals/tests/approvals.rs`
 - requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, P3, N1
