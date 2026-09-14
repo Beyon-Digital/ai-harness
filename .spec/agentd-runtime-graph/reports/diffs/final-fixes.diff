@@ -1,0 +1,1653 @@
+diff --git a/agent-os/crates/domain/src/run.rs b/agent-os/crates/domain/src/run.rs
+index 68ad8ef..993a571 100644
+--- a/agent-os/crates/domain/src/run.rs
++++ b/agent-os/crates/domain/src/run.rs
+@@ -141,16 +141,48 @@ mirror_enum! {
+         Suspended = 7,
+         Cancelling = 8,
+         Completed = 9,
+         Failed = 10,
+         Cancelled = 11,
+     }
+ }
+ 
++impl RunState {
++    /// Returns true for the absorbing terminal states `Completed`, `Failed`,
++    /// and `Cancelled`.
++    pub const fn is_terminal(self) -> bool {
++        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
++    }
++
++    /// Returns the state a cancellation request moves this run to, or `None`
++    /// when cancellation no longer applies.
++    ///
++    /// Never-started runs (`Created`, `Ready`) end `Cancelled` directly: there
++    /// is no cleanup to drain and no resolved environment to fabricate. Every
++    /// other started non-terminal state drains through `Cancelling`, and
++    /// `Cancelling`, terminal, and `Unspecified` runs are not cancellation
++    /// targets.
++    pub const fn cancellation_target(self) -> Option<Self> {
++        match self {
++            Self::Created | Self::Ready => Some(Self::Cancelled),
++            Self::Running
++            | Self::WaitingTool
++            | Self::WaitingChild
++            | Self::WaitingHuman
++            | Self::Suspended => Some(Self::Cancelling),
++            Self::Unspecified
++            | Self::Cancelling
++            | Self::Completed
++            | Self::Failed
++            | Self::Cancelled => None,
++        }
++    }
++}
++
+ mirror_enum! {
+     /// Recovery disposition of an agent run, mirroring `contract::RecoveryDisposition`.
+     RecoveryDisposition, "RecoveryDisposition", {
+         Unspecified = 0,
+         Normal = 1,
+         NeedsReconciliation = 2,
+         Recovering = 3,
+         BlockedUnknownEffect = 4,
+@@ -185,9 +217,42 @@ mod tests {
+         assert_eq!(
+             RecoveryDisposition::from_wire(-1),
+             Err(UnknownEnumValue {
+                 value: -1,
+                 enum_name: "RecoveryDisposition"
+             })
+         );
+     }
++
++    #[test]
++    fn terminality_and_cancellation_targets_are_centralized() {
++        for state in [RunState::Completed, RunState::Failed, RunState::Cancelled] {
++            assert!(state.is_terminal(), "{state:?}");
++            assert_eq!(state.cancellation_target(), None, "{state:?}");
++        }
++        for state in [RunState::Created, RunState::Ready] {
++            assert!(!state.is_terminal(), "{state:?}");
++            assert_eq!(
++                state.cancellation_target(),
++                Some(RunState::Cancelled),
++                "{state:?}"
++            );
++        }
++        for state in [
++            RunState::Running,
++            RunState::WaitingTool,
++            RunState::WaitingChild,
++            RunState::WaitingHuman,
++            RunState::Suspended,
++        ] {
++            assert!(!state.is_terminal(), "{state:?}");
++            assert_eq!(
++                state.cancellation_target(),
++                Some(RunState::Cancelling),
++                "{state:?}"
++            );
++        }
++        assert!(!RunState::Cancelling.is_terminal());
++        assert_eq!(RunState::Cancelling.cancellation_target(), None);
++        assert_eq!(RunState::Unspecified.cancellation_target(), None);
++    }
+ }
+diff --git a/agent-os/crates/kernel-store-sqlite/src/repos/security.rs b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+index dffa428..28a566b 100644
+--- a/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
++++ b/agent-os/crates/kernel-store-sqlite/src/repos/security.rs
+@@ -1,16 +1,16 @@
+ //! Security repository: capability grants, delegation hops, and approvals.
+ //!
+ //! Approval requests and their responses are append-only here; capability
+ //! grants and delegation hops are insert-then-read records. No update or
+ //! delete operation is exposed.
+ 
+ use async_trait::async_trait;
+-use domain::ids::{ApprovalRequestId, CapabilityGrantId, DelegationChainId};
++use domain::ids::{ApprovalRequestId, CapabilityGrantId, DelegationChainId, RunId};
+ use domain::run::UnknownStateValue;
+ use domain::security::ApprovalState;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::{
+     ApprovalRequestRow, ApprovalResponseRow, CapabilityGrantRow, DelegationHopRow,
+     NewApprovalRequest, NewApprovalResponse, NewCapabilityGrant, NewDelegationHop,
+ };
+@@ -201,16 +201,34 @@ impl SecurityRead for SqliteSecurityRepo {
+         )
+         .bind(id.to_string())
+         .fetch_optional(guard.connection()?)
+         .await
+         .map_err(mapping::from_sqlx)?;
+         row.as_ref().map(decode_approval_request).transpose()
+     }
+ 
++    async fn list_approvals_by_run(
++        &mut self,
++        run_id: RunId,
++    ) -> errors::Result<Vec<ApprovalRequestRow>> {
++        let mut guard = self.conn.lock().await;
++        let rows = sqlx::query(
++            "SELECT request_id, request_digest, principal_id, actor_id, run_id, operation, \
++             target_resource, capability_ids, extension_bundle_digest, config_generation_digest, \
++             expires_at_ms, nonce, state, created_at_ms, resolved_at_ms \
++             FROM approval_requests WHERE run_id = ?1 ORDER BY created_at_ms, request_id",
++        )
++        .bind(run_id.to_string())
++        .fetch_all(guard.connection()?)
++        .await
++        .map_err(mapping::from_sqlx)?;
++        rows.iter().map(decode_approval_request).collect()
++    }
++
+     async fn list_approval_responses(
+         &mut self,
+         request: ApprovalRequestId,
+     ) -> errors::Result<Vec<ApprovalResponseRow>> {
+         let mut guard = self.conn.lock().await;
+         let rows = sqlx::query(
+             "SELECT request_id, request_digest, decision, device_id, responder_principal_id, \
+              responded_at_ms FROM approval_responses WHERE request_id = ?1 \
+diff --git a/agent-os/crates/kernel-store/src/repositories.rs b/agent-os/crates/kernel-store/src/repositories.rs
+index 6497b42..b403118 100644
+--- a/agent-os/crates/kernel-store/src/repositories.rs
++++ b/agent-os/crates/kernel-store/src/repositories.rs
+@@ -193,16 +193,18 @@ pub trait SecurityRead: Send + Sync {
+     async fn list_delegation_hops(
+         &mut self,
+         chain: DelegationChainId,
+     ) -> Result<Vec<DelegationHopRow>>;
+     async fn get_approval_request(
+         &mut self,
+         id: ApprovalRequestId,
+     ) -> Result<Option<ApprovalRequestRow>>;
++    /// Approval requests owned by `run_id`, ordered oldest first.
++    async fn list_approvals_by_run(&mut self, run_id: RunId) -> Result<Vec<ApprovalRequestRow>>;
+     async fn list_approval_responses(
+         &mut self,
+         request: ApprovalRequestId,
+     ) -> Result<Vec<ApprovalResponseRow>>;
+ }
+ 
+ #[async_trait]
+ pub trait SecurityRepo: SecurityRead {
+diff --git a/agent-os/crates/run-graph/src/cancellation.rs b/agent-os/crates/run-graph/src/cancellation.rs
+index 11e2a69..51e5b86 100644
+--- a/agent-os/crates/run-graph/src/cancellation.rs
++++ b/agent-os/crates/run-graph/src/cancellation.rs
+@@ -11,98 +11,89 @@
+ //! that observed the pre-advance value can never commit after this one (R5.3,
+ //! P3). The service itself changes no run state; the runtime state table stays
+ //! the only transition authority, and the runtime service applies it through
+ //! `run::transition` for each returned run id (R5.2, R5.4, R5.5).
+ 
+ use domain::generated::contract;
+ use domain::ids::{EventId, EventStreamKey, RunId};
+ use domain::provider::SystemIdProvider;
+-use domain::run::RunState;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use events::outbox::{DraftEvent, stage};
+ use events::{CatalogClassificationPolicy, ClassificationPolicy, StreamKey};
+ use kernel_store::KernelTxn;
+ use kernel_store::models::{RunCas, RunPatch, RunRow};
+ use prost::Message;
+ 
+ use crate::repository::{descendants, load_run};
+ 
+ /// Catalogued event type staged when the root's cancellation epoch advances.
+ const CANCELLATION_EPOCH_ADVANCED: &str = "CancellationEpochAdvanced";
+ 
+ /// Advances the root's cancellation epoch and reports the eligible subtree.
+ ///
+-/// The epoch CAS fences on the root's revision, state, and observed epoch, so a
+-/// racing cancellation loses with `Conflict` and leaves the row untouched; on
+-/// success the revision increments exactly once and
+-/// `CancellationEpochAdvanced` is staged on the root's stream in the same
+-/// transaction (R5.1, R5.3, R5.4). The returned ids start with the root when it
+-/// is eligible and continue with the breadth-first descendant closure over
+-/// `runs.parent_run_id`; every returned run is non-terminal and not already
+-/// `Cancelling`, so the caller transitions each exactly once (R5.2, R5.5).
++/// The epoch CAS fences on the caller's `expected_run_revision` when one is
++/// given (the request's revision arm), plus the freshly loaded root state and
++/// observed epoch, so a racing cancellation loses with `Conflict` and leaves
++/// the row untouched; passing `None` fences on the freshly loaded revision,
++/// which keeps duplicate cancellations working. On success the revision
++/// increments exactly once and `CancellationEpochAdvanced` is staged on the
++/// root's stream in the same transaction (R5.1, R5.3, R5.4). The returned ids
++/// start with the root when it is eligible and continue with the breadth-first
++/// descendant closure over `runs.parent_run_id`; every returned run's
++/// `cancellation_target` is `Some`, so the caller transitions each exactly
++/// once (R5.2, R5.5).
+ pub async fn cancel_subtree(
+     txn: &mut dyn KernelTxn,
+     root: RunId,
++    expected_run_revision: Option<u64>,
+     _reason: &str,
+     _now_ms: i64,
+ ) -> errors::Result<Vec<RunId>> {
+     let root_row = load_run(txn, root).await?;
+-    let advanced = advance_epoch(txn, &root_row).await?;
++    let expected_revision = expected_run_revision.unwrap_or(root_row.run_revision);
++    let advanced = advance_epoch(txn, &root_row, expected_revision).await?;
+     stage_epoch_event(txn, &advanced).await?;
+ 
+     let mut eligible = Vec::new();
+-    if is_eligible(advanced.state) {
++    if advanced.state.cancellation_target().is_some() {
+         eligible.push(root);
+     }
+     for descendant in descendants(txn, root).await? {
+         let row = txn.runs().get(descendant).await?.ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::Internal,
+                 RetryClass::Never,
+                 "descendant vanished during the cancellation walk",
+             )
+         })?;
+-        if is_eligible(row.state) {
++        if row.state.cancellation_target().is_some() {
+             eligible.push(descendant);
+         }
+     }
+     Ok(eligible)
+ }
+ 
+-/// Returns true when cancellation still has to move the run: every non-terminal
+-/// state except `Cancelling`, which is already draining (R5.2, R5.5).
+-///
+-/// The eligible set deliberately mirrors the cancellation edges of
+-/// `runtime/src/state.rs`, which stays the transition authority and is applied
+-/// by `runtime::cancel`; the mirror lives here only to respect the crate
+-/// direction (`runtime` depends on `run-graph`, never the reverse), and it must
+-/// move with the table's cancellation edges.
+-const fn is_eligible(state: RunState) -> bool {
+-    matches!(
+-        state,
+-        RunState::Created
+-            | RunState::Ready
+-            | RunState::Running
+-            | RunState::WaitingTool
+-            | RunState::WaitingChild
+-            | RunState::WaitingHuman
+-            | RunState::Suspended
+-    )
+-}
+-
+ /// Compare-and-set increments `cancellation_epoch` and bumps the revision once.
+-async fn advance_epoch(txn: &mut dyn KernelTxn, root: &RunRow) -> errors::Result<RunRow> {
++///
++/// The CAS requires the caller's expected revision (or the freshly loaded one
++/// when the request carried none) alongside the loaded state and epoch, so a
++/// stale expectation conflicts with no epoch advance and no staged event.
++async fn advance_epoch(
++    txn: &mut dyn KernelTxn,
++    root: &RunRow,
++    expected_revision: u64,
++) -> errors::Result<RunRow> {
+     let updated = txn
+         .runs()
+         .cas_update(
+             root.run_id,
+             RunCas {
+-                run_revision: root.run_revision,
++                run_revision: expected_revision,
+                 state: Some(root.state),
+                 cancellation_epoch: Some(root.cancellation_epoch),
+             },
+             RunPatch {
+                 cancellation_epoch: Some(root.cancellation_epoch.saturating_add(1)),
+                 bump_revision: true,
+                 ..RunPatch::default()
+             },
+diff --git a/agent-os/crates/run-graph/src/readiness.rs b/agent-os/crates/run-graph/src/readiness.rs
+index 55d6822..d7a406a 100644
+--- a/agent-os/crates/run-graph/src/readiness.rs
++++ b/agent-os/crates/run-graph/src/readiness.rs
+@@ -16,17 +16,17 @@ use crate::repository::load_run;
+ ///
+ /// `Unspecified` is never satisfied; the graph service rejects such edges
+ /// before they are persisted, so the arm is defensive.
+ pub const fn condition_met(condition: DependencyCondition, source_state: RunState) -> bool {
+     match condition {
+         DependencyCondition::CompletedSuccessfully => {
+             matches!(source_state, RunState::Completed)
+         }
+-        DependencyCondition::AnyTerminal => is_terminal(source_state),
++        DependencyCondition::AnyTerminal => source_state.is_terminal(),
+         DependencyCondition::CompletedOrCancelled => {
+             matches!(source_state, RunState::Completed | RunState::Cancelled)
+         }
+         DependencyCondition::Unspecified => false,
+     }
+ }
+ 
+ /// Returns true when every dependency targeting `target` is satisfied by its
+@@ -47,15 +47,8 @@ pub async fn dependencies_satisfied(
+     {
+         let source = load_run(txn, dependency.source_run_id).await?;
+         if !condition_met(dependency.dependency_condition, source.state) {
+             return Ok(false);
+         }
+     }
+     Ok(true)
+ }
+-
+-const fn is_terminal(state: RunState) -> bool {
+-    matches!(
+-        state,
+-        RunState::Completed | RunState::Failed | RunState::Cancelled
+-    )
+-}
+diff --git a/agent-os/crates/run-graph/tests/cancellation.rs b/agent-os/crates/run-graph/tests/cancellation.rs
+index 93a4069..405d0f3 100644
+--- a/agent-os/crates/run-graph/tests/cancellation.rs
++++ b/agent-os/crates/run-graph/tests/cancellation.rs
+@@ -157,24 +157,60 @@ impl Harness {
+             .expect("outbox read");
+         txn.rollback().await.expect("rollback");
+         rows
+     }
+ 
+     /// Runs `cancel_subtree` in its own transaction and commits regardless of
+     /// outcome, so a mutation smuggled alongside an error would be observed by
+     /// the next read (same policy as the state-machine suite).
+-    async fn try_cancel(&self, root: RunId, reason: &str) -> errors::Result<Vec<RunId>> {
++    async fn try_cancel(
++        &self,
++        root: RunId,
++        expected_run_revision: Option<u64>,
++        reason: &str,
++    ) -> errors::Result<Vec<RunId>> {
+         let mut txn = self.write().await;
+-        let result = cancel_subtree(txn.as_mut(), root, reason, SEED_MS).await;
++        let result =
++            cancel_subtree(txn.as_mut(), root, expected_run_revision, reason, SEED_MS).await;
+         txn.commit()
+             .await
+             .expect("cancel transaction commits regardless of outcome");
+         result
+     }
++
++    /// Bumps a run's revision through a no-op patch so a nonzero revision
++    /// expectation can be exercised.
++    async fn bump_revision(&self, run_id: RunId) {
++        let mut txn = self.write().await;
++        let current = txn
++            .runs()
++            .get(run_id)
++            .await
++            .expect("run read")
++            .expect("seeded run exists");
++        let updated = txn
++            .runs()
++            .cas_update(
++                run_id,
++                RunCas {
++                    run_revision: current.run_revision,
++                    state: None,
++                    cancellation_epoch: None,
++                },
++                RunPatch {
++                    bump_revision: true,
++                    ..RunPatch::default()
++                },
++            )
++            .await
++            .expect("revision patch applies");
++        assert!(updated, "revision patch lands");
++        txn.commit().await.expect("revision patch commits");
++    }
+ }
+ 
+ fn event_streams(events: &[OutboxEventRow], event_type: &str) -> Vec<String> {
+     events
+         .iter()
+         .filter(|event| event.event_type == event_type)
+         .map(|event| event.stream_key.as_str().to_owned())
+         .collect()
+@@ -183,17 +219,17 @@ fn event_streams(events: &[OutboxEventRow], event_type: &str) -> Vec<String> {
+ #[tokio::test]
+ async fn cancel_subtree_advances_the_root_epoch_and_stages_the_epoch_event() {
+     let harness = Harness::new().await;
+     let task = TaskId::new(harness.ids.as_ref());
+     harness.seed_task(task).await;
+     let root = harness.seed_run(task, None, RunState::Running).await;
+ 
+     let eligible = harness
+-        .try_cancel(root, "operator cancelled")
++        .try_cancel(root, None, "operator cancelled")
+         .await
+         .expect("cancel commits");
+     assert_eq!(eligible, vec![root], "a running root is eligible");
+ 
+     let persisted = harness.run(root).await.expect("root persists");
+     assert_eq!(persisted.cancellation_epoch, 1);
+     assert_eq!(
+         persisted.run_revision, 1,
+@@ -235,17 +271,17 @@ async fn cancel_subtree_walks_nested_descendants_in_breadth_first_order() {
+         .seed_run(task, Some(child_a), RunState::Running)
+         .await;
+     let grandchild_b = harness
+         .seed_run(task, Some(child_a), RunState::WaitingTool)
+         .await;
+     let unrelated = harness.seed_run(task, None, RunState::Running).await;
+ 
+     let eligible = harness
+-        .try_cancel(root, "operator cancelled")
++        .try_cancel(root, None, "operator cancelled")
+         .await
+         .expect("cancel commits");
+     assert_eq!(
+         eligible,
+         vec![root, child_a, child_b, grandchild_a, grandchild_b],
+         "the root comes first, then descendants breadth-first"
+     );
+     assert!(
+@@ -281,17 +317,17 @@ async fn cancel_subtree_lists_only_eligible_runs() {
+         if eligible {
+             expected.push(child);
+         } else {
+             skipped.push(child);
+         }
+     }
+ 
+     let eligible = harness
+-        .try_cancel(root, "operator cancelled")
++        .try_cancel(root, None, "operator cancelled")
+         .await
+         .expect("cancel commits");
+     assert_eq!(eligible, expected, "only non-terminal, non-cancelling runs");
+ 
+     for run_id in &skipped {
+         let persisted = harness.run(*run_id).await.expect("skipped run persists");
+         assert_eq!(persisted.run_revision, 0, "skipped runs are untouched");
+         assert_eq!(
+@@ -319,24 +355,24 @@ async fn cancel_subtree_lists_only_eligible_runs() {
+ #[tokio::test]
+ async fn duplicate_cancel_advances_the_epoch_again_and_lists_nothing() {
+     let harness = Harness::new().await;
+     let task = TaskId::new(harness.ids.as_ref());
+     harness.seed_task(task).await;
+     let root = harness.seed_run(task, None, RunState::Running).await;
+ 
+     let first = harness
+-        .try_cancel(root, "operator cancelled")
++        .try_cancel(root, None, "operator cancelled")
+         .await
+         .expect("first cancel commits");
+     assert_eq!(first, vec![root]);
+     harness.set_state(root, RunState::Cancelling).await;
+ 
+     let second = harness
+-        .try_cancel(root, "operator cancelled")
++        .try_cancel(root, None, "operator cancelled")
+         .await
+         .expect("a duplicate cancel commits");
+     assert!(second.is_empty(), "an already-cancelling root is skipped");
+ 
+     let persisted = harness.run(root).await.expect("root persists");
+     assert_eq!(persisted.cancellation_epoch, 2, "the epoch advances again");
+     assert_eq!(persisted.run_revision, 2);
+     assert_eq!(persisted.state, RunState::Cancelling);
+@@ -344,20 +380,51 @@ async fn duplicate_cancel_advances_the_epoch_again_and_lists_nothing() {
+     let events = harness.events().await;
+     assert_eq!(
+         event_streams(&events, "CancellationEpochAdvanced"),
+         vec![format!("run/{root}"), format!("run/{root}")],
+         "each cancel stages its own epoch event"
+     );
+ }
+ 
++#[tokio::test]
++async fn stale_revision_expectations_conflict_without_an_epoch_advance() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let root = harness.seed_run(task, None, RunState::Running).await;
++    harness.bump_revision(root).await;
++
++    let error = harness
++        .try_cancel(root, Some(0), "operator cancelled")
++        .await
++        .expect_err("a stale expectation conflicts");
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++
++    let persisted = harness.run(root).await.expect("root persists");
++    assert_eq!(persisted.state, RunState::Running);
++    assert_eq!(persisted.cancellation_epoch, 0, "no epoch advance");
++    assert_eq!(persisted.run_revision, 1);
++    assert!(harness.events().await.is_empty(), "no staged epoch event");
++
++    let eligible = harness
++        .try_cancel(root, Some(1), "operator cancelled")
++        .await
++        .expect("the matching expectation commits");
++    assert_eq!(eligible, vec![root]);
++    let persisted = harness.run(root).await.expect("root persists");
++    assert_eq!(persisted.cancellation_epoch, 1);
++    assert_eq!(persisted.run_revision, 2);
++}
++
+ #[tokio::test]
+ async fn missing_roots_are_not_found() {
+     let harness = Harness::new().await;
+     let absent = RunId::new(harness.ids.as_ref());
+     let error = harness
+-        .try_cancel(absent, "operator cancelled")
++        .try_cancel(absent, None, "operator cancelled")
+         .await
+         .expect_err("unknown roots cannot be cancelled");
+     assert_eq!(error.code(), ErrorCode::NotFound);
+     assert_eq!(error.retry_class(), RetryClass::Never);
+     assert!(harness.events().await.is_empty());
+ }
+diff --git a/agent-os/crates/runtime/src/cancel.rs b/agent-os/crates/runtime/src/cancel.rs
+index 7c51204..cac3bd8 100644
+--- a/agent-os/crates/runtime/src/cancel.rs
++++ b/agent-os/crates/runtime/src/cancel.rs
+@@ -16,17 +16,16 @@ use domain::provider::SystemIdProvider;
+ use domain::run::RunState;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use events::StreamKey;
+ use kernel_store::KernelTxn;
+ use kernel_store::models::RunRow;
+ use prost::Message;
+ use run_graph::cancellation::cancel_subtree;
+-use run_graph::repository::load_run;
+ 
+ use crate::run::transition;
+ use crate::state::REASON_CANCELLATION_REQUESTED;
+ use crate::{RuntimeDeps, decode_contract, invalid_field, required_id, stage_catalogued};
+ 
+ /// Outcome of one cancellation request.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct CancellationReport {
+@@ -43,51 +42,53 @@ pub struct CancellationReport {
+ /// `cancel_subtree` owns the epoch CAS, the epoch event, and the ancestry walk;
+ /// this service applies the RUN-001 table with [`transition`] so revisions and
+ /// terminal reasons stay authoritative. Never-started runs cancel directly:
+ /// `Created -> Cancelled` is the table's cancellation-only edge (it avoids a
+ /// phantom `Ready` without a resolved environment) and `Ready -> Cancelled` has
+ /// always been allowed, so every changed run commits exactly one transition.
+ /// The committed revision increments once per transition plus once for the
+ /// epoch advance (R5.4).
++///
++/// When `expected_run_revision` is `Some`, the epoch CAS requires that exact
++/// revision; a stale expectation conflicts before any epoch advance or staged
++/// event, so two concurrent cancels sharing one expectation commit at most
++/// once. `None` fences on the freshly loaded revision instead.
+ pub async fn cancel(
+     txn: &mut dyn KernelTxn,
+     run_id: RunId,
++    expected_run_revision: Option<u64>,
+     reason: &str,
+     now_ms: i64,
+ ) -> errors::Result<CancellationReport> {
+-    let eligible = cancel_subtree(txn, run_id, reason, now_ms).await?;
++    let eligible = cancel_subtree(txn, run_id, expected_run_revision, reason, now_ms).await?;
+ 
+     let mut changed = Vec::new();
+     for candidate in eligible {
+         let row = txn.runs().get(candidate).await?.ok_or_else(|| {
+             KernelError::new(
+                 ErrorCode::Internal,
+                 RetryClass::Never,
+                 "eligible run vanished during cancellation",
+             )
+         })?;
+-        let (final_row, event_type) = match row.state {
+-            RunState::Created | RunState::Ready => (
++        let (final_row, event_type) = match row.state.cancellation_target() {
++            Some(RunState::Cancelled) => (
+                 transition(
+                     txn,
+                     candidate,
+                     row.run_revision,
+                     RunState::Cancelled,
+                     terminal_reason(reason),
+                     now_ms,
+                 )
+                 .await?,
+                 "RunCancelled",
+             ),
+-            RunState::Running
+-            | RunState::WaitingTool
+-            | RunState::WaitingChild
+-            | RunState::WaitingHuman
+-            | RunState::Suspended => (
++            Some(RunState::Cancelling) => (
+                 transition(
+                     txn,
+                     candidate,
+                     row.run_revision,
+                     RunState::Cancelling,
+                     Some(REASON_CANCELLATION_REQUESTED.to_owned()),
+                     now_ms,
+                 )
+@@ -191,27 +192,24 @@ impl CommandHandler for CancelRunHandler {
+         txn: &mut dyn KernelTxn,
+         payload: Vec<u8>,
+     ) -> errors::Result<CommandOutcome> {
+         let raw = decode_contract::<contract::CancelRun>("CancelRun", &payload)?;
+         let run_id = required_id::<RunId>("run_id", &raw.run_id)?;
+         if raw.reason.trim().is_empty() {
+             return Err(invalid_field("reason", "must not be empty"));
+         }
+-        if raw.expected_run_revision != 0 {
+-            let current = load_run(txn, run_id).await?;
+-            if current.run_revision != raw.expected_run_revision {
+-                return Err(conflict(
+-                    "run revision does not match the cancellation expectation",
+-                ));
+-            }
+-        }
+-        let report = cancel(txn, run_id, &raw.reason, self.deps.now_unix_ms()).await?;
++        let expected_run_revision =
++            (raw.expected_run_revision != 0).then_some(raw.expected_run_revision);
++        let report = cancel(
++            txn,
++            run_id,
++            expected_run_revision,
++            &raw.reason,
++            self.deps.now_unix_ms(),
++        )
++        .await?;
+         Ok(CommandOutcome {
+             code: OutcomeCode::Ok,
+             payload: report.root.to_string().into_bytes(),
+         })
+     }
+ }
+-
+-fn conflict(detail: &'static str) -> KernelError {
+-    KernelError::new(ErrorCode::Conflict, RetryClass::Never, detail)
+-}
+diff --git a/agent-os/crates/runtime/src/claim.rs b/agent-os/crates/runtime/src/claim.rs
+index e100ac7..73385ae 100644
+--- a/agent-os/crates/runtime/src/claim.rs
++++ b/agent-os/crates/runtime/src/claim.rs
+@@ -18,31 +18,60 @@ use events::StreamKey;
+ use kernel_store::KernelTxn;
+ use kernel_store::models::{ClaimPatch, RunCas, RunPatch, RunRow};
+ use prost::Message;
+ use run_graph::readiness::dependencies_satisfied;
+ use run_graph::repository::{has_live_claim, load_run};
+ 
+ use crate::{RuntimeDeps, decode_contract, invalid_field, required_id, stage_catalogued};
+ 
+-/// Claims a ready run for `owner`, fencing it for `ttl_ms`.
++/// Claims a ready run for `owner`, fencing it for `ttl_ms`, using system-minted
++/// identifiers.
++///
++/// Service-level convenience for callers that do not carry an [`IdProvider`];
++/// command handlers call [`claim_with_ids`] with the injected
++/// [`RuntimeDeps::ids`](crate::RuntimeDeps::ids) so deterministic tests control
++/// the claim token and event ids.
++pub async fn claim(
++    txn: &mut dyn KernelTxn,
++    run_id: RunId,
++    owner: String,
++    ttl_ms: u64,
++    now_ms: i64,
++    daemon_epoch: u64,
++) -> errors::Result<()> {
++    claim_with_ids(
++        txn,
++        run_id,
++        owner,
++        ttl_ms,
++        now_ms,
++        daemon_epoch,
++        &SystemIdProvider,
++    )
++    .await
++}
++
++/// Claims a ready run for `owner`, fencing it for `ttl_ms`, drawing the claim
++/// token and both event ids from `ids`.
+ ///
+ /// Rejections never mutate: a non-`Ready` state or a live unexpired claim is
+ /// `Conflict`; a non-`Normal` recovery disposition or an unmet dependency is
+ /// `FailedPrecondition`. An expired claim does not block reclamation, but the
+ /// disposition gate still applies (R4.5). The winning CAS also fences the
+ /// update on the observed revision and `Ready` state, so racing claimants
+ /// serialize and exactly one commits.
+-pub async fn claim(
++pub async fn claim_with_ids(
+     txn: &mut dyn KernelTxn,
+     run_id: RunId,
+     owner: String,
+     ttl_ms: u64,
+     now_ms: i64,
+     daemon_epoch: u64,
++    ids: &dyn IdProvider,
+ ) -> errors::Result<()> {
+     let current = load_run(txn, run_id).await?;
+     if current.state != RunState::Ready {
+         return Err(conflict("run is not ready to be claimed"));
+     }
+     if current.recovery != RecoveryDisposition::Normal {
+         return Err(failed_precondition(
+             "run recovery disposition does not permit claiming",
+@@ -64,17 +93,17 @@ pub async fn claim(
+                 run_revision: current.run_revision,
+                 state: Some(RunState::Ready),
+                 cancellation_epoch: None,
+             },
+             RunPatch {
+                 state: Some(RunState::Running),
+                 claim: Some(ClaimPatch {
+                     owner,
+-                    token: fresh_token(),
++                    token: fresh_token(ids),
+                     expires_unix_ms,
+                     daemon_epoch,
+                 }),
+                 bump_revision: true,
+                 ..RunPatch::default()
+             },
+         )
+         .await?;
+@@ -85,48 +114,46 @@ pub async fn claim(
+         KernelError::new(
+             ErrorCode::Internal,
+             RetryClass::Never,
+             "run vanished after its claim",
+         )
+     })?;
+ 
+     let payload = run_payload(&claimed).encode_to_vec();
+-    let ids = SystemIdProvider;
+     stage_catalogued(
+         txn,
+-        EventId::new(&ids),
++        EventId::new(ids),
+         "RunClaimed",
+         StreamKey::run(run_id),
+         payload.clone(),
+         None,
+         None,
+     )
+     .await?;
+     stage_catalogued(
+         txn,
+-        EventId::new(&ids),
++        EventId::new(ids),
+         "RunStarted",
+         StreamKey::run(run_id),
+         payload,
+         None,
+         None,
+     )
+     .await?;
+     Ok(())
+ }
+ 
+-/// Mints the claim token.
++/// Mints the claim token from the injected provider.
+ ///
+-/// The design signature for [`claim`] carries no `IdProvider`, so the token is
+-/// a fresh `SystemIdProvider` UUIDv7 masked to the positive `u64` range the
+-/// SQLite `claim_token` column admits; the low 63 bits of a UUIDv7 are random,
+-/// which is what the fence needs.
+-fn fresh_token() -> u64 {
+-    (SystemIdProvider.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
++/// The SQLite `claim_token` column carries a non-negative `i64`, so the
++/// UUIDv7's low 63 bits are kept; those bits are random, which is what the
++/// fence needs.
++fn fresh_token(ids: &dyn IdProvider) -> u64 {
++    (ids.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
+ }
+ 
+ fn run_payload(row: &RunRow) -> contract::AgentRun {
+     contract::AgentRun {
+         run_id: row.run_id.to_string(),
+         task_id: row.task_id.to_string(),
+         session_id: row.session_id.map(|id| id.to_string()).unwrap_or_default(),
+         parent_run_id: row
+@@ -174,23 +201,24 @@ impl CommandHandler for ClaimReadyRunHandler {
+     ) -> errors::Result<CommandOutcome> {
+         let raw = decode_contract::<contract::ClaimReadyRun>("ClaimReadyRun", &payload)?;
+         let run_id = required_id::<RunId>("run_id", &raw.run_id)?;
+         if raw.claim_owner.trim().is_empty() {
+             return Err(invalid_field("claim_owner", "must not be empty"));
+         }
+         let now_ms = self.deps.now_unix_ms();
+         let daemon_epoch = txn.context().daemon_epoch;
+-        claim(
++        claim_with_ids(
+             txn,
+             run_id,
+             raw.claim_owner,
+             raw.claim_ttl_ms,
+             now_ms,
+             daemon_epoch,
++            self.deps.ids.as_ref(),
+         )
+         .await?;
+         Ok(CommandOutcome {
+             code: OutcomeCode::Ok,
+             payload: run_id.to_string().into_bytes(),
+         })
+     }
+ }
+diff --git a/agent-os/crates/runtime/src/recovery.rs b/agent-os/crates/runtime/src/recovery.rs
+index afbe5e8..a7fbc6d 100644
+--- a/agent-os/crates/runtime/src/recovery.rs
++++ b/agent-os/crates/runtime/src/recovery.rs
+@@ -1,23 +1,22 @@
+ //! Startup reconstruction: classification and persistence of recovery
+ //! dispositions.
+ //!
+ //! [`reconstruct`] enumerates every non-terminal run under the acquired daemon
+-//! epoch, loads its effects, timers, and frozen environment bindings, and
+-//! assigns exactly one [`RecoveryDisposition`] per the normative recovery
+-//! matrix (`specs/recovery-table.md`, R6.2). The matrix is implemented for the
+-//! rows the current read surface reaches: effects, timers, and adapter
+-//! bindings. The `WaitingHuman` expired-approval row is deferred to the
+-//! approvals module because the port has no approvals-by-run read, so a
+-//! `WaitingHuman` run currently always classifies `Normal` (see [`matrix`]).
+-//! Precedence is first-match: blocked-unknown-effect, then reconciliation,
+-//! then missing resource, then the ordinary run-state row (D5). A
+-//! `(run state, effect state)` pair no row assigns fails closed with
+-//! `Internal` before any disposition is written (R6.3, D8).
++//! epoch, loads its effects, timers, frozen environment bindings, and
++//! approvals, and assigns exactly one [`RecoveryDisposition`] per the
++//! normative recovery matrix (`specs/recovery-table.md`, R6.2). A
++//! `WaitingHuman` run whose latest approval request has expired classifies
++//! `RequiresHumanDecision`; a pending (or absent) approval keeps the
++//! pending-approval `Normal` row. Precedence is first-match:
++//! blocked-unknown-effect, then reconciliation, then missing resource, then
++//! the ordinary run-state row (D5). A `(run state, effect state)` pair no row
++//! assigns fails closed with `Internal` before any disposition is written
++//! (R6.3, D8).
+ //!
+ //! Changed dispositions are persisted with a revision-bumping patch and a
+ //! catalogued `RunRecoveryDispositionChanged` event; run state is never
+ //! touched and terminal runs are never enumerated (R6.4-R6.6, D7).
+ 
+ use std::sync::Arc;
+ 
+ use domain::effect::{EffectState, IdempotencySemantics, ReconciliationSemantics};
+@@ -34,55 +33,61 @@ use kernel_store::models::{
+ };
+ use kernel_store::{KernelReadTxn, KernelStore, TxContext};
+ use prost::Message;
+ use run_graph::readiness::condition_met;
+ 
+ pub use domain::time::Clock;
+ 
+ use crate::stage_catalogued;
+-use crate::state::is_terminal;
+ 
+ /// Summary of one startup reconstruction pass.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct RecoveryReport {
+     /// Number of non-terminal runs examined.
+     pub examined: usize,
+     /// Classified disposition per examined run, in enumeration order.
+     pub dispositions: Vec<(RunId, RecoveryDisposition)>,
+ }
+ 
+ /// Reconstructs startup state and persists every changed disposition.
+ ///
+ /// The read pass classifies all active runs before the write pass begins, so
+ /// a fail-closed combination aborts startup with no partial disposition state.
+-/// `_clock` is carried for interface stability with the composition root, in
+-/// the same way [`crate::run::transition`] carries an unused mutation
+-/// timestamp; the disposition patch surface has no time column yet.
++/// The clock supplies the wall time the `WaitingHuman` approval-expiry row
++/// compares against.
+ pub async fn reconstruct(
+     store: &dyn KernelStore,
+-    _clock: Arc<dyn Clock>,
++    clock: Arc<dyn Clock>,
+ ) -> errors::Result<RecoveryReport> {
+     let fence = store.current_fence().await?.ok_or_else(|| {
+         KernelError::new(
+             ErrorCode::FailedPrecondition,
+             RetryClass::Never,
+             "startup recovery requires an acquired daemon fence",
+         )
+     })?;
++    let now_ms = clock.now_unix_ms();
+ 
+     let planned = {
+         let mut read = store.begin_read().await?;
+         let runs = read.runs().list_active().await?;
+         let mut planned = Vec::with_capacity(runs.len());
+         for run in runs {
+             let effects = read.effects().list_by_run(run.run_id).await?;
+             let timers = read.timers().list_by_run(run.run_id).await?;
+-            let disposition =
+-                classify(read.as_mut(), &run, &effects, &timers, fence.epoch.0).await?;
++            let disposition = classify(
++                read.as_mut(),
++                &run,
++                &effects,
++                &timers,
++                fence.epoch.0,
++                now_ms,
++            )
++            .await?;
+             planned.push((run, disposition));
+         }
+         planned
+     };
+ 
+     let examined = planned.len();
+     let mut dispositions = Vec::with_capacity(examined);
+     let mut changed = Vec::new();
+@@ -154,16 +159,17 @@ pub async fn reconstruct(
+ 
+ /// Classifies one non-terminal run against the recovery matrix.
+ async fn classify(
+     read: &mut dyn KernelReadTxn,
+     run: &RunRow,
+     effects: &[EffectRow],
+     timers: &[TimerRow],
+     daemon_epoch: u64,
++    now_ms: i64,
+ ) -> errors::Result<RecoveryDisposition> {
+     let Some(class) = EffectClass::aggregate(effects) else {
+         let offending = effects
+             .iter()
+             .find(|effect| effect.state == EffectState::Unspecified);
+         return Err(unmapped(run, offending));
+     };
+     let Some(mut disposition) = matrix(run.state, class) else {
+@@ -186,16 +192,26 @@ async fn classify(
+     if run.state == RunState::WaitingChild && class == EffectClass::None {
+         disposition = if waiting_child_advanced(read, run).await? {
+             RecoveryDisposition::Recovering
+         } else {
+             RecoveryDisposition::Normal
+         };
+     }
+ 
++    // Matrix A distinguishes a `WaitingHuman` whose latest approval request
++    // has expired (an operator must renew, respond, or cancel) from one whose
++    // approval is still pending.
++    if run.state == RunState::WaitingHuman
++        && class == EffectClass::None
++        && latest_approval_expired(read, run.run_id, now_ms).await?
++    {
++        disposition = RecoveryDisposition::RequiresHumanDecision;
++    }
++
+     // A timer claim held by a prior daemon instance must be reclaimed before
+     // the run can be `Normal` (`specs/recovery-table.md`, recovery actions
+     // outside the run-by-effect matrix).
+     if disposition == RecoveryDisposition::Normal
+         && timers
+             .iter()
+             .any(|timer| is_stale_claimed_timer(timer, daemon_epoch))
+     {
+@@ -286,37 +302,34 @@ fn dispatched_is_unsafe(effect: &EffectRow) -> bool {
+     reconciliation_is_impossible && retry_is_unsafe
+ }
+ 
+ /// Assigns the disposition a matrix row names, or `None` when no row covers
+ /// the pair.
+ ///
+ /// Matrix C (terminal owning run) is unreachable here: terminal runs are never
+ /// enumerated, so a terminal state reaching classification is treated as
+-/// unmapped rather than guessed. The `WaitingChild` arm is a placeholder that
+-/// [`classify`] refines with the declared-condition check.
++/// unmapped rather than guessed. The `WaitingChild` and `WaitingHuman` arms
++/// are placeholders that [`classify`] refines with the declared-condition and
++/// approval-expiry checks respectively.
+ ///
+-/// The `WaitingHuman` arm implements the pending-approval row only. The
+-/// expired-approval row selects `RecoveryDisposition::RequiresHumanDecision`
+-/// but is deferred to the approvals module because the port has no
+-/// approvals-by-run read, so an expired approval currently classifies
+-/// `Normal`. `Suspended` genuinely selects `RequiresHumanDecision` (no resume
+-/// path exists, design D8) and is implemented.
++/// `Suspended` selects `RequiresHumanDecision` (no resume path exists, design
++/// D8).
+ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition> {
+     use EffectClass as E;
+     use RecoveryDisposition as D;
+     use RunState as S;
+ 
+     let disposition = match (run_state, class) {
+         (S::Created | S::Ready, E::None) => D::Normal,
+         (S::Running, E::None) => D::Recovering,
+         (S::WaitingTool, E::None) => D::Normal,
+         (S::WaitingChild, E::None) => D::Normal,
+-        // Pending-approval row only; the expired-approval `RequiresHumanDecision`
+-        // row is deferred to the approvals module (no approvals-by-run read yet).
++        // Pending or unexpired approval; `classify` refines an expired latest
++        // approval to `RequiresHumanDecision`.
+         (S::WaitingHuman, E::None) => D::Normal,
+         (
+             S::Suspended,
+             E::None | E::Prepared | E::Claimed | E::Acknowledged | E::DispatchedSafe,
+         ) => D::RequiresHumanDecision,
+         (S::Running | S::WaitingTool, E::Prepared) => D::Normal,
+         (S::Running | S::WaitingTool | S::Cancelling, E::Claimed | E::Acknowledged) => {
+             D::Recovering
+@@ -327,16 +340,38 @@ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition
+             E::DispatchedUnsafe | E::Unknown,
+         ) => D::BlockedUnknownEffect,
+         (S::Cancelling, E::None | E::Prepared) => D::Recovering,
+         _ => return None,
+     };
+     Some(disposition)
+ }
+ 
++/// Matrix A `WaitingHuman` refinement: true when the run's latest approval
++/// request has expired. A run with no approval rows, or whose latest request
++/// is still live, keeps the pending-approval `Normal` row.
++///
++/// "Latest" is the greatest `(created_at_ms, request_id)` the by-run read
++/// returns; the read orders the same way, and a renewed approval supersedes an
++/// older expired one.
++async fn latest_approval_expired(
++    read: &mut dyn KernelReadTxn,
++    run_id: RunId,
++    now_ms: i64,
++) -> errors::Result<bool> {
++    let approvals = read.security().list_approvals_by_run(run_id).await?;
++    let Some(latest) = approvals
++        .iter()
++        .max_by_key(|row| (row.created_at_ms, row.request_id))
++    else {
++        return Ok(false);
++    };
++    Ok(latest.expires_at_ms <= now_ms)
++}
++
+ /// Loads the run's frozen environment and bindings when one is referenced.
+ async fn load_frozen_environment(
+     read: &mut dyn KernelReadTxn,
+     run: &RunRow,
+ ) -> errors::Result<(Option<ResolvedEnvironmentRow>, Vec<ResolvedBindingRow>)> {
+     let Some(environment_id) = run.resolved_environment_id else {
+         return Ok((None, Vec::new()));
+     };
+@@ -417,17 +452,17 @@ async fn waiting_child_advanced(
+         }
+     }
+     if declared {
+         return Ok(true);
+     }
+     Ok(runs
+         .iter()
+         .filter(|row| row.parent_run_id == Some(run.run_id))
+-        .all(|child| is_terminal(child.state)))
++        .all(|child| child.state.is_terminal()))
+ }
+ 
+ /// A claimed timer is stale unless the current daemon epoch owns the claim;
+ /// recovery runs before any worker of the current epoch exists.
+ fn is_stale_claimed_timer(timer: &TimerRow, daemon_epoch: u64) -> bool {
+     timer.state == TimerState::Claimed && timer.claim_daemon_epoch != Some(daemon_epoch)
+ }
+ 
+diff --git a/agent-os/crates/runtime/src/state.rs b/agent-os/crates/runtime/src/state.rs
+index 9976c62..dff5540 100644
+--- a/agent-os/crates/runtime/src/state.rs
++++ b/agent-os/crates/runtime/src/state.rs
+@@ -52,14 +52,14 @@ pub const fn allows(from: RunState, to: RunState) -> bool {
+             | (Suspended, Failed)
+             | (Cancelling, Cancelled)
+             | (Cancelling, Failed)
+     )
+ }
+ 
+ /// Returns true for the absorbing terminal states `Completed`, `Failed`, and
+ /// `Cancelled`.
++///
++/// [`RunState::is_terminal`] is the single authority; this alias keeps the
++/// crate-root spelling used by the state-machine suite.
+ pub const fn is_terminal(state: RunState) -> bool {
+-    matches!(
+-        state,
+-        RunState::Completed | RunState::Failed | RunState::Cancelled
+-    )
++    state.is_terminal()
+ }
+diff --git a/agent-os/crates/runtime/tests/cancel.rs b/agent-os/crates/runtime/tests/cancel.rs
+index 499dac3..c63c4bd 100644
+--- a/agent-os/crates/runtime/tests/cancel.rs
++++ b/agent-os/crates/runtime/tests/cancel.rs
+@@ -150,16 +150,46 @@ impl Harness {
+ 
+     async fn run(&self, run_id: RunId) -> Option<RunRow> {
+         let mut txn = self.write().await;
+         let row = txn.runs().get(run_id).await.expect("run read");
+         txn.rollback().await.expect("rollback");
+         row
+     }
+ 
++    /// Bumps a run's revision through a no-op patch so a nonzero revision
++    /// expectation can be exercised.
++    async fn bump_revision(&self, run_id: RunId) {
++        let mut txn = self.write().await;
++        let current = txn
++            .runs()
++            .get(run_id)
++            .await
++            .expect("run read")
++            .expect("seeded run exists");
++        let updated = txn
++            .runs()
++            .cas_update(
++                run_id,
++                kernel_store::models::RunCas {
++                    run_revision: current.run_revision,
++                    state: None,
++                    cancellation_epoch: None,
++                },
++                kernel_store::models::RunPatch {
++                    bump_revision: true,
++                    ..kernel_store::models::RunPatch::default()
++                },
++            )
++            .await
++            .expect("revision patch applies");
++        assert!(updated, "revision patch lands");
++        txn.commit().await.expect("revision patch commits");
++    }
++
+     async fn events(&self) -> Vec<OutboxEventRow> {
+         let mut txn = self.write().await;
+         let rows = txn
+             .streams()
+             .scan_unpublished(1_000)
+             .await
+             .expect("outbox read");
+         txn.rollback().await.expect("rollback");
+@@ -364,17 +394,17 @@ async fn cancel_transitions_the_root_and_nested_descendants() {
+ async fn cancel_service_reports_the_changed_runs() {
+     let harness = Harness::new().await;
+     let task = TaskId::new(harness.ids.as_ref());
+     harness.seed_task(task).await;
+     let root = harness.seed_run(task, None, RunState::Running).await;
+     let child = harness.seed_run(task, Some(root), RunState::Created).await;
+ 
+     let mut txn = harness.write().await;
+-    let report = cancel(txn.as_mut(), root, "operator cancelled", SEED_MS)
++    let report = cancel(txn.as_mut(), root, None, "operator cancelled", SEED_MS)
+         .await
+         .expect("the cancel service commits");
+     txn.commit()
+         .await
+         .expect("cancel service transaction commits");
+ 
+     assert_eq!(report.root, root);
+     assert_eq!(report.cancellation_epoch, 1);
+@@ -451,16 +481,75 @@ async fn cancel_rejects_a_stale_expected_revision_without_mutation() {
+ 
+     let persisted = harness.run(root).await.expect("root persists");
+     assert_eq!(persisted.state, RunState::Running);
+     assert_eq!(persisted.cancellation_epoch, 0);
+     assert_eq!(persisted.run_revision, 0);
+     assert!(harness.events().await.is_empty());
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn concurrent_cancels_sharing_one_expectation_commit_exactly_once() {
++    let harness = Arc::new(Harness::new().await);
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let root = harness.seed_run(task, None, RunState::Running).await;
++    harness.bump_revision(root).await;
++    let expected = harness.run(root).await.expect("root persists").run_revision;
++    assert_eq!(expected, 1, "the shared expectation is nonzero");
++
++    let barrier = Arc::new(Barrier::new(2));
++    let mut cancels = Vec::new();
++    for _ in 0..2 {
++        let harness = Arc::clone(&harness);
++        let barrier = Arc::clone(&barrier);
++        cancels.push(tokio::spawn(async move {
++            barrier.wait().await;
++            let mut txn = harness.write().await;
++            let result = cancel(txn.as_mut(), root, Some(expected), "race", SEED_MS).await;
++            txn.commit()
++                .await
++                .expect("cancel transaction commits regardless of outcome");
++            result
++        }));
++    }
++
++    let mut winners = 0_usize;
++    let mut losers = 0_usize;
++    for cancel_task in cancels {
++        match cancel_task.await.expect("cancel task joins") {
++            Ok(_) => winners += 1,
++            Err(error) => {
++                assert_eq!(error.code(), ErrorCode::Conflict);
++                assert_eq!(error.retry_class(), RetryClass::Never);
++                losers += 1;
++            }
++        }
++    }
++    assert_eq!(winners, 1, "exactly one cancel commits");
++    assert_eq!(losers, 1, "the stale expectation loses");
++
++    let persisted = harness.run(root).await.expect("root persists");
++    assert_eq!(persisted.state, RunState::Cancelling);
++    assert_eq!(persisted.cancellation_epoch, 1, "exactly one epoch advance");
++    assert_eq!(
++        persisted.run_revision, 3,
++        "one seeded bump, one epoch bump, one transition"
++    );
++
++    let events = harness.events().await;
++    assert_eq!(
++        events_of(&events, "CancellationEpochAdvanced").len(),
++        1,
++        "the loser stages no epoch event"
++    );
++    assert_eq!(events_of(&events, "RunStateChanged").len(), 1);
++    assert_eq!(events_of(&events, "RunCancelled").len(), 0);
++}
++
+ #[tokio::test]
+ async fn cancel_rejects_unknown_runs_and_empty_reasons() {
+     let harness = Harness::new().await;
+     let task = TaskId::new(harness.ids.as_ref());
+     harness.seed_task(task).await;
+     let root = harness.seed_run(task, None, RunState::Running).await;
+ 
+     let absent = harness.envelope(
+diff --git a/agent-os/crates/runtime/tests/recovery.rs b/agent-os/crates/runtime/tests/recovery.rs
+index ac80808..304f026 100644
+--- a/agent-os/crates/runtime/tests/recovery.rs
++++ b/agent-os/crates/runtime/tests/recovery.rs
+@@ -1,33 +1,31 @@
+ //! Startup recovery acceptance tests (R6.1-R6.6, P4): enumeration of
+-//! non-terminal runs, matrix classification over the real SQLite store for the
+-//! rows the read surface reaches (effects, timers, adapter bindings),
+-//! fail-closed unmapped combinations, disposition persistence, and the
+-//! guarantee that an ambiguous effect never leaves a run resumable.
+-//!
+-//! The `WaitingHuman` expired-approval row is deferred to the approvals module
+-//! (no approvals-by-run read yet); the matrix table test pins the deferred
+-//! pending-approval behaviour explicitly.
++//! non-terminal runs, matrix classification over the real SQLite store for
++//! effects, timers, adapter bindings, and approval expiry, fail-closed
++//! unmapped combinations, disposition persistence, and the guarantee that an
++//! ambiguous effect never leaves a run resumable.
+ 
+ use std::sync::Arc;
+ 
+ use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
+ use domain::generated::contract;
+ use domain::ids::{
+-    AdapterId, AgentSpecId, ConfigGenerationId, DaemonInstanceId, DecisionId, EnvironmentId,
+-    EventCursor, EventStreamKey, PrincipalId, RunId, TaskId, TimerId,
++    AdapterId, AgentSpecId, ApprovalRequestId, ConfigGenerationId, DaemonInstanceId, DecisionId,
++    EnvironmentId, EventCursor, EventId, EventStreamKey, PrincipalId, RunId, TaskId, TimerId,
+ };
++use domain::provider::IdProvider;
+ use domain::resource::{DependencyCondition, TimerState, WorkspaceAccessMode};
+ use domain::run::{RecoveryDisposition, RunState};
++use domain::security::ApprovalState;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::KernelStore;
+ use kernel_store::models::{
+-    NewEffect, NewResolvedBinding, NewResolvedEnvironment, NewRun, NewTask, NewTimer,
+-    OutboxEventRow, RunCas, RunPatch, RunRow, TimerPatch,
++    NewApprovalRequest, NewEffect, NewResolvedBinding, NewResolvedEnvironment, NewRun, NewTask,
++    NewTimer, OutboxEventRow, RunCas, RunPatch, RunRow, TimerPatch,
+ };
+ use kernel_store::{KernelTxn, TxContext};
+ use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
+ use prost::Message;
+ use run_graph::graph::add_dependency;
+ use runtime::recovery::reconstruct;
+ use testkit::clock::TestClock;
+ use testkit::ids::DeterministicIds;
+@@ -325,16 +323,48 @@ impl Harness {
+                 .await
+                 .expect("timer transition");
+             assert!(updated, "timer transition lands");
+         }
+         txn.commit().await.expect("timer commits");
+         timer_id
+     }
+ 
++    async fn seed_approval(
++        &self,
++        run_id: RunId,
++        expires_at_ms: i64,
++        created_at_ms: i64,
++    ) -> ApprovalRequestId {
++        let request_id = ApprovalRequestId::new(self.ids.as_ref());
++        let mut txn = self.write().await;
++        txn.security()
++            .insert_approval_request(NewApprovalRequest {
++                request_id,
++                request_digest: format!("digest-{request_id}"),
++                principal_id: self.principal,
++                actor_id: domain::ids::ActorId::new(self.ids.as_ref()),
++                run_id: Some(run_id),
++                operation: "invoke".to_owned(),
++                target_resource: None,
++                capability_ids: Vec::new(),
++                extension_bundle_digest: None,
++                config_generation_digest: None,
++                expires_at_ms,
++                nonce: format!("nonce-{request_id}"),
++                state: ApprovalState::Pending,
++                created_at_ms,
++                resolved_at_ms: None,
++            })
++            .await
++            .expect("seed approval");
++        txn.commit().await.expect("approval commits");
++        request_id
++    }
++
+     async fn add_edge(
+         &self,
+         source: RunId,
+         target: RunId,
+         condition: DependencyCondition,
+         expected_revision: u64,
+     ) {
+         let mut txn = self.write().await;
+@@ -446,23 +476,24 @@ async fn unknown_effect_blocks_the_run_and_never_leaves_it_resumable() {
+     assert_eq!(row.state, RunState::Running);
+     assert_eq!(row.recovery, RecoveryDisposition::BlockedUnknownEffect);
+     assert_eq!(row.run_revision, 1);
+ 
+     // Even a scaffolded `Ready` run cannot be claimed while blocked (P4).
+     harness.force_state(run, RunState::Ready).await;
+     let error = {
+         let mut txn = harness.write().await;
+-        let result = runtime::claim::claim(
++        let result = runtime::claim::claim_with_ids(
+             txn.as_mut(),
+             run,
+             "worker-1".to_owned(),
+             60_000,
+             SEED_MS,
+             harness.epoch,
++            harness.ids.as_ref(),
+         )
+         .await;
+         txn.rollback().await.expect("rollback");
+         result.expect_err("blocked disposition rejects the claim")
+     };
+     assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+     assert_eq!(error.retry_class(), RetryClass::Never);
+ }
+@@ -619,28 +650,27 @@ async fn terminal_runs_are_never_enumerated() {
+         let row = harness.run(terminal).await.expect("terminal run persists");
+         assert_eq!(row.recovery, RecoveryDisposition::Normal);
+         assert_eq!(row.run_revision, 0);
+         assert!(stream_events_for(&harness.events().await, terminal).is_empty());
+     }
+ }
+ 
+ #[tokio::test]
+-async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
++async fn classification_follows_the_recovery_matrix() {
+     struct Case {
+         run_state: RunState,
+         effect: Option<(EffectState, ReconciliationSemantics, IdempotencySemantics)>,
+         expected: RecoveryDisposition,
+     }
+ 
+-    // Coverage is complete for the rows the current read surface reaches
+-    // (effects, timers, adapter bindings). The `WaitingHuman`
+-    // expired-approval row is deferred to the approvals module because the
+-    // port has no approvals-by-run read; the case below pins the deferred
+-    // pending-approval behaviour.
++    // Coverage is complete for the matrix rows: effects, timers, adapter
++    // bindings, and the `WaitingHuman` approval-expiry refinement (the cases
++    // below seed no approval, so the pending-approval `Normal` row applies;
++    // the dedicated expiry test covers the `RequiresHumanDecision` row).
+     let cases = vec![
+         Case {
+             run_state: RunState::Created,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
+             run_state: RunState::Ready,
+@@ -653,19 +683,19 @@ async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
+             expected: RecoveryDisposition::Recovering,
+         },
+         Case {
+             run_state: RunState::WaitingTool,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
+-            // Deferred: an expired approval must select `RequiresHumanDecision`
+-            // once approvals-by-run exists; until then `WaitingHuman`
+-            // classifies `Normal` (pending-approval row).
++            // Pending-approval row: no approval row exists, so the run stays
++            // `Normal`; an expired latest approval selects
++            // `RequiresHumanDecision` (see the dedicated expiry test).
+             run_state: RunState::WaitingHuman,
+             effect: None,
+             expected: RecoveryDisposition::Normal,
+         },
+         Case {
+             run_state: RunState::Suspended,
+             effect: None,
+             expected: RecoveryDisposition::RequiresHumanDecision,
+@@ -939,8 +969,122 @@ async fn stale_claimed_timers_hold_the_run_out_of_normal() {
+     assert_eq!(
+         scheduled_row.run_revision, 0,
+         "an overdue timer is claimable"
+     );
+     let stale_row = harness.run(stale).await.expect("run persists");
+     assert_eq!(stale_row.recovery, RecoveryDisposition::Recovering);
+     assert_eq!(stale_row.run_revision, 1);
+ }
++
++#[tokio::test]
++async fn waiting_human_approval_expiry_selects_requires_human_decision() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++
++    let expired = harness
++        .seed_run_at(task, RunState::WaitingHuman, SEED_MS)
++        .await;
++    harness.seed_approval(expired, SEED_MS, SEED_MS - 10).await;
++
++    let pending = harness
++        .seed_run_at(task, RunState::WaitingHuman, SEED_MS + 1)
++        .await;
++    harness
++        .seed_approval(pending, SEED_MS + 60_000, SEED_MS)
++        .await;
++
++    // A renewed live approval supersedes an older expired one.
++    let renewed = harness
++        .seed_run_at(task, RunState::WaitingHuman, SEED_MS + 2)
++        .await;
++    harness
++        .seed_approval(renewed, SEED_MS - 1, SEED_MS - 10)
++        .await;
++    harness
++        .seed_approval(renewed, SEED_MS + 60_000, SEED_MS + 1)
++        .await;
++
++    let report = reconstruct(harness.store.as_ref(), harness.clock.clone())
++        .await
++        .expect("reconstruction succeeds");
++    assert_eq!(
++        report.dispositions,
++        vec![
++            (expired, RecoveryDisposition::RequiresHumanDecision),
++            (pending, RecoveryDisposition::Normal),
++            (renewed, RecoveryDisposition::Normal),
++        ]
++    );
++
++    let expired_row = harness.run(expired).await.expect("run persists");
++    assert_eq!(
++        expired_row.state,
++        RunState::WaitingHuman,
++        "recovery never changes state"
++    );
++    assert_eq!(
++        expired_row.recovery,
++        RecoveryDisposition::RequiresHumanDecision
++    );
++    assert_eq!(expired_row.run_revision, 1, "one disposition patch");
++    let events = harness.events().await;
++    let staged = stream_events_for(&events, expired);
++    assert_eq!(staged.len(), 1, "one disposition event");
++    assert_eq!(staged[0].event_type, "RunRecoveryDispositionChanged");
++
++    for unchanged in [pending, renewed] {
++        let row = harness.run(unchanged).await.expect("run persists");
++        assert_eq!(row.recovery, RecoveryDisposition::Normal, "{unchanged}");
++        assert_eq!(
++            row.run_revision, 0,
++            "a live approval is not rewritten: {unchanged}"
++        );
++        assert!(
++            stream_events_for(&events, unchanged).is_empty(),
++            "no audit event for {unchanged}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn claims_draw_tokens_and_event_ids_from_the_injected_provider() {
++    let harness = Harness::new().await;
++    let task = TaskId::new(harness.ids.as_ref());
++    harness.seed_task(task).await;
++    let run = harness.seed_run(task, RunState::Ready).await;
++
++    let provider = DeterministicIds::new(SEED_MS);
++    let expected = DeterministicIds::new(SEED_MS);
++    let token_uuid = expected.new_uuid_v7();
++    let claimed_event = EventId::new(&expected);
++    let started_event = EventId::new(&expected);
++
++    let mut txn = harness.write().await;
++    runtime::claim::claim_with_ids(
++        txn.as_mut(),
++        run,
++        "worker-1".to_owned(),
++        30_000,
++        SEED_MS,
++        harness.epoch,
++        &provider,
++    )
++    .await
++    .expect("a ready run is claimed");
++    txn.commit().await.expect("claim commits");
++
++    let persisted = harness.run(run).await.expect("run persists");
++    assert_eq!(
++        persisted.claim_token,
++        Some((token_uuid.as_u128() & i64::MAX as u128) as u64),
++        "the token is the injected provider's masked UUIDv7"
++    );
++
++    let events = harness.events().await;
++    let staged: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
++    assert_eq!(
++        staged,
++        vec![claimed_event, started_event],
++        "event ids come from the injected provider in staging order"
++    );
++}
+diff --git a/agent-os/crates/testkit/src/store.rs b/agent-os/crates/testkit/src/store.rs
+index 3ada553..bf9acfd 100644
+--- a/agent-os/crates/testkit/src/store.rs
++++ b/agent-os/crates/testkit/src/store.rs
+@@ -27,17 +27,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
+ use async_trait::async_trait;
+ use domain::ids::{
+     AdapterId, AdapterInstanceId, AgentSpecId, ApprovalRequestId, ArtifactId, CapabilityGrantId,
+     ConfigGenerationId, DaemonInstanceId, DecisionId, DelegationChainId, DependencyId, EffectId,
+     EnvironmentId, EventId, EventStreamKey, IdempotencyKey, LeaseId, PrincipalId, ReservationId,
+     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
+ };
+ use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
+-use domain::run::RunState;
+ use errors::KernelError;
+ use errors::codes::{ErrorCode, RetryClass};
+ use kernel_store::models::*;
+ use kernel_store::repositories::*;
+ use kernel_store::types::{DaemonEpoch, DaemonFence, TxContext};
+ use kernel_store::{KernelReadTxn, KernelStore, KernelTxn};
+ 
+ #[derive(Clone, Default)]
+@@ -634,31 +633,24 @@ impl RunRead for MockRunRepo {
+         Ok(rows)
+     }
+ 
+     async fn list_active(&mut self) -> errors::Result<Vec<RunRow>> {
+         let state = lock(&self.state)?;
+         let mut rows: Vec<RunRow> = state
+             .runs
+             .values()
+-            .filter(|row| !is_terminal_state(row.state))
++            .filter(|row| !row.state.is_terminal())
+             .cloned()
+             .collect();
+         rows.sort_by_key(|row| (row.created_at_ms, row.run_id));
+         Ok(rows)
+     }
+ }
+ 
+-fn is_terminal_state(state: RunState) -> bool {
+-    matches!(
+-        state,
+-        RunState::Completed | RunState::Failed | RunState::Cancelled
+-    )
+-}
+-
+ #[async_trait]
+ impl RunRepo for MockRunRepo {
+     async fn insert(&mut self, run: NewRun) -> errors::Result<()> {
+         let mut state = lock(&self.state)?;
+         if !state.tasks.contains_key(&run.task_id) {
+             return Err(failed_precondition("run references a missing task"));
+         }
+         if let Some(parent) = run.parent_run_id
+@@ -1366,16 +1358,31 @@ impl SecurityRead for MockSecurityRepo {
+ 
+     async fn get_approval_request(
+         &mut self,
+         id: ApprovalRequestId,
+     ) -> errors::Result<Option<ApprovalRequestRow>> {
+         Ok(lock(&self.state)?.approval_requests.get(&id).cloned())
+     }
+ 
++    async fn list_approvals_by_run(
++        &mut self,
++        run_id: RunId,
++    ) -> errors::Result<Vec<ApprovalRequestRow>> {
++        let state = lock(&self.state)?;
++        let mut rows: Vec<ApprovalRequestRow> = state
++            .approval_requests
++            .values()
++            .filter(|row| row.run_id == Some(run_id))
++            .cloned()
++            .collect();
++        rows.sort_by_key(|row| (row.created_at_ms, row.request_id));
++        Ok(rows)
++    }
++
+     async fn list_approval_responses(
+         &mut self,
+         request: ApprovalRequestId,
+     ) -> errors::Result<Vec<ApprovalResponseRow>> {
+         let state = lock(&self.state)?;
+         let rows: Vec<ApprovalResponseRow> = state
+             .approval_responses
+             .values()
