@@ -9,3 +9,11 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+kernel-store-sqlite.workspace = true
+testkit.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+proptest.workspace = true

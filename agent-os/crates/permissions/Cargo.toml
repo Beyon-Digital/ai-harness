@@ -9,3 +9,7 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 identity.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
