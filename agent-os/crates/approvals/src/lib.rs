@@ -4,9 +4,14 @@
 //! [`create_request`] persists an immutable request inside the caller's
 //! transaction and stages the catalogued `ApprovalRequested` event;
 //! [`respond`] validates the echoed request digest, expiry, resolution state,
-//! and responder identity before persisting the single response row; and
-//! [`is_satisfied`] answers a blocked command from the persisted request plus
-//! response, never from a boolean alone.
+//! and responder identity before persisting the single response row and
+//! staging the catalogued `ApprovalResolved` event in the same transaction;
+//! and [`is_satisfied`] answers a blocked command from the persisted request
+//! plus response, never from a boolean alone.
+//!
+//! The command handlers bind the request principal and the responder
+//! principal/device to the [`CommandContext`], rejecting a payload whose
+//! identity fields disagree with the context as `InvalidArgument`.
 #![forbid(unsafe_code)]
 
 use std::fmt;
@@ -21,6 +26,7 @@ use domain::generated::contract;
 use domain::ids::{
     ActorId, ApprovalRequestId, DeviceId, EventId, EventStreamKey, PrincipalId, RunId,
 };
+use domain::provider::SystemIdProvider;
 use domain::security::ApprovalState;
 use domain::time::Clock;
 use errors::KernelError;
@@ -41,6 +47,9 @@ pub const CMD_RESPOND_APPROVAL: &str = "agentos.spec.v1.RespondApproval";
 
 /// Catalogue event staged when an approval request is persisted.
 const EVENT_APPROVAL_REQUESTED: &str = "ApprovalRequested";
+
+/// Catalogue event staged when an approval response commits.
+const EVENT_APPROVAL_RESOLVED: &str = "ApprovalResolved";
 
 /// Dependencies shared by the approval command handlers.
 #[derive(Clone)]
@@ -343,7 +352,87 @@ pub async fn respond(
             responded_at_ms: now_ms,
         })
         .await?;
+    stage_approval_resolved(txn, &row, decision, device_id, now_ms).await?;
     Ok(())
+}
+
+/// Stages the catalogued `ApprovalResolved` event on the principal stream.
+///
+/// The event is staged in the same transaction as the terminal response, so
+/// the resolution and its event commit or roll back together. The payload is
+/// the crate-local [`ApprovalResolvedPayload`] shape: identifiers and stable
+/// tokens only, never target or secret content.
+async fn stage_approval_resolved(
+    txn: &mut dyn KernelTxn,
+    row: &ApprovalRequestRow,
+    decision: ApprovalDecision,
+    device_id: DeviceId,
+    responded_at_ms: i64,
+) -> errors::Result<()> {
+    let policy = CatalogClassificationPolicy::embedded()?;
+    let sensitivity = policy
+        .minimum(EVENT_APPROVAL_RESOLVED)
+        .ok_or_else(uncatalogued)?;
+    let retention = policy
+        .default_retention(EVENT_APPROVAL_RESOLVED)
+        .ok_or_else(uncatalogued)?;
+    let stream_key =
+        EventStreamKey::new(StreamKey::principal(row.principal_id).as_str().to_owned())
+            .map_err(|_| internal("catalogued stream key is not canonical"))?;
+    let payload = ApprovalResolvedPayload {
+        request_id: row.request_id.to_string(),
+        request_digest: row.request_digest.clone(),
+        decision: decision.as_str().to_owned(),
+        responder_principal_id: row.principal_id.to_string(),
+        device_id: device_id.to_string(),
+        responded_at_ms,
+    }
+    .encode_to_vec();
+    let correlation_id = txn.context().correlation_id.clone();
+    stage(
+        txn,
+        DraftEvent {
+            event_id: EventId::new(&SystemIdProvider),
+            stream_key,
+            event_type: EVENT_APPROVAL_RESOLVED.to_owned(),
+            payload,
+            sensitivity,
+            retention,
+            correlation_id,
+            causation_id: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Local payload shape of the catalogued `ApprovalResolved` event.
+///
+/// The published contracts define no payload message for `ApprovalResolved`,
+/// so this crate records the resolution as a minimal protobuf message with a
+/// crate-local schema. Only the request identifier, its digest, the stable
+/// decision token, the responding principal and device, and the response time
+/// are present; no target, capability, or secret content is included.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ApprovalResolvedPayload {
+    /// Identifier of the resolved request.
+    #[prost(string, tag = "1")]
+    pub request_id: String,
+    /// Digest bound to the resolved request.
+    #[prost(string, tag = "2")]
+    pub request_digest: String,
+    /// Stable decision token (`approve` or `deny`).
+    #[prost(string, tag = "3")]
+    pub decision: String,
+    /// Principal that responded.
+    #[prost(string, tag = "4")]
+    pub responder_principal_id: String,
+    /// Device the response came from.
+    #[prost(string, tag = "5")]
+    pub device_id: String,
+    /// Wall-clock time the terminal response was persisted.
+    #[prost(int64, tag = "6")]
+    pub responded_at_ms: i64,
 }
 
 /// One terminal decision for an approval request.
@@ -496,15 +585,19 @@ impl CreateApprovalRequestHandler {
 impl CommandHandler for CreateApprovalRequestHandler {
     async fn handle(
         &self,
-        _ctx: &CommandContext,
+        ctx: &CommandContext,
         txn: &mut dyn KernelTxn,
         payload: Vec<u8>,
     ) -> errors::Result<CommandOutcome> {
         let raw =
             decode_contract::<contract::CreateApprovalRequest>("CreateApprovalRequest", &payload)?;
+        let payload_principal = required_id::<PrincipalId>("principal_id", &raw.principal_id)?;
+        if payload_principal != ctx.principal_id {
+            return Err(context_mismatch("principal_id"));
+        }
         let input = DigestInput {
             request_id: optional_id::<ApprovalRequestId>("request_id", &raw.request_id)?,
-            principal_id: required_id::<PrincipalId>("principal_id", &raw.principal_id)?,
+            principal_id: ctx.principal_id,
             actor_id: required_id::<ActorId>("actor_id", &raw.actor_id)?,
             run_id: optional_id::<RunId>("run_id", &raw.run_id)?,
             operation: raw.operation,
@@ -540,7 +633,7 @@ impl RespondApprovalHandler {
 impl CommandHandler for RespondApprovalHandler {
     async fn handle(
         &self,
-        _ctx: &CommandContext,
+        ctx: &CommandContext,
         txn: &mut dyn KernelTxn,
         payload: Vec<u8>,
     ) -> errors::Result<CommandOutcome> {
@@ -548,12 +641,18 @@ impl CommandHandler for RespondApprovalHandler {
         let request_id = required_id::<ApprovalRequestId>("request_id", &raw.request_id)?;
         let digest = ApprovalDigest::from_str(&raw.request_digest)?;
         let decision = ApprovalDecision::from_token(&raw.decision)?;
+        let payload_principal =
+            required_id::<PrincipalId>("responder_principal_id", &raw.responder_principal_id)?;
+        if payload_principal != ctx.principal_id {
+            return Err(context_mismatch("responder_principal_id"));
+        }
+        let payload_device = optional_id::<DeviceId>("device_id", &raw.device_id)?;
+        if payload_device != ctx.device_id {
+            return Err(context_mismatch("device_id"));
+        }
         let responder = Responder {
-            principal_id: required_id::<PrincipalId>(
-                "responder_principal_id",
-                &raw.responder_principal_id,
-            )?,
-            device_id: optional_id::<DeviceId>("device_id", &raw.device_id)?,
+            principal_id: ctx.principal_id,
+            device_id: ctx.device_id,
         };
         respond(
             txn,
@@ -643,11 +742,16 @@ fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
     )
 }
 
+/// Builds the payload/context identity disagreement failure.
+fn context_mismatch(field: &'static str) -> KernelError {
+    invalid_field(field, "does not match the command context")
+}
+
 fn uncatalogued() -> KernelError {
     KernelError::new(
         ErrorCode::Internal,
         RetryClass::Never,
-        "ApprovalRequested has no catalog entry",
+        "catalogued approval event has no catalog entry",
     )
 }
 

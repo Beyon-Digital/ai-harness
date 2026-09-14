@@ -30,6 +30,35 @@ pub fn init_tracing(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Emits one structured audit record for a completed sensitive operation.
+///
+/// Only the provided fields are recorded: the operation kind, the actor, the
+/// run when the operation is run-scoped, the target identifier, and the
+/// terminal outcome. Callers must never pass secret values or raw payload
+/// bytes; the function itself redacts nothing, so passing a value is a caller
+/// defect. The record is emitted as a single `audit.record` tracing event, so
+/// production wiring reaches it through the installed subscriber.
+pub fn audit_record(kind: &str, actor_id: &str, run_id: Option<&str>, target: &str, outcome: &str) {
+    match run_id {
+        Some(run_id) => tracing::info!(
+            kind = kind,
+            actor_id = actor_id,
+            run_id = run_id,
+            target = target,
+            outcome = outcome,
+            "audit.record"
+        ),
+        None => tracing::info!(
+            kind = kind,
+            actor_id = actor_id,
+            run_id = tracing::field::Empty,
+            target = target,
+            outcome = outcome,
+            "audit.record"
+        ),
+    }
+}
+
 /// Builds a span carrying the correlation, run, task, and effect ids when
 /// present, plus the signal's data classification.
 pub fn kernel_span(fields: &KernelFields) -> tracing::Span {

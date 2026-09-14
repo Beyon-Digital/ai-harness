@@ -37,8 +37,22 @@ pub struct SecretsBroker {
 }
 
 impl SecretsBroker {
-    /// Builds a broker over one backend, clock, and audit sink.
-    pub fn new(
+    /// Builds a broker over one backend and clock that audits through the
+    /// production default [`TracingAuditSink`].
+    ///
+    /// Every brokered outcome is then emitted through
+    /// `observability::audit_record`, which records actor, run, target, and
+    /// outcome only. Tests that capture records inject a sink with
+    /// [`SecretsBroker::with_audit`].
+    pub fn new(store: Arc<dyn SecretStore>, clock: Arc<dyn Clock>) -> Self {
+        Self::with_audit(store, clock, Arc::new(TracingAuditSink))
+    }
+
+    /// Builds a broker with an injected audit sink.
+    ///
+    /// Tests use this form to capture records; production wiring uses
+    /// [`SecretsBroker::new`] unless it routes records elsewhere.
+    pub fn with_audit(
         store: Arc<dyn SecretStore>,
         clock: Arc<dyn Clock>,
         audit: Arc<dyn AuditSink>,
@@ -176,8 +190,32 @@ impl SecretsBroker {
     }
 }
 
-/// Audit sink that discards every record; callers with an audit requirement
-/// wire their own sink.
+/// Production audit sink: emits each record through
+/// [`observability::audit_record`] as a structured `audit.record` tracing
+/// event.
+///
+/// The sink records actor, run, target URI, and outcome only; it never
+/// receives the secret value, and the record is rendered through the
+/// `observability` substrate.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TracingAuditSink;
+
+impl AuditSink for TracingAuditSink {
+    fn record(&self, record: &SecretAuditRecord) {
+        let actor_id = record.actor_id.to_string();
+        let run_id = record.run_id.map(|run| run.to_string());
+        observability::audit_record(
+            "secret",
+            &actor_id,
+            run_id.as_deref(),
+            &record.uri,
+            record.outcome.as_str(),
+        );
+    }
+}
+
+/// Audit sink that discards every record; used by tests and by callers that
+/// wire their own sink explicitly.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NullAuditSink;
 

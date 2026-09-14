@@ -129,7 +129,7 @@ async fn broker_reads_authorized_material_from_the_keychain() {
         scope: None,
         expires_at_ms: None,
     }];
-    let broker = SecretsBroker::new(
+    let broker = SecretsBroker::with_audit(
         Arc::new(store),
         Arc::new(TestClock::new(SEED_MS)),
         Arc::new(NullAuditSink),

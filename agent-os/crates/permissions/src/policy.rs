@@ -73,58 +73,10 @@ use identity::delegation::{
 };
 
 use crate::capabilities;
+use crate::{GrantScope, ScopedTarget};
 
 /// Default approval lifetime added to `now_ms` when a draft is produced.
 pub const DEFAULT_APPROVAL_TTL_MS: i64 = 15 * 60 * 1_000;
-
-/// The target an operation is scoped to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ScopedTarget {
-    /// A workspace root plus an optional path inside it.
-    Workspace {
-        /// Workspace root URI.
-        uri: String,
-        /// Optional path relative to the root, or an absolute in-root path.
-        path: Option<String>,
-    },
-    /// Network destinations under the documented exact/suffix/wildcard rule.
-    Network {
-        /// Allowed destination domains.
-        domains: Vec<String>,
-    },
-    /// A secret URI plus an optional egress list of destination domains.
-    Secret {
-        /// Secret resource URI.
-        uri: String,
-        /// Optional destinations the material may flow to.
-        egress: Option<Vec<String>>,
-    },
-    /// A configuration operation.
-    Config {
-        /// Operation the configuration target applies to.
-        operation: CapabilityAction,
-    },
-    /// A bound on the number of children an agent operation may create.
-    ChildCount {
-        /// Maximum number of children.
-        max: u32,
-    },
-    /// No scoped target; valid only for unscoped families.
-    None,
-}
-
-/// One grant row loaded from `capability_grants` (D9).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GrantScope {
-    /// Identifier of the backing grant.
-    pub grant_id: CapabilityGrantId,
-    /// Capability the grant carries.
-    pub capability: Capability,
-    /// `None` means the grant is unscoped for this capability.
-    pub scope: Option<ScopedTarget>,
-    /// Absolute expiry; `None` never expires.
-    pub expires_at_ms: Option<i64>,
-}
 
 /// Why a request was denied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -14,10 +14,9 @@ use domain::ids::{ActorId, CapabilityGrantId, DelegationChainId, PrincipalId};
 use identity::delegation::{DelegationChain, Hop};
 use permissions::capabilities::{parse_capability, supports};
 use permissions::policy::{
-    DEFAULT_APPROVAL_TTL_MS, Decision, DenyReason, GrantScope, PermissionRequest, ScopedTarget,
-    domain_matches, evaluate,
+    DEFAULT_APPROVAL_TTL_MS, Decision, DenyReason, PermissionRequest, domain_matches, evaluate,
 };
-use permissions::{Capability, CapabilityAction, CapabilityFamily};
+use permissions::{Capability, CapabilityAction, CapabilityFamily, GrantScope, ScopedTarget};
 use proptest::prelude::*;
 
 const NOW_MS: i64 = 1_700_000_000_000;

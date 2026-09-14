@@ -201,7 +201,7 @@ impl AuditSink for RecordingSink {
 
 fn broker_with(store: Arc<CountingStore>) -> (SecretsBroker, Arc<RecordingSink>) {
     let audit = Arc::new(RecordingSink::default());
-    let broker = SecretsBroker::new(store, Arc::new(TestClock::new(SEED_MS)), audit.clone());
+    let broker = SecretsBroker::with_audit(store, Arc::new(TestClock::new(SEED_MS)), audit.clone());
     (broker, audit)
 }
 
@@ -444,6 +444,25 @@ async fn in_memory_store_implements_the_shared_contract() {
     assert_eq!(first, again);
     assert_ne!(first, other);
     assert!(!first.reference.contains(SECRET_TEXT));
+}
+
+#[tokio::test]
+async fn default_audit_path_mediates_without_releasing_material() {
+    let fixtures = Fixtures::new();
+    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
+    let broker = SecretsBroker::new(store.clone(), Arc::new(TestClock::new(SEED_MS)));
+
+    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
+    let allowed = request(&fixtures, chain, grants, SECRET_URI, None, "read");
+    let value = broker.use_secret(&allowed).await.expect("authorized");
+    assert_eq!(value.expose(), SECRET_BYTES);
+    assert_eq!(store.calls(), (0, 1, 0));
+
+    let (chain, grants) = held(&fixtures, &[(NETWORK_CONNECT, None)]);
+    let denied = request(&fixtures, chain, grants, SECRET_URI, None, "read");
+    let error = broker.use_secret(&denied).await.expect_err("denied");
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(store.calls(), (0, 1, 0));
 }
 
 #[tokio::test]

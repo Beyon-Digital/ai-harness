@@ -264,6 +264,278 @@ impl FromStr for Capability {
     }
 }
 
+/// The target a capability operation is scoped to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopedTarget {
+    /// A workspace root plus an optional path inside it.
+    Workspace {
+        /// Workspace root URI.
+        uri: String,
+        /// Optional path relative to the root, or an absolute in-root path.
+        path: Option<String>,
+    },
+    /// Network destinations under the exact/suffix/wildcard rule.
+    Network {
+        /// Allowed destination domains.
+        domains: Vec<String>,
+    },
+    /// A secret URI plus an optional egress list of destination domains.
+    Secret {
+        /// Secret resource URI.
+        uri: String,
+        /// Optional destinations the material may flow to.
+        egress: Option<Vec<String>>,
+    },
+    /// A configuration operation.
+    Config {
+        /// Operation the configuration target applies to.
+        operation: CapabilityAction,
+    },
+    /// A bound on the number of children an agent operation may create.
+    ChildCount {
+        /// Maximum number of children.
+        max: u32,
+    },
+    /// No scoped target; valid only for unscoped families.
+    None,
+}
+
+/// One grant row loaded from `capability_grants` (D9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantScope {
+    /// Identifier of the backing grant.
+    pub grant_id: CapabilityGrantId,
+    /// Capability the grant carries.
+    pub capability: Capability,
+    /// `None` means the grant is unscoped for this capability.
+    pub scope: Option<ScopedTarget>,
+    /// Absolute expiry; `None` never expires.
+    pub expires_at_ms: Option<i64>,
+}
+
+/// Codec tag identifying the canonical grant-scope blob encoding.
+const SCOPE_CODEC_TAG: &str = "agentd-grant-scope-v1";
+
+/// Encodes one `capability_grants.scope` blob.
+///
+/// The codec is a versioned UTF-8 text format, chosen so stored scopes stay
+/// inspectable and no new dependency is needed:
+///
+/// - an empty blob encodes `None` (an unscoped grant);
+/// - otherwise the blob is exactly one line terminated by a single `\n`,
+///   holding the tag [`SCOPE_CODEC_TAG`] and tab-separated fields:
+///   - `workspace <uri>` or `workspace <uri> <path>`;
+///   - `network <count> <domain>...` with exactly `count` domains;
+///   - `secret <uri> 0` (no egress) or `secret <uri> 1 <count> <domain>...`;
+///   - `config <action>`;
+///   - `child_count <max>`;
+///   - `none`.
+///
+/// Fields are identifiers, URIs, paths, domain tokens, and numbers, so no
+/// field ever contains a tab, newline, NUL, or other control character; the
+/// decoder rejects any blob that violates the grammar. Semantic scope rules
+/// (URI normalization, traversal, domain syntax) stay in
+/// `permissions::evaluate`, which re-validates every loaded scope and fails
+/// closed.
+pub fn encode_grant_scope(scope: Option<&ScopedTarget>) -> Vec<u8> {
+    let Some(scope) = scope else {
+        return Vec::new();
+    };
+    let mut fields = vec![SCOPE_CODEC_TAG.to_owned()];
+    match scope {
+        ScopedTarget::Workspace { uri, path } => {
+            fields.push("workspace".to_owned());
+            fields.push(uri.clone());
+            if let Some(path) = path {
+                fields.push(path.clone());
+            }
+        }
+        ScopedTarget::Network { domains } => {
+            fields.push("network".to_owned());
+            fields.push(domains.len().to_string());
+            fields.extend(domains.iter().cloned());
+        }
+        ScopedTarget::Secret { uri, egress } => {
+            fields.push("secret".to_owned());
+            fields.push(uri.clone());
+            match egress {
+                None => fields.push("0".to_owned()),
+                Some(egress) => {
+                    fields.push("1".to_owned());
+                    fields.push(egress.len().to_string());
+                    fields.extend(egress.iter().cloned());
+                }
+            }
+        }
+        ScopedTarget::Config { operation } => {
+            fields.push("config".to_owned());
+            fields.push(operation.as_str().to_owned());
+        }
+        ScopedTarget::ChildCount { max } => {
+            fields.push("child_count".to_owned());
+            fields.push(max.to_string());
+        }
+        ScopedTarget::None => fields.push("none".to_owned()),
+    }
+    let mut blob = fields.join("\t").into_bytes();
+    blob.push(b'\n');
+    blob
+}
+
+/// Decodes one `capability_grants.scope` blob under the documented
+/// [`encode_grant_scope`] grammar.
+///
+/// Decoding is strict and fails closed with `FailedPrecondition`: a blob that
+/// is not canonical UTF-8 text, is not newline-terminated, misses or repeats
+/// fields, carries an unknown tag, kind, presence marker, or config action, or
+/// contains empty or control-character field values is rejected rather than
+/// approximated.
+fn decode_grant_scope(blob: &[u8]) -> errors::Result<Option<ScopedTarget>> {
+    if blob.is_empty() {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(blob)
+        .map_err(|_| integrity("grant scope blob is not canonical UTF-8 text"))?;
+    let line = text
+        .strip_suffix('\n')
+        .ok_or_else(|| integrity("grant scope blob is not newline-terminated"))?;
+    let mut fields = line.split('\t');
+    if fields.next() != Some(SCOPE_CODEC_TAG) {
+        return Err(integrity("grant scope blob has an unrecognized codec tag"));
+    }
+    let kind = fields
+        .next()
+        .ok_or_else(|| integrity("grant scope blob has no scope kind"))?;
+    let scope = match kind {
+        "workspace" => {
+            let uri = scope_field(&mut fields)?;
+            let path = fields.next().map(scope_text).transpose()?;
+            no_more_fields(fields)?;
+            ScopedTarget::Workspace { uri, path }
+        }
+        "network" => {
+            let count = scope_count(&mut fields)?;
+            let mut domains = Vec::new();
+            for _ in 0..count {
+                domains.push(scope_field(&mut fields)?);
+            }
+            no_more_fields(fields)?;
+            ScopedTarget::Network { domains }
+        }
+        "secret" => {
+            let uri = scope_field(&mut fields)?;
+            let marker = scope_field(&mut fields)?;
+            let egress = match marker.as_str() {
+                "0" => None,
+                "1" => {
+                    let count = scope_count(&mut fields)?;
+                    let mut domains = Vec::new();
+                    for _ in 0..count {
+                        domains.push(scope_field(&mut fields)?);
+                    }
+                    Some(domains)
+                }
+                _ => return Err(integrity("grant scope egress marker is not recognized")),
+            };
+            no_more_fields(fields)?;
+            ScopedTarget::Secret { uri, egress }
+        }
+        "config" => {
+            let token = scope_field(&mut fields)?;
+            let operation = token
+                .parse::<CapabilityAction>()
+                .map_err(|_| integrity("grant scope config action is not recognized"))?;
+            no_more_fields(fields)?;
+            ScopedTarget::Config { operation }
+        }
+        "child_count" => {
+            let max = scope_field(&mut fields)?;
+            let max = max
+                .parse::<u32>()
+                .map_err(|_| integrity("grant scope child count is not a number"))?;
+            no_more_fields(fields)?;
+            ScopedTarget::ChildCount { max }
+        }
+        "none" => {
+            no_more_fields(fields)?;
+            ScopedTarget::None
+        }
+        _ => return Err(integrity("grant scope blob has an unrecognized scope kind")),
+    };
+    Ok(Some(scope))
+}
+
+/// Validates and returns one non-empty, control-free scope field.
+fn scope_field<'a>(fields: &mut impl Iterator<Item = &'a str>) -> errors::Result<String> {
+    let value = fields
+        .next()
+        .ok_or_else(|| integrity("grant scope blob is missing a field"))?;
+    scope_text(value)
+}
+
+/// Validates and copies one scope field value.
+fn scope_text(value: &str) -> errors::Result<String> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(integrity("grant scope field is not canonical text"));
+    }
+    Ok(value.to_owned())
+}
+
+/// Parses one decimal scope list count.
+fn scope_count<'a>(fields: &mut impl Iterator<Item = &'a str>) -> errors::Result<usize> {
+    let text = scope_field(fields)?;
+    text.parse::<usize>()
+        .map_err(|_| integrity("grant scope list count is not a number"))
+}
+
+/// Rejects any field beyond the grammar's declared fields.
+fn no_more_fields<'a>(mut fields: impl Iterator<Item = &'a str>) -> errors::Result<()> {
+    if fields.next().is_some() {
+        Err(integrity("grant scope blob has trailing fields"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Loads `GrantScope` rows for `grant_ids` from `capability_grants`.
+///
+/// Every identifier must resolve to a persisted grant; a missing grant is an
+/// integrity failure, not an empty scope. The capability is decoded from the
+/// persisted token, the scope blob through the documented codec, and the
+/// effective expiry is the earlier of `expires_at_ms` and `revoked_at_ms`, so
+/// a revoked grant can never authorize. The rows are returned in the order
+/// requested; duplicates are preserved, and `permissions::evaluate` groups
+/// them per grant.
+pub async fn load_grant_scopes(
+    txn: &mut dyn KernelTxn,
+    grant_ids: &[CapabilityGrantId],
+) -> errors::Result<Vec<GrantScope>> {
+    let mut scopes = Vec::with_capacity(grant_ids.len());
+    for grant_id in grant_ids {
+        let row = txn
+            .security()
+            .get_grant(*grant_id)
+            .await?
+            .ok_or_else(|| integrity("grant scope load references a missing grant"))?;
+        scopes.push(GrantScope {
+            grant_id: row.grant_id,
+            capability: parse_capability(&row.capability_id)?,
+            scope: decode_grant_scope(&row.scope)?,
+            expires_at_ms: earlier(row.expires_at_ms, row.revoked_at_ms),
+        });
+    }
+    Ok(scopes)
+}
+
+/// Returns the earlier of two optional instants.
+fn earlier(first: Option<i64>, second: Option<i64>) -> Option<i64> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (Some(instant), None) | (None, Some(instant)) => Some(instant),
+        (None, None) => None,
+    }
+}
+
 /// One delegation hop: an actor/run context holding explicit grants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hop {

@@ -3,3 +3,5 @@
 
 pub mod daemon;
 pub mod delegation;
+
+pub use delegation::load_grant_scopes;

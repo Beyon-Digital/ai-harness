@@ -12,8 +12,9 @@ use domain::ids::{
 };
 use errors::codes::{ErrorCode, RetryClass};
 use identity::delegation::{
-    Capability, CapabilityAction, CapabilityFamily, DelegationChain, Hop, derive_child_chain,
-    load_chain, persist_hop, validate_chain,
+    Capability, CapabilityAction, CapabilityFamily, DelegationChain, GrantScope, Hop, ScopedTarget,
+    derive_child_chain, encode_grant_scope, load_chain, load_grant_scopes, persist_hop,
+    validate_chain,
 };
 use kernel_store::models::{NewCapabilityGrant, NewDelegationHop};
 use kernel_store::{KernelStore, KernelTxn, TxContext};
@@ -372,6 +373,126 @@ async fn persist_and_load_round_trip_a_grant_backed_chain() {
     assert_eq!(loaded.hops[1].grant_ids, vec![child_grant]);
     assert_eq!(loaded.hops[1].capabilities, vec![WORKSPACE_WRITE]);
     verify.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn load_grant_scopes_round_trips_persisted_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, epoch) = open_store(dir.path()).await;
+    let ids = provider();
+    let mut txn = store.begin_write(context(&ids, epoch)).await.unwrap();
+
+    let workspace_scope = ScopedTarget::Workspace {
+        uri: "workspace://acme/proj".to_owned(),
+        path: Some("src/lib.rs".to_owned()),
+    };
+    let scoped_grant_id = CapabilityGrantId::new(&ids);
+    txn.security()
+        .insert_grant(NewCapabilityGrant {
+            grant_id: scoped_grant_id,
+            principal_id: PrincipalId::new(&ids),
+            actor_id: ActorId::new(&ids),
+            run_id: None,
+            capability_id: WORKSPACE_READ.to_string(),
+            scope: encode_grant_scope(Some(&workspace_scope)),
+            delegated_from_grant_id: None,
+            expires_at_ms: Some(1_700_000_000_000),
+            revoked_at_ms: None,
+            created_at_ms: 10,
+        })
+        .await
+        .unwrap();
+
+    let unscoped_grant_id = CapabilityGrantId::new(&ids);
+    txn.security()
+        .insert_grant(NewCapabilityGrant {
+            grant_id: unscoped_grant_id,
+            principal_id: PrincipalId::new(&ids),
+            actor_id: ActorId::new(&ids),
+            run_id: None,
+            capability_id: WORKSPACE_WRITE.to_string(),
+            scope: encode_grant_scope(None),
+            delegated_from_grant_id: None,
+            expires_at_ms: None,
+            revoked_at_ms: Some(1_600_000_000_000),
+            created_at_ms: 10,
+        })
+        .await
+        .unwrap();
+
+    let loaded = load_grant_scopes(txn.as_mut(), &[scoped_grant_id, unscoped_grant_id])
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded,
+        vec![
+            GrantScope {
+                grant_id: scoped_grant_id,
+                capability: WORKSPACE_READ,
+                scope: Some(workspace_scope.clone()),
+                expires_at_ms: Some(1_700_000_000_000),
+            },
+            GrantScope {
+                grant_id: unscoped_grant_id,
+                capability: WORKSPACE_WRITE,
+                scope: None,
+                expires_at_ms: Some(1_600_000_000_000),
+            },
+        ]
+    );
+    txn.commit().await.unwrap();
+
+    let mut verify = store.begin_write(context(&ids, epoch)).await.unwrap();
+    let reloaded = load_grant_scopes(verify.as_mut(), &[scoped_grant_id])
+        .await
+        .unwrap();
+    assert_eq!(
+        reloaded,
+        vec![GrantScope {
+            grant_id: scoped_grant_id,
+            capability: WORKSPACE_READ,
+            scope: Some(workspace_scope),
+            expires_at_ms: Some(1_700_000_000_000),
+        }]
+    );
+    verify.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn load_grant_scopes_fails_closed_on_malformed_blobs_and_missing_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, epoch) = open_store(dir.path()).await;
+    let ids = provider();
+    let mut txn = store.begin_write(context(&ids, epoch)).await.unwrap();
+
+    let malformed_grant = CapabilityGrantId::new(&ids);
+    txn.security()
+        .insert_grant(NewCapabilityGrant {
+            grant_id: malformed_grant,
+            principal_id: PrincipalId::new(&ids),
+            actor_id: ActorId::new(&ids),
+            run_id: None,
+            capability_id: WORKSPACE_READ.to_string(),
+            scope: b"agentd-grant-scope-v1\tmystery\n".to_vec(),
+            delegated_from_grant_id: None,
+            expires_at_ms: None,
+            revoked_at_ms: None,
+            created_at_ms: 10,
+        })
+        .await
+        .unwrap();
+    let error = load_grant_scopes(txn.as_mut(), &[malformed_grant])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+
+    let missing_grant = CapabilityGrantId::new(&ids);
+    let error = load_grant_scopes(txn.as_mut(), &[missing_grant])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(error.retry_class(), RetryClass::Never);
 }
 
 #[tokio::test]

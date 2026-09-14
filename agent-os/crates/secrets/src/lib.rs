@@ -7,8 +7,17 @@
 //! `RequireApproval` decision releases no material and produces an error that
 //! carries no secret content; an `Allow` decision returns raw bytes only as a
 //! zeroizing [`SecretValue`] whose `Debug` is redacted. Every outcome is
-//! reported to the injected [`AuditSink`] as actor, run, uri, and outcome
-//! only.
+//! reported to an [`AuditSink`] as actor, run, uri, and outcome only;
+//! [`SecretsBroker::new`] wires the production [`TracingAuditSink`], and
+//! tests inject a capturing sink through [`SecretsBroker::with_audit`].
+//!
+//! The catalogued `SecretActionPerformed` event (`produced_by: sign_or_act`)
+//! is **not** staged by this crate: the broker has no write transaction or
+//! principal stream. Staging it belongs to the composition root
+//! (`process-supervisor`), which owns the transaction and can stage the event
+//! on the principal stream in the same transaction as the brokered action's
+//! bookkeeping. Audit records emitted here are the observability substrate's
+//! structured logs, not the catalogue event.
 //!
 //! The documented test backend is [`InMemorySecretStore`]; on macOS,
 //! [`MacOsKeychainSecretStore`] wraps `security-framework` directly (no shell
@@ -28,7 +37,7 @@ use observability::{Classification, Classified};
 use permissions::GrantScope;
 use zeroize::Zeroizing;
 
-pub use broker::{InMemorySecretStore, NullAuditSink, SecretsBroker};
+pub use broker::{InMemorySecretStore, NullAuditSink, SecretsBroker, TracingAuditSink};
 #[cfg(target_os = "macos")]
 pub use keychain::MacOsKeychainSecretStore;
 

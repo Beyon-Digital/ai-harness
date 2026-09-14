@@ -7,9 +7,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use approvals::{
-    ApprovalDecision, ApprovalDeps, ApprovalDigest, ApprovalOutcome, CMD_CREATE_APPROVAL_REQUEST,
-    CMD_RESPOND_APPROVAL, DigestInput, Responder, canonical_digest, is_satisfied,
-    register_handlers,
+    ApprovalDecision, ApprovalDeps, ApprovalDigest, ApprovalOutcome, ApprovalResolvedPayload,
+    CMD_CREATE_APPROVAL_REQUEST, CMD_RESPOND_APPROVAL, DigestInput, Responder, canonical_digest,
+    is_satisfied, register_handlers,
 };
 use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
 use command_coordinator::handler::{CommandOutcome, CommandRegistry, OutcomeCode};
@@ -186,7 +186,12 @@ impl Harness {
         }
     }
 
-    async fn create(&self, input: &DigestInput, key: &str, marker: u8) -> ApprovalRequestId {
+    async fn try_create(
+        &self,
+        input: &DigestInput,
+        key: &str,
+        marker: u8,
+    ) -> errors::Result<CommandOutcome> {
         let payload = contract::CreateApprovalRequest {
             request_id: input
                 .request_id
@@ -205,9 +210,14 @@ impl Harness {
             nonce: input.nonce.clone(),
         }
         .encode_to_vec();
-        let outcome = self
-            .coordinator
+        self.coordinator
             .execute(self.envelope(CMD_CREATE_APPROVAL_REQUEST, key, payload, marker))
+            .await
+    }
+
+    async fn create(&self, input: &DigestInput, key: &str, marker: u8) -> ApprovalRequestId {
+        let outcome = self
+            .try_create(input, key, marker)
             .await
             .expect("create request commits");
         assert_eq!(outcome.code, OutcomeCode::Ok);
@@ -433,6 +443,39 @@ async fn create_request_persists_the_request_and_stages_the_catalogued_event() {
 }
 
 #[tokio::test]
+async fn create_binds_the_request_principal_to_the_command_context() {
+    let harness = harness().await;
+    let mut mismatched = base_input(&harness, SEED_MS + 60_000);
+    mismatched.principal_id = harness.fixture.other_principal;
+
+    let error = harness
+        .try_create(&mismatched, "create-1", 0xa7)
+        .await
+        .expect_err("a payload principal outside the context is rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+    assert!(
+        harness.staged_events().await.is_empty(),
+        "a rejected create stages nothing"
+    );
+
+    let matched = base_input(&harness, SEED_MS + 60_000);
+    let request_id = harness.create(&matched, "create-2", 0xa8).await;
+    let row = harness
+        .request_row(request_id)
+        .await
+        .expect("request row persisted");
+    assert_eq!(
+        row.principal_id, harness.fixture.principal,
+        "the persisted principal is the command context principal"
+    );
+    assert_eq!(
+        row.request_digest,
+        canonical_digest(&digest_input_from_row(&row)).to_string()
+    );
+}
+
+#[tokio::test]
 async fn response_with_a_mismatched_digest_is_rejected_and_persists_nothing() {
     let harness = harness().await;
     let input = base_input(&harness, SEED_MS + 60_000);
@@ -551,6 +594,51 @@ async fn a_second_response_is_rejected_and_leaves_the_first() {
 }
 
 #[tokio::test]
+async fn respond_stages_the_catalogued_approval_resolved_event() {
+    let harness = harness().await;
+    let input = base_input(&harness, SEED_MS + 60_000);
+    let request_id = harness.create(&input, "create-1", 0xe3).await;
+    let digest = harness.persisted_digest(request_id).await;
+
+    harness
+        .respond(
+            request_id,
+            &digest,
+            ApprovalDecision::Approve,
+            responder(&harness),
+            "respond-1",
+            0xe4,
+        )
+        .await
+        .expect("response commits");
+
+    let events = harness.staged_events().await;
+    assert_eq!(events.len(), 2, "requested and resolved events are staged");
+    let resolved = events
+        .iter()
+        .find(|event| event.event_type == "ApprovalResolved")
+        .expect("ApprovalResolved is staged");
+    assert_eq!(resolved.event_version, 1);
+    assert_eq!(
+        resolved.stream_key.as_str(),
+        format!("security/principal/{}", harness.fixture.principal)
+    );
+    assert_eq!(resolved.sensitivity, SensitivityClass::Confidential);
+    assert_eq!(resolved.retention, RetentionClass::Audit);
+    let decoded = ApprovalResolvedPayload::decode(resolved.payload.as_slice())
+        .expect("ApprovalResolved payload decodes");
+    assert_eq!(decoded.request_id, request_id.to_string());
+    assert_eq!(decoded.request_digest, digest.to_string());
+    assert_eq!(decoded.decision, "approve");
+    assert_eq!(
+        decoded.responder_principal_id,
+        harness.fixture.principal.to_string()
+    );
+    assert_eq!(decoded.device_id, harness.fixture.device.to_string());
+    assert_eq!(decoded.responded_at_ms, SEED_MS);
+}
+
+#[tokio::test]
 async fn a_wrong_responder_is_rejected_and_persists_nothing() {
     let harness = harness().await;
     let input = base_input(&harness, SEED_MS + 60_000);
@@ -571,8 +659,12 @@ async fn a_wrong_responder_is_rejected_and_persists_nothing() {
             0xb5,
         )
         .await
-        .expect_err("wrong principal rejected");
-    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+        .expect_err("a payload responder outside the context is rejected");
+    assert_eq!(
+        error.code(),
+        ErrorCode::InvalidArgument,
+        "the responder principal must match the command context"
+    );
     assert_eq!(error.retry_class(), RetryClass::Never);
 
     let missing_device = Responder {

@@ -5,7 +5,7 @@
 pub mod capabilities;
 pub mod policy;
 
-pub use identity::delegation::{Capability, CapabilityAction, CapabilityFamily};
-pub use policy::{
-    ApprovalDraft, Decision, DenyReason, GrantScope, PermissionRequest, ScopedTarget, evaluate,
+pub use identity::delegation::{
+    Capability, CapabilityAction, CapabilityFamily, GrantScope, ScopedTarget,
 };
+pub use policy::{ApprovalDraft, Decision, DenyReason, PermissionRequest, evaluate};
