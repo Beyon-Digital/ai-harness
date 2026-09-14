@@ -14,38 +14,62 @@
 //! - the scoped target must match the capability's family and pass the scope
 //!   rules below (`OutOfScope`).
 //!
+//! Grant scopes (R2.3, D9): callers load [`GrantScope`] rows from
+//! `capability_grants` for the grants their chain cites. `Allow` requires at
+//! least one grant that the chain's tip holds whose capability matches the
+//! request, that has not expired, and that either is unscoped (`scope: None`,
+//! which allows any well-formed target) or whose scope covers the request
+//! target. `Allow { grant_refs }` cites exactly the covering grants. Matching
+//! grants that are all unexpired but none covering are `OutOfScope`; when
+//! every matching grant has lapsed the reason is `ExpiredGrant`; when the
+//! caller supplies no matching grant row at all the request fails closed as
+//! `NoGrant`.
+//!
 //! Scope rules:
 //!
 //! - workspace: the `uri` root is normalized (canonical scheme, no `.` or
 //!   `..` segments); an optional `path` is joined to the root, or, when it is
-//!   itself absolute (`scheme://`), prefix-matched against the root. Traversal
-//!   and foreign roots are rejected. Path comparison is segment-aware;
-//!   workspace paths are case-sensitive.
+//!   itself absolute (`scheme://`), prefix-matched against the root. A grant
+//!   scope covers a target when the normalized scopes are equal or the grant
+//!   scope is a segment prefix of the target path. Traversal and foreign roots
+//!   are rejected. Path comparison is segment-aware; workspace paths are
+//!   case-sensitive.
 //! - network: every domain is lowercased and validated as a DNS name. `*`
 //!   matches any host; a token that begins with `.` (for example
 //!   `.example.com`) is the documented suffix rule and matches the named
 //!   domain and all of its subdomains; every other token matches exactly.
-//!   [`domain_matches`] applies the rule to a concrete host.
-//! - secret: the `uri` is normalized like a workspace root and an optional
-//!   `egress` list is validated with the network domain rule.
-//! - config: the target operation must equal the requested action.
-//! - agent: `ChildCount` must allow at least one child.
+//!   [`domain_matches`] applies the rule to a concrete host. A network grant
+//!   scope covers a request only when every requested domain is covered by
+//!   some allowed rule.
+//! - secret: the `uri` is normalized like a workspace root, and coverage is
+//!   the same segment-prefix rule (a grant for `secret://prod` covers
+//!   `secret://prod/api-key`). The optional `egress` list is validated with
+//!   the network domain rule: a grant without egress only covers requests
+//!   without egress, a bounded grant only covers bounded requests whose
+//!   domains it matches, and an unbounded grant (`Some([])` or a `*` entry)
+//!   covers any request egress.
+//! - config: the grant scope's operation must equal the requested action.
+//! - agent: the requested `ChildCount` must not exceed the grant scope's max.
 //! - extension, effect, and resource capabilities are unscoped and require
 //!   [`ScopedTarget::None`].
 //!
 //! Joint risk: a secret `Use` or `SignOrAct` request whose effective authority
-//! also holds `Network Connect`, or whose secret target declares an egress
-//! list, is upgraded from `Allow` to `RequireApproval`. The draft cites both
-//! capabilities and carries a deterministic nonce, so the upgrade is stable
-//! for identical inputs; approval lifetimes default to
+//! also holds `Network Connect`, or whose secret target declares an unbounded
+//! egress, is upgraded from `Allow` to `RequireApproval`. Egress is only
+//! unbounded when the request's egress list contains the global `*` wildcard
+//! or is empty (egress declared without bounding it); a bounded list of
+//! concrete hosts or documented suffixes does not upgrade. The draft cites
+//! both capabilities and carries a deterministic template nonce, so the
+//! upgrade is stable for identical inputs; `approvals::create_request` assigns
+//! the canonical nonce it binds (D10) and approval lifetimes default to
 //! [`DEFAULT_APPROVAL_TTL_MS`] past `now_ms`. Denials never carry target or
 //! secret content.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use domain::ids::{ActorId, CapabilityGrantId, PrincipalId, RunId};
 use identity::delegation::{
-    Capability, CapabilityAction, CapabilityFamily, DelegationChain, Hop, validate_chain,
+    Capability, CapabilityAction, CapabilityFamily, DelegationChain, validate_chain,
 };
 
 use crate::capabilities;
@@ -89,18 +113,32 @@ pub enum ScopedTarget {
     None,
 }
 
+/// One grant row loaded from `capability_grants` (D9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantScope {
+    /// Identifier of the backing grant.
+    pub grant_id: CapabilityGrantId,
+    /// Capability the grant carries.
+    pub capability: Capability,
+    /// `None` means the grant is unscoped for this capability.
+    pub scope: Option<ScopedTarget>,
+    /// Absolute expiry; `None` never expires.
+    pub expires_at_ms: Option<i64>,
+}
+
 /// Why a request was denied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DenyReason {
-    /// No hop in the chain carries the requested capability.
+    /// No hop in the chain carries the requested capability, or no supplied
+    /// grant row backs it.
     NoGrant,
-    /// The target is malformed or outside the capability's scope.
+    /// The target is malformed or outside every matching grant's scope.
     OutOfScope,
     /// An ancestor hop narrowed away the capability the tip claims.
     AncestorConstraint,
     /// The tool's allow list excludes the requested capability.
     ToolRestriction,
-    /// A grant backing the request has lapsed.
+    /// Every matching grant has lapsed.
     ExpiredGrant,
     /// The capability pair is not in the contract.
     Unsupported,
@@ -161,7 +199,7 @@ pub struct ApprovalDraft {
     pub config_digest: Option<String>,
     /// Expiry of the requested approval.
     pub expiry_ms: i64,
-    /// Deterministic request nonce.
+    /// Deterministic template nonce; `create_request` assigns the bound nonce.
     pub nonce: String,
 }
 
@@ -176,12 +214,18 @@ pub struct PermissionRequest {
     pub run_id: Option<RunId>,
     /// Loaded delegation chain from root to tip.
     pub chain: DelegationChain,
+    /// Grant rows loaded from `capability_grants` for the chain's grants.
+    pub grant_scopes: Vec<GrantScope>,
     /// The tool's own allow list, when it has one.
     pub tool_capabilities: Option<Vec<Capability>>,
     /// Capability the operation requests.
     pub capability: Capability,
     /// Target the operation is scoped to.
     pub target: ScopedTarget,
+    /// Extension bundle digest the approval should bind, when applicable.
+    pub extension_digest: Option<String>,
+    /// Configuration generation digest the approval should bind, when applicable.
+    pub config_digest: Option<String>,
     /// Evaluation time.
     pub now_ms: i64,
 }
@@ -225,8 +269,8 @@ pub fn evaluate(request: &PermissionRequest) -> Decision {
         }
     }
 
-    let target_token = match scoped_target_token(&capability, &request.target) {
-        Ok(token) => token,
+    let (backing, target_token) = match backing_grants(request, &capability) {
+        Ok(resolved) => resolved,
         Err(reason) => return Decision::Deny { reason },
     };
 
@@ -237,7 +281,7 @@ pub fn evaluate(request: &PermissionRequest) -> Decision {
     }
 
     Decision::Allow {
-        grant_refs: tip_grant_refs(request.chain.hops.last()),
+        grant_refs: backing,
     }
 }
 
@@ -265,6 +309,174 @@ pub fn domain_matches(rule: &str, host: &str) -> bool {
     }
 }
 
+/// Resolves the tip grants that back the request and the canonical target.
+///
+/// Only grants the chain's tip actually holds are considered; a matching grant
+/// must be unexpired and either unscoped or covering the target. The returned
+/// refs are exactly the covering grants.
+fn backing_grants(
+    request: &PermissionRequest,
+    capability: &Capability,
+) -> Result<(Vec<CapabilityGrantId>, String), DenyReason> {
+    let tip_grants: BTreeSet<CapabilityGrantId> = request
+        .chain
+        .hops
+        .last()
+        .map(|tip| tip.grant_ids.iter().copied().collect())
+        .unwrap_or_default();
+    let mut rows: BTreeMap<CapabilityGrantId, Vec<&GrantScope>> = BTreeMap::new();
+    for row in &request.grant_scopes {
+        if tip_grants.contains(&row.grant_id) && row.capability == *capability {
+            rows.entry(row.grant_id).or_default().push(row);
+        }
+    }
+    if rows.is_empty() {
+        return Err(DenyReason::NoGrant);
+    }
+
+    let target_token = scoped_target_token(capability, &request.target)?;
+    let mut any_unexpired = false;
+    let mut covering = BTreeSet::new();
+    for (grant_id, rows) in &rows {
+        let unexpired = rows
+            .iter()
+            .all(|row| !grant_expired(row.expires_at_ms, request.now_ms));
+        let covers = rows.iter().all(|row| {
+            row.scope
+                .as_ref()
+                .is_none_or(|scope| target_covers(scope, &request.target))
+        });
+        if unexpired {
+            any_unexpired = true;
+        }
+        if unexpired && covers {
+            covering.insert(*grant_id);
+        }
+    }
+
+    if !covering.is_empty() {
+        return Ok((covering.into_iter().collect(), target_token));
+    }
+    Err(if any_unexpired {
+        DenyReason::OutOfScope
+    } else {
+        DenyReason::ExpiredGrant
+    })
+}
+
+/// Returns whether a grant with this expiry has lapsed at `now_ms`.
+fn grant_expired(expires_at_ms: Option<i64>, now_ms: i64) -> bool {
+    expires_at_ms.is_some_and(|expiry| expiry <= now_ms)
+}
+
+/// Returns whether a grant scope covers a request target.
+fn target_covers(scope: &ScopedTarget, target: &ScopedTarget) -> bool {
+    match (scope, target) {
+        (
+            ScopedTarget::Workspace {
+                uri: scope_uri,
+                path: scope_path,
+            },
+            ScopedTarget::Workspace {
+                uri: target_uri,
+                path: target_path,
+            },
+        ) => match (
+            normalized_workspace(scope_uri, scope_path.as_deref()),
+            normalized_workspace(target_uri, target_path.as_deref()),
+        ) {
+            (Some(scope), Some(target)) => segment_prefix(&scope, &target),
+            _ => false,
+        },
+        (
+            ScopedTarget::Network { domains: allowed },
+            ScopedTarget::Network { domains: requested },
+        ) => requested
+            .iter()
+            .all(|domain| requested_domain_covered(allowed, domain)),
+        (
+            ScopedTarget::Secret {
+                uri: scope_uri,
+                egress: scope_egress,
+            },
+            ScopedTarget::Secret {
+                uri: target_uri,
+                egress: target_egress,
+            },
+        ) => {
+            let (Some(scope), Some(target)) = (normalize_uri(scope_uri), normalize_uri(target_uri))
+            else {
+                return false;
+            };
+            segment_prefix(&scope, &target)
+                && egress_covers(scope_egress.as_deref(), target_egress.as_deref())
+        }
+        (
+            ScopedTarget::Config {
+                operation: scope_operation,
+            },
+            ScopedTarget::Config {
+                operation: target_operation,
+            },
+        ) => scope_operation == target_operation,
+        (
+            ScopedTarget::ChildCount { max: scope_max },
+            ScopedTarget::ChildCount { max: target_max },
+        ) => target_max <= scope_max,
+        (ScopedTarget::None, ScopedTarget::None) => true,
+        _ => false,
+    }
+}
+
+/// Returns whether `scope` is the same path as `target` or a segment prefix.
+fn segment_prefix(scope: &str, target: &str) -> bool {
+    target == scope || target.starts_with(&format!("{scope}/"))
+}
+
+/// Returns whether every requested domain fits the allowed rules.
+fn requested_domain_covered(allowed: &[String], requested: &str) -> bool {
+    let Some(requested) = normalize_domain(requested) else {
+        return false;
+    };
+    if requested == "*" {
+        return allowed
+            .iter()
+            .any(|rule| normalize_domain(rule).as_deref() == Some("*"));
+    }
+    match requested.strip_prefix('.') {
+        Some(body) => allowed.iter().any(|rule| {
+            let Some(rule) = normalize_domain(rule) else {
+                return false;
+            };
+            if rule == "*" || rule == requested {
+                return true;
+            }
+            rule.strip_prefix('.')
+                .is_some_and(|suffix| body == suffix || body.ends_with(&format!(".{suffix}")))
+        }),
+        None => allowed.iter().any(|rule| domain_matches(rule, &requested)),
+    }
+}
+
+/// Returns whether a granted egress bounds a requested egress.
+fn egress_covers(grant: Option<&[String]>, request: Option<&[String]>) -> bool {
+    match (grant, request) {
+        (None, Some(_)) => false,
+        (_, None) => true,
+        (Some(grant), Some(request)) => {
+            if request.is_empty() {
+                return grant.is_empty()
+                    || grant
+                        .iter()
+                        .any(|domain| normalize_domain(domain).as_deref() == Some("*"));
+            }
+            request
+                .iter()
+                .all(|requested| requested_domain_covered(grant, requested))
+        }
+    }
+}
+
 /// Intersects every hop's capability set, root through tip.
 fn ancestor_capabilities(chain: &DelegationChain) -> BTreeSet<Capability> {
     let mut intersection: Option<BTreeSet<Capability>> = None;
@@ -276,15 +488,6 @@ fn ancestor_capabilities(chain: &DelegationChain) -> BTreeSet<Capability> {
         });
     }
     intersection.unwrap_or_default()
-}
-
-/// Returns the tip hop's grant identifiers, sorted and duplicate-free.
-fn tip_grant_refs(tip: Option<&Hop>) -> Vec<CapabilityGrantId> {
-    let mut refs = BTreeSet::new();
-    if let Some(tip) = tip {
-        refs.extend(tip.grant_ids.iter().copied());
-    }
-    refs.into_iter().collect()
 }
 
 /// Upgrades a secret request to approval when joint risk is present.
@@ -303,14 +506,19 @@ fn joint_risk(
     }
     let connect = Capability::new(CapabilityFamily::Network, CapabilityAction::Connect);
     let connect_held = effective.contains(&connect);
-    let egress_declared = matches!(
-        target,
+    let egress_unbounded = match target {
         ScopedTarget::Secret {
-            egress: Some(_),
+            egress: Some(egress),
             ..
+        } => {
+            egress.is_empty()
+                || egress
+                    .iter()
+                    .any(|domain| normalize_domain(domain).as_deref() == Some("*"))
         }
-    );
-    if !connect_held && !egress_declared {
+        _ => false,
+    };
+    if !connect_held && !egress_unbounded {
         return None;
     }
     let mut exercised = BTreeSet::new();
@@ -332,17 +540,18 @@ fn approval_draft(
         operation: request.capability.to_string(),
         target: target_token,
         capabilities: exercised.iter().copied().collect(),
-        extension_digest: None,
-        config_digest: None,
+        extension_digest: request.extension_digest.clone(),
+        config_digest: request.config_digest.clone(),
         expiry_ms: request.now_ms.saturating_add(DEFAULT_APPROVAL_TTL_MS),
         nonce,
     }
 }
 
-/// Derives a stable nonce from the request identity and target.
+/// Derives a stable template nonce from the request identity and target.
 ///
 /// The engine is pure, so the nonce cannot be random; it is a canonical
-/// fingerprint of the inputs and the approval digest binds it.
+/// fingerprint of the inputs, and `approvals::create_request` assigns the
+/// canonical nonce it binds (D10).
 fn deterministic_nonce(request: &PermissionRequest, target_token: &str) -> String {
     let run = request
         .run_id
@@ -374,6 +583,7 @@ fn scoped_target_token(
             let uri = normalize_uri(uri).ok_or(DenyReason::OutOfScope)?;
             match egress {
                 None => Ok(uri),
+                Some(egress) if egress.is_empty() => Ok(format!("{uri}|egress=*")),
                 Some(egress) => {
                     let egress = normalized_domains(egress).ok_or(DenyReason::OutOfScope)?;
                     Ok(format!("{uri}|egress={egress}"))
