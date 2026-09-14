@@ -1,0 +1,1362 @@
+diff --git a/agent-os/crates/secrets/src/broker.rs b/agent-os/crates/secrets/src/broker.rs
+new file mode 100644
+index 0000000..631d414
+--- /dev/null
++++ b/agent-os/crates/secrets/src/broker.rs
+@@ -0,0 +1,298 @@
++//! The broker plus the documented in-memory test backend.
++//!
++//! [`SecretsBroker`] evaluates authorization with [`permissions::evaluate`]
++//! before any store call; a denial or approval requirement releases no
++//! material. [`InMemorySecretStore`] carries the backend contract tests and
++//! behaves exactly like the Keychain backend for metadata and raw access.
++
++use std::collections::BTreeMap;
++use std::sync::{Arc, Mutex, MutexGuard};
++
++use async_trait::async_trait;
++use domain::time::Clock;
++use errors::KernelError;
++use errors::codes::{ErrorCode, RetryClass};
++use identity::delegation::{Capability, CapabilityAction, CapabilityFamily};
++use permissions::{Decision, PermissionRequest, ScopedTarget, evaluate};
++use sha2::{Digest, Sha256};
++
++use crate::{
++    ActResult, AuditSink, SecretAuditRecord, SecretMetadata, SecretStore, SecretUseOutcome,
++    SecretUseRequest, SecretValue,
++};
++
++/// The raw-access capability a brokered read or metadata lookup requires.
++const SECRET_USE: Capability = Capability::new(CapabilityFamily::Secret, CapabilityAction::Use);
++
++/// The scoped-operation capability a sign-or-act call requires.
++const SECRET_SIGN_OR_ACT: Capability =
++    Capability::new(CapabilityFamily::Secret, CapabilityAction::SignOrAct);
++
++/// Authorized, audited front door for every secret operation.
++#[derive(Clone)]
++pub struct SecretsBroker {
++    store: Arc<dyn SecretStore>,
++    clock: Arc<dyn Clock>,
++    audit: Arc<dyn AuditSink>,
++}
++
++impl SecretsBroker {
++    /// Builds a broker over one backend, clock, and audit sink.
++    pub fn new(
++        store: Arc<dyn SecretStore>,
++        clock: Arc<dyn Clock>,
++        audit: Arc<dyn AuditSink>,
++    ) -> Self {
++        Self {
++            store,
++            clock,
++            audit,
++        }
++    }
++
++    /// Authorizes and returns metadata for the request's secret; no value is
++    /// read on any decision.
++    pub async fn resolve_metadata(
++        &self,
++        request: &SecretUseRequest,
++    ) -> errors::Result<SecretMetadata> {
++        self.authorize(request, SECRET_USE, "metadata")?;
++        match self.store.metadata(&request.uri).await {
++            Ok(metadata) => {
++                self.record(request, SecretUseOutcome::Allowed);
++                Ok(metadata)
++            }
++            Err(error) => {
++                self.record(request, SecretUseOutcome::Failed);
++                Err(error)
++            }
++        }
++    }
++
++    /// Authorizes and returns the raw value wrapped in a zeroizing container.
++    pub async fn use_secret(&self, request: &SecretUseRequest) -> errors::Result<SecretValue> {
++        self.authorize(request, SECRET_USE, "use")?;
++        match self.store.get(&request.uri).await {
++            Ok(value) => {
++                self.record(request, SecretUseOutcome::Allowed);
++                Ok(value)
++            }
++            Err(error) => {
++                self.record(request, SecretUseOutcome::Failed);
++                Err(error)
++            }
++        }
++    }
++
++    /// Authorizes and requests a scoped signature or action instead of raw
++    /// material.
++    pub async fn sign_or_act(
++        &self,
++        request: &SecretUseRequest,
++        payload: &[u8],
++    ) -> errors::Result<ActResult> {
++        if request.operation.is_empty() {
++            return Err(KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                "sign-or-act requires an operation",
++            ));
++        }
++        self.authorize(request, SECRET_SIGN_OR_ACT, "sign_or_act")?;
++        match self
++            .store
++            .sign_or_act(&request.uri, &request.operation, payload)
++            .await
++        {
++            Ok(result) => {
++                self.record(request, SecretUseOutcome::Acted);
++                Ok(result)
++            }
++            Err(error) => {
++                self.record(request, SecretUseOutcome::Failed);
++                Err(error)
++            }
++        }
++    }
++
++    /// Evaluates one capability for the request, auditing and failing closed
++    /// on every decision but `Allow`. Denial text carries only the stable
++    /// reason token, never target or secret content.
++    fn authorize(
++        &self,
++        request: &SecretUseRequest,
++        capability: Capability,
++        operation: &'static str,
++    ) -> errors::Result<()> {
++        match self.permission_decision(request, capability) {
++            Decision::Allow { .. } => Ok(()),
++            Decision::Deny { reason } => {
++                self.record(request, SecretUseOutcome::Denied);
++                Err(KernelError::new(
++                    ErrorCode::FailedPrecondition,
++                    RetryClass::Never,
++                    format!("secret {operation} denied: {reason}"),
++                ))
++            }
++            Decision::RequireApproval { .. } => {
++                self.record(request, SecretUseOutcome::ApprovalRequired);
++                Err(KernelError::new(
++                    ErrorCode::Conflict,
++                    RetryClass::Never,
++                    format!("secret {operation} requires approval"),
++                ))
++            }
++        }
++    }
++
++    /// Builds and evaluates the pure permission request for one capability.
++    fn permission_decision(&self, request: &SecretUseRequest, capability: Capability) -> Decision {
++        evaluate(&PermissionRequest {
++            principal_id: request.principal_id,
++            actor_id: request.actor_id,
++            run_id: request.run_id,
++            chain: request.chain.clone(),
++            grant_scopes: request.grant_scopes.clone(),
++            tool_capabilities: None,
++            capability,
++            target: ScopedTarget::Secret {
++                uri: request.uri.clone(),
++                egress: request.egress.clone(),
++            },
++            extension_digest: None,
++            config_digest: None,
++            now_ms: self.clock.now_unix_ms(),
++        })
++    }
++
++    /// Reports one terminal outcome with actor, run, uri, and outcome only.
++    fn record(&self, request: &SecretUseRequest, outcome: SecretUseOutcome) {
++        self.audit.record(&SecretAuditRecord {
++            actor_id: request.actor_id,
++            run_id: request.run_id,
++            uri: request.uri.clone(),
++            outcome,
++        });
++    }
++}
++
++/// Audit sink that discards every record; callers with an audit requirement
++/// wire their own sink.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct NullAuditSink;
++
++impl AuditSink for NullAuditSink {
++    fn record(&self, _record: &SecretAuditRecord) {}
++}
++
++/// One stored secret: metadata plus its zeroizing value.
++struct Entry {
++    metadata: SecretMetadata,
++    value: SecretValue,
++}
++
++/// Documented in-memory backend carrying the [`SecretStore`] contract tests.
++///
++/// Values zeroize when the store drops. `sign_or_act` returns a deterministic
++/// scoped reference derived from the stored value, so callers never receive
++/// material.
++#[derive(Default)]
++pub struct InMemorySecretStore {
++    entries: Mutex<BTreeMap<String, Entry>>,
++}
++
++impl InMemorySecretStore {
++    /// Creates an empty store.
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// Inserts or replaces the entry for `metadata.uri`.
++    pub fn insert(&self, metadata: SecretMetadata, value: impl Into<Vec<u8>>) {
++        let mut entries = self.lock();
++        entries.insert(
++            metadata.uri.clone(),
++            Entry {
++                metadata,
++                value: SecretValue::new(value),
++            },
++        );
++    }
++
++    fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Entry>> {
++        self.entries
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner())
++    }
++}
++
++#[async_trait]
++impl SecretStore for InMemorySecretStore {
++    async fn metadata(&self, uri: &str) -> errors::Result<SecretMetadata> {
++        self.lock()
++            .get(uri)
++            .map(|entry| entry.metadata.clone())
++            .ok_or_else(metadata_missing)
++    }
++
++    async fn get(&self, uri: &str) -> errors::Result<SecretValue> {
++        self.lock()
++            .get(uri)
++            .map(|entry| SecretValue::new(entry.value.expose().to_vec()))
++            .ok_or_else(value_missing)
++    }
++
++    async fn sign_or_act(
++        &self,
++        uri: &str,
++        action: &str,
++        payload: &[u8],
++    ) -> errors::Result<ActResult> {
++        let reference = {
++            let entries = self.lock();
++            let entry = entries.get(uri).ok_or_else(value_missing)?;
++            scoped_reference(uri, action, payload, entry.value.expose())
++        };
++        Ok(ActResult { reference })
++    }
++}
++
++/// Builds the stable missing-value error without echoing the uri.
++fn value_missing() -> KernelError {
++    KernelError::new(ErrorCode::NotFound, RetryClass::Never, "secret not found")
++}
++
++/// Builds the stable missing-metadata error without echoing the uri.
++fn metadata_missing() -> KernelError {
++    KernelError::new(
++        ErrorCode::NotFound,
++        RetryClass::Never,
++        "secret metadata not found",
++    )
++}
++
++/// Derives a deterministic scoped reference over the operation and the stored
++/// value; the value never leaves the backend.
++fn scoped_reference(uri: &str, action: &str, payload: &[u8], secret: &[u8]) -> String {
++    let mut hasher = Sha256::new();
++    hasher.update(b"agentd-secrets-sign-or-act-v1");
++    hasher.update(uri.as_bytes());
++    hasher.update(b"\0");
++    hasher.update(action.as_bytes());
++    hasher.update(b"\0");
++    hasher.update((payload.len() as u64).to_be_bytes());
++    hasher.update(payload);
++    hasher.update(secret);
++    format!("scoped:v1:{}", hex_lower(&hasher.finalize()))
++}
++
++/// Renders bytes as lowercase hexadecimal.
++fn hex_lower(bytes: &[u8]) -> String {
++    const HEX: &[u8; 16] = b"0123456789abcdef";
++    let mut text = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        text.push(HEX[(byte >> 4) as usize] as char);
++        text.push(HEX[(byte & 0x0f) as usize] as char);
++    }
++    text
++}
+diff --git a/agent-os/crates/secrets/src/keychain.rs b/agent-os/crates/secrets/src/keychain.rs
+new file mode 100644
+index 0000000..f558fa2
+--- /dev/null
++++ b/agent-os/crates/secrets/src/keychain.rs
+@@ -0,0 +1,179 @@
++//! macOS Keychain backend.
++//!
++//! [`MacOsKeychainSecretStore`] is compiled only on macOS. It calls
++//! `security-framework` directly with byte slices, so secret values are never
++//! interpolated into a command line (R4.7). Each secret owns a generic
++//! password item under `service`/`uri` plus a companion metadata item under
++//! `service`/`uri#metadata`. Backend failures are stable `Unavailable` errors
++//! with no fallback to plaintext.
++
++#[cfg(target_os = "macos")]
++mod macos {
++    use async_trait::async_trait;
++    use errors::KernelError;
++    use errors::codes::{ErrorCode, RetryClass};
++    use security_framework::base::Error as KeychainError;
++    use security_framework::passwords;
++
++    use crate::{ActResult, SecretMetadata, SecretStore, SecretValue};
++
++    /// `errSecItemNotFound` from the Security framework.
++    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
++
++    /// Suffix of the companion metadata item's account.
++    const METADATA_SUFFIX: &str = "#metadata";
++
++    /// Version header stored in the companion metadata item.
++    const METADATA_HEADER: &str = "agentd-secrets-v1";
++
++    /// Keychain-backed secret store scoped to one dedicated service name.
++    #[derive(Clone, Debug)]
++    pub struct MacOsKeychainSecretStore {
++        service: String,
++    }
++
++    impl MacOsKeychainSecretStore {
++        /// Creates a store over a dedicated Keychain service name.
++        pub fn new(service: impl Into<String>) -> Self {
++            Self {
++                service: service.into(),
++            }
++        }
++
++        /// Returns the Keychain service name.
++        pub fn service(&self) -> &str {
++            &self.service
++        }
++
++        /// Creates or replaces the items backing `metadata.uri`.
++        ///
++        /// Secret creation and rotation are outside the broker's scope; this
++        /// is the backend seam operators and opt-in tests use to provision
++        /// their own item before exercising the contract.
++        pub fn put(&self, metadata: &SecretMetadata, value: &[u8]) -> errors::Result<()> {
++            let encoded = encode_metadata(metadata)?;
++            passwords::set_generic_password(&self.service, &metadata.uri, value)
++                .map_err(|_| write_failed("keychain secret write failed"))?;
++            passwords::set_generic_password(
++                &self.service,
++                &metadata_account(&metadata.uri),
++                &encoded,
++            )
++            .map_err(|_| write_failed("keychain metadata write failed"))
++        }
++
++        /// Deletes both items for `uri`; missing items are not an error.
++        pub fn delete(&self, uri: &str) -> errors::Result<()> {
++            for account in [uri.to_string(), metadata_account(uri)] {
++                if let Err(error) = passwords::delete_generic_password(&self.service, &account)
++                    && error.code() != ERR_SEC_ITEM_NOT_FOUND
++                {
++                    return Err(write_failed("keychain delete failed"));
++                }
++            }
++            Ok(())
++        }
++    }
++
++    #[async_trait]
++    impl SecretStore for MacOsKeychainSecretStore {
++        async fn metadata(&self, uri: &str) -> errors::Result<SecretMetadata> {
++            let encoded = passwords::get_generic_password(&self.service, &metadata_account(uri))
++                .map_err(|error| read_failed("secret metadata not found", error))?;
++            decode_metadata(uri, &encoded)
++        }
++
++        async fn get(&self, uri: &str) -> errors::Result<SecretValue> {
++            passwords::get_generic_password(&self.service, uri)
++                .map(SecretValue::new)
++                .map_err(|error| read_failed("secret not found", error))
++        }
++
++        async fn sign_or_act(
++            &self,
++            _uri: &str,
++            _action: &str,
++            _payload: &[u8],
++        ) -> errors::Result<ActResult> {
++            Err(KernelError::new(
++                ErrorCode::FailedPrecondition,
++                RetryClass::Never,
++                "sign-or-act is not supported by the macOS Keychain backend",
++            ))
++        }
++    }
++
++    /// Maps a read failure: absent items are `NotFound`, everything else is a
++    /// stable `Unavailable` with no fallback.
++    fn read_failed(not_found: &'static str, error: KeychainError) -> KernelError {
++        if error.code() == ERR_SEC_ITEM_NOT_FOUND {
++            KernelError::new(ErrorCode::NotFound, RetryClass::Never, not_found)
++        } else {
++            KernelError::new(
++                ErrorCode::Unavailable,
++                RetryClass::Safe,
++                "keychain read failed",
++            )
++        }
++    }
++
++    /// Builds a stable write/delete failure.
++    fn write_failed(message: &'static str) -> KernelError {
++        KernelError::new(ErrorCode::Unavailable, RetryClass::Safe, message)
++    }
++
++    /// Builds the companion metadata item's account name.
++    fn metadata_account(uri: &str) -> String {
++        format!("{uri}{METADATA_SUFFIX}")
++    }
++
++    /// Encodes metadata as `header\nkind\nscope...`.
++    fn encode_metadata(metadata: &SecretMetadata) -> errors::Result<Vec<u8>> {
++        if metadata.kind.contains('\n') || metadata.scopes.iter().any(|scope| scope.contains('\n'))
++        {
++            return Err(KernelError::new(
++                ErrorCode::InvalidArgument,
++                RetryClass::Never,
++                "secret metadata contains a line break",
++            ));
++        }
++        let mut encoded = String::from(METADATA_HEADER);
++        encoded.push('\n');
++        encoded.push_str(&metadata.kind);
++        for scope in &metadata.scopes {
++            encoded.push('\n');
++            encoded.push_str(scope);
++        }
++        Ok(encoded.into_bytes())
++    }
++
++    /// Decodes the companion metadata item; corruption is an internal error.
++    fn decode_metadata(uri: &str, encoded: &[u8]) -> errors::Result<SecretMetadata> {
++        let text = std::str::from_utf8(encoded).map_err(|_| corrupt_metadata())?;
++        let mut lines = text.split('\n');
++        if lines.next() != Some(METADATA_HEADER) {
++            return Err(corrupt_metadata());
++        }
++        let kind = lines.next().ok_or_else(corrupt_metadata)?;
++        if kind.is_empty() {
++            return Err(corrupt_metadata());
++        }
++        Ok(SecretMetadata {
++            uri: uri.to_string(),
++            kind: kind.to_string(),
++            scopes: lines.map(str::to_string).collect(),
++        })
++    }
++
++    /// Builds the stable malformed-metadata error.
++    fn corrupt_metadata() -> KernelError {
++        KernelError::new(
++            ErrorCode::Internal,
++            RetryClass::Never,
++            "keychain metadata item is malformed",
++        )
++    }
++}
++
++#[cfg(target_os = "macos")]
++pub use macos::MacOsKeychainSecretStore;
+diff --git a/agent-os/crates/secrets/src/lib.rs b/agent-os/crates/secrets/src/lib.rs
+index b8b35cc..e0f9a9d 100644
+--- a/agent-os/crates/secrets/src/lib.rs
++++ b/agent-os/crates/secrets/src/lib.rs
+@@ -1,2 +1,185 @@
+-//! Secret broker and secret-store interface.
++//! Secret material leaves the daemon only through an authorized, audited
++//! broker that prefers scoped operations and never renders values
++//! (R4.1-R4.7, P4, N1).
++//!
++//! [`SecretsBroker`] evaluates a [`SecretUseRequest`] with
++//! [`permissions::evaluate`] before any [`SecretStore`] call. A `Deny` or
++//! `RequireApproval` decision releases no material and produces an error that
++//! carries no secret content; an `Allow` decision returns raw bytes only as a
++//! zeroizing [`SecretValue`] whose `Debug` is redacted. Every outcome is
++//! reported to the injected [`AuditSink`] as actor, run, uri, and outcome
++//! only.
++//!
++//! The documented test backend is [`InMemorySecretStore`]; on macOS,
++//! [`MacOsKeychainSecretStore`] wraps `security-framework` directly (no shell
++//! interpolation of values). There is no fallback from a failing backend to
++//! plaintext.
+ #![forbid(unsafe_code)]
++
++pub mod broker;
++pub mod keychain;
++
++use std::fmt;
++
++use async_trait::async_trait;
++use domain::ids::{ActorId, PrincipalId, RunId};
++use identity::delegation::DelegationChain;
++use observability::{Classification, Classified};
++use permissions::GrantScope;
++use zeroize::Zeroizing;
++
++pub use broker::{InMemorySecretStore, NullAuditSink, SecretsBroker};
++#[cfg(target_os = "macos")]
++pub use keychain::MacOsKeychainSecretStore;
++
++/// Metadata describing one secret without exposing its value.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct SecretMetadata {
++    /// Resource URI identifying the secret.
++    pub uri: String,
++    /// Backend-defined kind (for example `api-key`).
++    pub kind: String,
++    /// Opaque scope labels attached to the secret.
++    pub scopes: Vec<String>,
++}
++
++/// Raw secret bytes that zeroize on drop and never render.
++///
++/// The bytes are reachable only through [`SecretValue::expose`]; `Debug`
++/// prints a redacted marker, and there is no `Display` or serialization path.
++pub struct SecretValue(Zeroizing<Vec<u8>>);
++
++impl SecretValue {
++    /// Wraps raw bytes in a zeroizing container.
++    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
++        Self(Zeroizing::new(bytes.into()))
++    }
++
++    /// The only access path to the raw bytes.
++    pub fn expose(&self) -> &[u8] {
++        &self.0
++    }
++}
++
++impl fmt::Debug for SecretValue {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("[REDACTED]")
++    }
++}
++
++/// The scoped result of a sign-or-act operation: an opaque reference, never
++/// the material that produced it.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct ActResult {
++    /// Backend reference for the produced signature or action.
++    pub reference: String,
++}
++
++/// One backend that can hold secrets. Access is brokered; stores never see a
++/// [`PermissionRequest`](permissions::PermissionRequest).
++#[async_trait]
++pub trait SecretStore: Send + Sync {
++    /// Returns metadata for `uri` without touching the value.
++    async fn metadata(&self, uri: &str) -> errors::Result<SecretMetadata>;
++
++    /// Returns the raw value for `uri`.
++    async fn get(&self, uri: &str) -> errors::Result<SecretValue>;
++
++    /// Performs `action` over `payload` inside the backend, returning a scoped
++    /// reference instead of material.
++    async fn sign_or_act(
++        &self,
++        uri: &str,
++        action: &str,
++        payload: &[u8],
++    ) -> errors::Result<ActResult>;
++}
++
++/// Everything the broker needs to authorize one secret operation.
++///
++/// `grant_scopes` carries the grant rows for the chain's grants, loaded by the
++/// caller from `capability_grants` exactly as the permission engine expects.
++/// `operation` is the provider action for sign-or-act (for example `sign`);
++/// raw and metadata access derive their capability from the method called.
++#[derive(Clone, Debug)]
++pub struct SecretUseRequest {
++    /// Principal on whose behalf the operation runs.
++    pub principal_id: PrincipalId,
++    /// Actor exercising the authority.
++    pub actor_id: ActorId,
++    /// Run context when the operation belongs to a run.
++    pub run_id: Option<RunId>,
++    /// Loaded delegation chain from root to tip.
++    pub chain: DelegationChain,
++    /// Grant rows loaded for the chain's grants.
++    pub grant_scopes: Vec<GrantScope>,
++    /// Secret resource URI the operation targets.
++    pub uri: String,
++    /// Optional destinations the material may flow to.
++    pub egress: Option<Vec<String>>,
++    /// Provider action for sign-or-act operations.
++    pub operation: String,
++}
++
++/// The terminal outcome of one brokered secret operation.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum SecretUseOutcome {
++    /// Authorization allowed raw or metadata access.
++    Allowed,
++    /// Authorization allowed a scoped sign-or-act operation.
++    Acted,
++    /// Authorization denied the operation.
++    Denied,
++    /// Authorization requires an operator approval first.
++    ApprovalRequired,
++    /// The operation was authorized but the backend failed.
++    Failed,
++}
++
++impl SecretUseOutcome {
++    /// Returns the stable lowercase token for this outcome.
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Allowed => "allowed",
++            Self::Acted => "acted",
++            Self::Denied => "denied",
++            Self::ApprovalRequired => "approval_required",
++            Self::Failed => "failed",
++        }
++    }
++}
++
++impl fmt::Display for SecretUseOutcome {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(self.as_str())
++    }
++}
++
++/// One audit record: actor, run, uri, and outcome only, never a value.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct SecretAuditRecord {
++    /// Actor that exercised the request.
++    pub actor_id: ActorId,
++    /// Run context when the operation belonged to a run.
++    pub run_id: Option<RunId>,
++    /// Secret resource URI the operation targeted.
++    pub uri: String,
++    /// Terminal outcome of the operation.
++    pub outcome: SecretUseOutcome,
++}
++
++impl Classified for SecretAuditRecord {
++    fn classification(&self) -> Classification {
++        Classification::Internal
++    }
++}
++
++/// Receives one audit record per brokered secret operation.
++///
++/// Production wiring sends these records to the observability substrate as
++/// structured logs; tests capture them directly. The broker never places
++/// secret material in a record.
++pub trait AuditSink: Send + Sync {
++    /// Records one completed operation outcome.
++    fn record(&self, record: &SecretAuditRecord);
++}
+diff --git a/agent-os/crates/secrets/tests/broker.rs b/agent-os/crates/secrets/tests/broker.rs
+new file mode 100644
+index 0000000..62be2d2
+--- /dev/null
++++ b/agent-os/crates/secrets/tests/broker.rs
+@@ -0,0 +1,503 @@
++//! Broker acceptance tests: redaction, authorization-before-access, scope
++//! narrowing, joint-egress approval, sign-or-act preference, the in-memory
++//! backend contract, and audit content (R4.1-R4.6, P4, N1).
++//!
++//! Every case drives `SecretsBroker` over a counting in-memory backend, so a
++//! test can assert that a denied or approval-bound request never reaches the
++//! store at all. Audit records are captured through a recording sink and must
++//! carry actor, run, uri, and outcome only.
++
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::{Arc, Mutex};
++
++use async_trait::async_trait;
++use domain::ids::{ActorId, CapabilityGrantId, DelegationChainId, PrincipalId, RunId};
++use errors::codes::{ErrorCode, RetryClass};
++use identity::delegation::{Capability, CapabilityAction, CapabilityFamily, DelegationChain, Hop};
++use permissions::{GrantScope, ScopedTarget};
++use secrets::broker::InMemorySecretStore;
++use secrets::{
++    ActResult, AuditSink, SecretAuditRecord, SecretMetadata, SecretStore, SecretUseOutcome,
++    SecretUseRequest, SecretValue, SecretsBroker,
++};
++use testkit::clock::TestClock;
++use testkit::ids::DeterministicIds;
++
++const SEED_MS: i64 = 1_700_000_000_000;
++const SECRET_URI: &str = "secret://prod/api-key";
++const SECRET_TEXT: &str = "super-secret-material-xyz";
++const SECRET_BYTES: &[u8] = SECRET_TEXT.as_bytes();
++
++const SECRET_USE: Capability = Capability::new(CapabilityFamily::Secret, CapabilityAction::Use);
++const SECRET_SIGN_OR_ACT: Capability =
++    Capability::new(CapabilityFamily::Secret, CapabilityAction::SignOrAct);
++const NETWORK_CONNECT: Capability =
++    Capability::new(CapabilityFamily::Network, CapabilityAction::Connect);
++
++/// Deterministic identifiers shared by one test case.
++struct Fixtures {
++    ids: DeterministicIds,
++    principal: PrincipalId,
++    actor: ActorId,
++    run: RunId,
++    chain_id: DelegationChainId,
++}
++
++impl Fixtures {
++    fn new() -> Self {
++        let ids = DeterministicIds::new(SEED_MS);
++        Self {
++            principal: PrincipalId::new(&ids),
++            actor: ActorId::new(&ids),
++            run: RunId::new(&ids),
++            chain_id: DelegationChainId::new(&ids),
++            ids,
++        }
++    }
++
++    fn grant_ids(&self, count: usize) -> Vec<CapabilityGrantId> {
++        (0..count)
++            .map(|_| CapabilityGrantId::new(&self.ids))
++            .collect()
++    }
++}
++
++/// Builds a one-hop chain plus matching grant rows for `entries`.
++fn held(
++    fixtures: &Fixtures,
++    entries: &[(Capability, Option<ScopedTarget>)],
++) -> (DelegationChain, Vec<GrantScope>) {
++    let grant_ids = fixtures.grant_ids(entries.len());
++    let capabilities = entries.iter().map(|(capability, _)| *capability).collect();
++    let grant_scopes = entries
++        .iter()
++        .zip(&grant_ids)
++        .map(|((capability, scope), grant_id)| GrantScope {
++            grant_id: *grant_id,
++            capability: *capability,
++            scope: scope.clone(),
++            expires_at_ms: None,
++        })
++        .collect();
++    let hop = Hop {
++        hop_index: 0,
++        actor_id: fixtures.actor,
++        run_id: Some(fixtures.run),
++        grant_ids,
++        capabilities,
++    };
++    (
++        DelegationChain {
++            chain_id: fixtures.chain_id,
++            hops: vec![hop],
++        },
++        grant_scopes,
++    )
++}
++
++fn request(
++    fixtures: &Fixtures,
++    chain: DelegationChain,
++    grant_scopes: Vec<GrantScope>,
++    uri: &str,
++    egress: Option<Vec<String>>,
++    operation: &str,
++) -> SecretUseRequest {
++    SecretUseRequest {
++        principal_id: fixtures.principal,
++        actor_id: fixtures.actor,
++        run_id: Some(fixtures.run),
++        chain,
++        grant_scopes,
++        uri: uri.to_string(),
++        egress,
++        operation: operation.to_string(),
++    }
++}
++
++fn metadata(uri: &str) -> SecretMetadata {
++    SecretMetadata {
++        uri: uri.to_string(),
++        kind: "api-key".to_string(),
++        scopes: vec!["read".to_string()],
++    }
++}
++
++/// In-memory backend wrapped with call counters for authorization-order
++/// assertions.
++struct CountingStore {
++    inner: InMemorySecretStore,
++    metadata_calls: AtomicUsize,
++    get_calls: AtomicUsize,
++    act_calls: AtomicUsize,
++}
++
++impl CountingStore {
++    fn seeded(metadata: SecretMetadata, value: &[u8]) -> Self {
++        let inner = InMemorySecretStore::new();
++        inner.insert(metadata, value);
++        Self {
++            inner,
++            metadata_calls: AtomicUsize::new(0),
++            get_calls: AtomicUsize::new(0),
++            act_calls: AtomicUsize::new(0),
++        }
++    }
++
++    fn calls(&self) -> (usize, usize, usize) {
++        (
++            self.metadata_calls.load(Ordering::SeqCst),
++            self.get_calls.load(Ordering::SeqCst),
++            self.act_calls.load(Ordering::SeqCst),
++        )
++    }
++}
++
++#[async_trait]
++impl SecretStore for CountingStore {
++    async fn metadata(&self, uri: &str) -> errors::Result<SecretMetadata> {
++        self.metadata_calls.fetch_add(1, Ordering::SeqCst);
++        self.inner.metadata(uri).await
++    }
++
++    async fn get(&self, uri: &str) -> errors::Result<SecretValue> {
++        self.get_calls.fetch_add(1, Ordering::SeqCst);
++        self.inner.get(uri).await
++    }
++
++    async fn sign_or_act(
++        &self,
++        uri: &str,
++        action: &str,
++        payload: &[u8],
++    ) -> errors::Result<ActResult> {
++        self.act_calls.fetch_add(1, Ordering::SeqCst);
++        self.inner.sign_or_act(uri, action, payload).await
++    }
++}
++
++#[derive(Default)]
++struct RecordingSink {
++    records: Mutex<Vec<SecretAuditRecord>>,
++}
++
++impl RecordingSink {
++    fn records(&self) -> Vec<SecretAuditRecord> {
++        self.records
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner())
++            .clone()
++    }
++}
++
++impl AuditSink for RecordingSink {
++    fn record(&self, record: &SecretAuditRecord) {
++        self.records
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner())
++            .push(record.clone());
++    }
++}
++
++fn broker_with(store: Arc<CountingStore>) -> (SecretsBroker, Arc<RecordingSink>) {
++    let audit = Arc::new(RecordingSink::default());
++    let broker = SecretsBroker::new(store, Arc::new(TestClock::new(SEED_MS)), audit.clone());
++    (broker, audit)
++}
++
++#[tokio::test]
++async fn debug_and_error_paths_never_render_secret_material() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, _) = broker_with(store.clone());
++
++    let value = store.inner.get(SECRET_URI).await.expect("seeded value");
++    assert_eq!(format!("{value:?}"), "[REDACTED]");
++
++    let (chain, grants) = held(&fixtures, &[]);
++    let denied = request(&fixtures, chain, grants, SECRET_URI, None, "read");
++    let error = broker.use_secret(&denied).await.expect_err("denied");
++    assert!(!error.to_string().contains(SECRET_TEXT));
++    assert!(!format!("{error:?}").contains(SECRET_TEXT));
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
++    let missing = request(
++        &fixtures,
++        chain,
++        grants,
++        "secret://prod/absent",
++        None,
++        "read",
++    );
++    let error = broker.use_secret(&missing).await.expect_err("missing");
++    assert_eq!(error.code(), ErrorCode::NotFound);
++    assert!(!error.to_string().contains(SECRET_TEXT));
++    assert!(!format!("{error:?}").contains(SECRET_TEXT));
++}
++
++#[tokio::test]
++async fn unauthorized_use_is_denied_before_the_store_is_touched() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, audit) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(NETWORK_CONNECT, None)]);
++    let denied = request(&fixtures, chain, grants, SECRET_URI, None, "read");
++    let error = broker.use_secret(&denied).await.expect_err("denied");
++
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(store.calls(), (0, 0, 0));
++    let records = audit.records();
++    assert_eq!(records.len(), 1);
++    assert_eq!(records[0].outcome, SecretUseOutcome::Denied);
++    assert!(!format!("{records:?}").contains(SECRET_TEXT));
++}
++
++#[tokio::test]
++async fn joint_egress_requires_approval_and_releases_no_material() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, audit) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None), (NETWORK_CONNECT, None)]);
++    let use_request = request(
++        &fixtures,
++        chain,
++        grants,
++        SECRET_URI,
++        Some(vec!["*".to_string()]),
++        "read",
++    );
++    let error = broker
++        .use_secret(&use_request)
++        .await
++        .expect_err("approval required");
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(error.retry_class(), RetryClass::Never);
++    assert_eq!(store.calls(), (0, 0, 0));
++    let records = audit.records();
++    assert_eq!(records.len(), 1);
++    assert_eq!(records[0].outcome, SecretUseOutcome::ApprovalRequired);
++    assert!(!format!("{records:?}").contains(SECRET_TEXT));
++}
++
++#[tokio::test]
++async fn unbounded_egress_without_network_authority_requires_approval() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, _) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
++    let use_request = request(
++        &fixtures,
++        chain,
++        grants,
++        SECRET_URI,
++        Some(Vec::new()),
++        "read",
++    );
++    let error = broker
++        .use_secret(&use_request)
++        .await
++        .expect_err("approval required");
++
++    assert_eq!(error.code(), ErrorCode::Conflict);
++    assert_eq!(store.calls(), (0, 0, 0));
++}
++
++#[tokio::test]
++async fn scoped_grant_covers_child_secret_uris_without_widening() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, _) = broker_with(store.clone());
++
++    let prefix = Some(ScopedTarget::Secret {
++        uri: "secret://prod".to_string(),
++        egress: None,
++    });
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, prefix)]);
++    let allowed = request(&fixtures, chain, grants, SECRET_URI, None, "read");
++    let value = broker.use_secret(&allowed).await.expect("authorized");
++    assert_eq!(value.expose(), SECRET_BYTES);
++
++    let foreign = Some(ScopedTarget::Secret {
++        uri: "secret://staging".to_string(),
++        egress: None,
++    });
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, foreign)]);
++    let denied = request(&fixtures, chain, grants, SECRET_URI, None, "read");
++    let error = broker.use_secret(&denied).await.expect_err("out of scope");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(store.calls(), (0, 1, 0));
++}
++
++#[tokio::test]
++async fn bounded_egress_below_the_joint_rule_is_allowed() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, _) = broker_with(store.clone());
++
++    let scope = Some(ScopedTarget::Secret {
++        uri: "secret://prod".to_string(),
++        egress: Some(vec!["api.example.com".to_string()]),
++    });
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, scope)]);
++    let allowed = request(
++        &fixtures,
++        chain,
++        grants,
++        SECRET_URI,
++        Some(vec!["api.example.com".to_string()]),
++        "read",
++    );
++    let value = broker.use_secret(&allowed).await.expect("authorized");
++    assert_eq!(value.expose(), SECRET_BYTES);
++    assert_eq!(store.calls(), (0, 1, 0));
++}
++
++#[tokio::test]
++async fn sign_or_act_is_preferred_over_raw_material() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, audit) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None), (SECRET_SIGN_OR_ACT, None)]);
++    let act_request = request(&fixtures, chain, grants, SECRET_URI, None, "sign");
++    let result = broker
++        .sign_or_act(&act_request, b"payload")
++        .await
++        .expect("authorized");
++
++    assert!(!result.reference.is_empty());
++    assert!(!result.reference.contains(SECRET_TEXT));
++    assert_eq!(store.calls(), (0, 0, 1));
++    let records = audit.records();
++    assert_eq!(records.len(), 1);
++    assert_eq!(records[0].outcome, SecretUseOutcome::Acted);
++}
++
++#[tokio::test]
++async fn sign_or_act_capability_does_not_grant_raw_access() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, _) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_SIGN_OR_ACT, None)]);
++    let raw = request(
++        &fixtures,
++        chain.clone(),
++        grants.clone(),
++        SECRET_URI,
++        None,
++        "read",
++    );
++    let error = broker.use_secret(&raw).await.expect_err("denied");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(store.calls(), (0, 0, 0));
++
++    let act_request = request(&fixtures, chain, grants, SECRET_URI, None, "sign");
++    let result = broker
++        .sign_or_act(&act_request, b"payload")
++        .await
++        .expect("authorized");
++    assert!(!result.reference.is_empty());
++    assert_eq!(store.calls(), (0, 0, 1));
++}
++
++#[tokio::test]
++async fn in_memory_store_implements_the_shared_contract() {
++    let store = InMemorySecretStore::new();
++    store.insert(metadata(SECRET_URI), SECRET_BYTES);
++
++    let loaded = store.metadata(SECRET_URI).await.expect("metadata");
++    assert_eq!(loaded, metadata(SECRET_URI));
++
++    let value = store.get(SECRET_URI).await.expect("value");
++    assert_eq!(value.expose(), SECRET_BYTES);
++    assert_eq!(format!("{value:?}"), "[REDACTED]");
++
++    let missing = store
++        .get("secret://prod/absent")
++        .await
++        .expect_err("missing value");
++    assert_eq!(missing.code(), ErrorCode::NotFound);
++    let missing_metadata = store
++        .metadata("secret://prod/absent")
++        .await
++        .expect_err("missing metadata");
++    assert_eq!(missing_metadata.code(), ErrorCode::NotFound);
++
++    let first = store
++        .sign_or_act(SECRET_URI, "sign", b"payload")
++        .await
++        .expect("act");
++    let again = store
++        .sign_or_act(SECRET_URI, "sign", b"payload")
++        .await
++        .expect("act");
++    let other = store
++        .sign_or_act(SECRET_URI, "decrypt", b"payload")
++        .await
++        .expect("act");
++    assert_eq!(first, again);
++    assert_ne!(first, other);
++    assert!(!first.reference.contains(SECRET_TEXT));
++}
++
++#[tokio::test]
++async fn audit_records_carry_identity_uri_and_outcome_only() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, audit) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
++    let allowed = request(&fixtures, chain, grants, SECRET_URI, None, "read");
++    broker.use_secret(&allowed).await.expect("authorized");
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
++    let missing = request(
++        &fixtures,
++        chain,
++        grants,
++        "secret://prod/absent",
++        None,
++        "read",
++    );
++    let error = broker.use_secret(&missing).await.expect_err("missing");
++    assert_eq!(error.code(), ErrorCode::NotFound);
++
++    let records = audit.records();
++    assert_eq!(records.len(), 2);
++    assert_eq!(records[0].actor_id, fixtures.actor);
++    assert_eq!(records[0].run_id, Some(fixtures.run));
++    assert_eq!(records[0].uri, SECRET_URI);
++    assert_eq!(records[0].outcome, SecretUseOutcome::Allowed);
++    assert_eq!(records[1].outcome, SecretUseOutcome::Failed);
++    let rendered = format!("{records:?}");
++    assert!(rendered.contains(SECRET_URI));
++    assert!(!rendered.contains(SECRET_TEXT));
++}
++
++#[tokio::test]
++async fn metadata_resolution_goes_through_authorization() {
++    let fixtures = Fixtures::new();
++    let store = Arc::new(CountingStore::seeded(metadata(SECRET_URI), SECRET_BYTES));
++    let (broker, audit) = broker_with(store.clone());
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_SIGN_OR_ACT, None)]);
++    let denied = request(&fixtures, chain, grants, SECRET_URI, None, "metadata");
++    let error = broker.resolve_metadata(&denied).await.expect_err("denied");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert_eq!(store.calls(), (0, 0, 0));
++
++    let (chain, grants) = held(&fixtures, &[(SECRET_USE, None)]);
++    let allowed = request(&fixtures, chain, grants, SECRET_URI, None, "metadata");
++    let loaded = broker.resolve_metadata(&allowed).await.expect("authorized");
++    assert_eq!(loaded, metadata(SECRET_URI));
++    assert_eq!(store.calls(), (1, 0, 0));
++    let records = audit.records();
++    assert_eq!(records[0].outcome, SecretUseOutcome::Denied);
++    assert_eq!(records[1].outcome, SecretUseOutcome::Allowed);
++}
+diff --git a/agent-os/crates/secrets/tests/keychain.rs b/agent-os/crates/secrets/tests/keychain.rs
+new file mode 100644
+index 0000000..d694fba
+--- /dev/null
++++ b/agent-os/crates/secrets/tests/keychain.rs
+@@ -0,0 +1,167 @@
++//! Opt-in macOS Keychain integration tests (R4.6, R4.7).
++//!
++//! These tests run only when `AGENTD_KEYCHAIN_TEST=1`; otherwise each one
++//! prints a note and returns, so CI stays deterministic and the in-memory
++//! backend remains the documented contract carrier. When enabled they use a
++//! dedicated service name and create and delete their own items, even on
++//! failure.
++
++#![cfg(target_os = "macos")]
++
++use std::sync::Arc;
++
++use domain::ids::{ActorId, CapabilityGrantId, DelegationChainId, PrincipalId, RunId};
++use errors::codes::ErrorCode;
++use identity::delegation::{Capability, CapabilityAction, CapabilityFamily, DelegationChain, Hop};
++use permissions::GrantScope;
++use secrets::{
++    MacOsKeychainSecretStore, NullAuditSink, SecretMetadata, SecretStore, SecretUseRequest,
++    SecretsBroker,
++};
++use testkit::clock::TestClock;
++use testkit::ids::DeterministicIds;
++
++const SEED_MS: i64 = 1_700_000_000_000;
++const SERVICE: &str = "dev.agentd.secrets.sec004.opt-in";
++const SECRET_USE: Capability = Capability::new(CapabilityFamily::Secret, CapabilityAction::Use);
++
++/// Reports whether the opt-in gate is enabled, noting the skip otherwise.
++fn keychain_enabled() -> bool {
++    if std::env::var("AGENTD_KEYCHAIN_TEST").as_deref() == Ok("1") {
++        true
++    } else {
++        println!(
++            "AGENTD_KEYCHAIN_TEST is not set to 1; skipping the opt-in Keychain integration test"
++        );
++        false
++    }
++}
++
++/// Deletes the test's own item when dropped, even on assertion failure.
++struct ItemGuard {
++    store: MacOsKeychainSecretStore,
++    uri: String,
++}
++
++impl Drop for ItemGuard {
++    fn drop(&mut self) {
++        let _ = self.store.delete(&self.uri);
++    }
++}
++
++fn metadata(uri: &str) -> SecretMetadata {
++    SecretMetadata {
++        uri: uri.to_string(),
++        kind: "api-key".to_string(),
++        scopes: vec!["read".to_string()],
++    }
++}
++
++#[tokio::test]
++async fn keychain_round_trip_matches_the_shared_contract() {
++    if !keychain_enabled() {
++        return;
++    }
++    let store = MacOsKeychainSecretStore::new(SERVICE);
++    let uri = "secret://agentd-sec004-contract/api-key";
++    store.delete(uri).expect("pre-test cleanup");
++    let guard = ItemGuard {
++        store: store.clone(),
++        uri: uri.to_string(),
++    };
++    let value = b"keychain-contract-value";
++    store.put(&metadata(uri), value).expect("item is created");
++
++    let loaded = store.get(uri).await.expect("authorized read");
++    assert_eq!(loaded.expose(), value);
++    assert_eq!(format!("{loaded:?}"), "[REDACTED]");
++
++    let loaded_metadata = store.metadata(uri).await.expect("metadata");
++    assert_eq!(loaded_metadata, metadata(uri));
++
++    let unsupported = store
++        .sign_or_act(uri, "sign", b"payload")
++        .await
++        .expect_err("sign-or-act is not supported by the Keychain backend");
++    assert_eq!(unsupported.code(), ErrorCode::FailedPrecondition);
++
++    guard.store.delete(uri).expect("item is deleted");
++    let missing = store.get(uri).await.expect_err("deleted item");
++    assert_eq!(missing.code(), ErrorCode::NotFound);
++    let missing_metadata = store.metadata(uri).await.expect_err("deleted item");
++    assert_eq!(missing_metadata.code(), ErrorCode::NotFound);
++}
++
++#[tokio::test]
++async fn broker_reads_authorized_material_from_the_keychain() {
++    if !keychain_enabled() {
++        return;
++    }
++    let store = MacOsKeychainSecretStore::new(SERVICE);
++    let uri = "secret://agentd-sec004-broker/token";
++    store.delete(uri).expect("pre-test cleanup");
++    let _guard = ItemGuard {
++        store: store.clone(),
++        uri: uri.to_string(),
++    };
++    let value = b"broker-keychain-value";
++    store.put(&metadata(uri), value).expect("item is created");
++
++    let ids = DeterministicIds::new(SEED_MS);
++    let principal = PrincipalId::new(&ids);
++    let actor = ActorId::new(&ids);
++    let run = RunId::new(&ids);
++    let chain_id = DelegationChainId::new(&ids);
++    let grant_id = CapabilityGrantId::new(&ids);
++    let chain = DelegationChain {
++        chain_id,
++        hops: vec![Hop {
++            hop_index: 0,
++            actor_id: actor,
++            run_id: Some(run),
++            grant_ids: vec![grant_id],
++            capabilities: vec![SECRET_USE],
++        }],
++    };
++    let grants = vec![GrantScope {
++        grant_id,
++        capability: SECRET_USE,
++        scope: None,
++        expires_at_ms: None,
++    }];
++    let broker = SecretsBroker::new(
++        Arc::new(store),
++        Arc::new(TestClock::new(SEED_MS)),
++        Arc::new(NullAuditSink),
++    );
++    let allowed = SecretUseRequest {
++        principal_id: principal,
++        actor_id: actor,
++        run_id: Some(run),
++        chain,
++        grant_scopes: grants,
++        uri: uri.to_string(),
++        egress: None,
++        operation: "read".to_string(),
++    };
++    let loaded = broker.use_secret(&allowed).await.expect("authorized");
++    assert_eq!(loaded.expose(), value);
++
++    let denied = SecretUseRequest {
++        chain: DelegationChain {
++            chain_id,
++            hops: vec![Hop {
++                hop_index: 0,
++                actor_id: actor,
++                run_id: Some(run),
++                grant_ids: Vec::new(),
++                capabilities: Vec::new(),
++            }],
++        },
++        grant_scopes: Vec::new(),
++        ..allowed
++    };
++    let error = broker.use_secret(&denied).await.expect_err("denied");
++    assert_eq!(error.code(), ErrorCode::FailedPrecondition);
++    assert!(!error.to_string().contains("broker-keychain-value"));
++}

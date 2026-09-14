@@ -176,8 +176,8 @@
 
 ### Task SEC-004: Secrets broker and macOS Keychain backend
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-sec004
 - depends_on: SEC-003
 - files: `agent-os/crates/secrets/src/lib.rs`, `agent-os/crates/secrets/src/broker.rs`, `agent-os/crates/secrets/src/keychain.rs`, `agent-os/crates/secrets/tests/broker.rs`, `agent-os/crates/secrets/tests/keychain.rs`
 - requirements: R4.1, R4.2, R4.3, R4.4, R4.5, R4.6, R4.7, P4, N1, N2

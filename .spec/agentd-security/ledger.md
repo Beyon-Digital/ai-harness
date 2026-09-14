@@ -23,3 +23,7 @@
 - 2026-09-14T09:33:51Z SEC-003 -> review (@agent-sec003)
 - 2026-09-14T09:56:31Z SEC-003 -> done (@agent-sec003)
 - 2026-09-14T09:56:33Z SEC-003 approved. Deferred minor: catalogued ApprovalResolved (produced_by RespondApproval) is not staged; terminal-wins-over-expiry; Responder.device_id optional type vs NOT NULL. 4/5 done; SEC-004 dispatched.
+- 2026-09-14T09:57:19Z SEC-004 -> claimed (@agent-sec004)
+- 2026-09-14T09:57:22Z SEC-004 -> in_progress (@agent-sec004)
+- 2026-09-14T12:38:34Z SEC-004 -> review (@agent-sec004)
+- 2026-09-14T12:55:52Z SEC-004 -> done (@agent-sec004)
