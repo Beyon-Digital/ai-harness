@@ -66,8 +66,8 @@
 
 ### Task SEC-001: Principals, actors, delegation chains, and grant lineage
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-sec001
 - depends_on: SEC-000
 - files: `agent-os/crates/identity/src/lib.rs`, `agent-os/crates/identity/src/delegation.rs`, `agent-os/crates/kernel-store-sqlite/src/repos/security.rs`, `agent-os/crates/identity/tests/delegation.rs`
 - requirements: R1.1, R1.2, R1.3, R1.4, R1.5, P1, N1
