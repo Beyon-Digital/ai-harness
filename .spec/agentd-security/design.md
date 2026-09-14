@@ -123,17 +123,34 @@ pub struct ApprovalDraft {
     pub nonce: String,
 }
 
+pub struct GrantScope {
+    pub grant_id: CapabilityGrantId,
+    pub capability: Capability,
+    /// `None` means the grant is unscoped for this capability.
+    pub scope: Option⟨ScopedTarget⟩,
+    pub expires_at_ms: Option⟨i64⟩,
+}
+
 pub struct PermissionRequest {
     pub principal_id: PrincipalId,
     pub actor_id: ActorId,
     pub run_id: Option⟨RunId⟩,
     pub chain: DelegationChain,
+    /// Loaded from `capability_grants` (grant id, capability, scope, expiry).
+    pub grant_scopes: Vec⟨GrantScope⟩,
     pub tool_capabilities: Option⟨Vec⟨Capability⟩⟩,
     pub capability: Capability,
     pub target: ScopedTarget,
+    pub extension_digest: Option⟨String⟩,
+    pub config_digest: Option⟨String⟩,
     pub now_ms: i64,
 }
 
+/// Allow requires a chain grant whose capability matches AND whose scope covers
+/// the target (unscoped grants allow any target) AND that has not expired.
+/// `Allow { grant_refs }` cites exactly the backing grants.
+/// `Deny { OutOfScope }` when a matching grant exists but no scope covers the target.
+/// `Deny { ExpiredGrant }` when the only matching grants have expired.
 pub fn evaluate(request: &PermissionRequest) -> Decision;
 ```
 
@@ -292,6 +309,8 @@ migration. **Backward compatible:** n/a.
 | D6 | Raw secrets are `zeroize`-backed with redacted Debug/Display | plain `Vec⟨u8⟩` | prevents accidental rendering and residue | R4.3 |
 | D7 | Keychain via `security-framework`, target-gated | shelling to `security` | no argv interpolation of secrets | R4.7 |
 | D8 | Audit is structured logs, not a new event | adding `SecretUsed` | catalogue is locked | R4.5 |
+| D9 | Callers supply `grant_scopes` loaded from `capability_grants`; the engine stays pure | permissions depending on the store | scope enforcement lives in `evaluate` while the engine remains testable without I/O | R2.3 |
+| D10 | `ApprovalDraft` is a template; `approvals::create_request` assigns the nonce and canonicalizes | engine-side randomness would break purity | `evaluate` stays deterministic | R2.4, R3.1 |
 
 ## Requirements traceability
 

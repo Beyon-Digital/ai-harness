@@ -1,0 +1,1720 @@
+diff --git a/agent-os/crates/permissions/src/lib.rs b/agent-os/crates/permissions/src/lib.rs
+index 60be3ba..881168b 100644
+--- a/agent-os/crates/permissions/src/lib.rs
++++ b/agent-os/crates/permissions/src/lib.rs
+@@ -1,9 +1,11 @@
+ //! Capability catalogue, scoped targets, and the deterministic permission
+ //! engine shared by every component that authorizes an operation.
+ #![forbid(unsafe_code)]
+ 
+ pub mod capabilities;
+ pub mod policy;
+ 
+ pub use identity::delegation::{Capability, CapabilityAction, CapabilityFamily};
+-pub use policy::{ApprovalDraft, Decision, DenyReason, PermissionRequest, ScopedTarget, evaluate};
++pub use policy::{
++    ApprovalDraft, Decision, DenyReason, GrantScope, PermissionRequest, ScopedTarget, evaluate,
++};
+diff --git a/agent-os/crates/permissions/src/policy.rs b/agent-os/crates/permissions/src/policy.rs
+index 2db928e..b4d6167 100644
+--- a/agent-os/crates/permissions/src/policy.rs
++++ b/agent-os/crates/permissions/src/policy.rs
+@@ -9,48 +9,72 @@
+ //!   away (`AncestorConstraint`), and a structurally invalid chain fails
+ //!   closed as `NoGrant`;
+ //! - the tool's allow list, when present, is intersected on top of the chain
+ //!   (`ToolRestriction`), so a privileged helper cannot be confused into
+ //!   exceeding its caller's grants;
+ //! - the scoped target must match the capability's family and pass the scope
+ //!   rules below (`OutOfScope`).
+ //!
++//! Grant scopes (R2.3, D9): callers load [`GrantScope`] rows from
++//! `capability_grants` for the grants their chain cites. `Allow` requires at
++//! least one grant that the chain's tip holds whose capability matches the
++//! request, that has not expired, and that either is unscoped (`scope: None`,
++//! which allows any well-formed target) or whose scope covers the request
++//! target. `Allow { grant_refs }` cites exactly the covering grants. Matching
++//! grants that are all unexpired but none covering are `OutOfScope`; when
++//! every matching grant has lapsed the reason is `ExpiredGrant`; when the
++//! caller supplies no matching grant row at all the request fails closed as
++//! `NoGrant`.
++//!
+ //! Scope rules:
+ //!
+ //! - workspace: the `uri` root is normalized (canonical scheme, no `.` or
+ //!   `..` segments); an optional `path` is joined to the root, or, when it is
+-//!   itself absolute (`scheme://`), prefix-matched against the root. Traversal
+-//!   and foreign roots are rejected. Path comparison is segment-aware;
+-//!   workspace paths are case-sensitive.
++//!   itself absolute (`scheme://`), prefix-matched against the root. A grant
++//!   scope covers a target when the normalized scopes are equal or the grant
++//!   scope is a segment prefix of the target path. Traversal and foreign roots
++//!   are rejected. Path comparison is segment-aware; workspace paths are
++//!   case-sensitive.
+ //! - network: every domain is lowercased and validated as a DNS name. `*`
+ //!   matches any host; a token that begins with `.` (for example
+ //!   `.example.com`) is the documented suffix rule and matches the named
+ //!   domain and all of its subdomains; every other token matches exactly.
+-//!   [`domain_matches`] applies the rule to a concrete host.
+-//! - secret: the `uri` is normalized like a workspace root and an optional
+-//!   `egress` list is validated with the network domain rule.
+-//! - config: the target operation must equal the requested action.
+-//! - agent: `ChildCount` must allow at least one child.
++//!   [`domain_matches`] applies the rule to a concrete host. A network grant
++//!   scope covers a request only when every requested domain is covered by
++//!   some allowed rule.
++//! - secret: the `uri` is normalized like a workspace root, and coverage is
++//!   the same segment-prefix rule (a grant for `secret://prod` covers
++//!   `secret://prod/api-key`). The optional `egress` list is validated with
++//!   the network domain rule: a grant without egress only covers requests
++//!   without egress, a bounded grant only covers bounded requests whose
++//!   domains it matches, and an unbounded grant (`Some([])` or a `*` entry)
++//!   covers any request egress.
++//! - config: the grant scope's operation must equal the requested action.
++//! - agent: the requested `ChildCount` must not exceed the grant scope's max.
+ //! - extension, effect, and resource capabilities are unscoped and require
+ //!   [`ScopedTarget::None`].
+ //!
+ //! Joint risk: a secret `Use` or `SignOrAct` request whose effective authority
+-//! also holds `Network Connect`, or whose secret target declares an egress
+-//! list, is upgraded from `Allow` to `RequireApproval`. The draft cites both
+-//! capabilities and carries a deterministic nonce, so the upgrade is stable
+-//! for identical inputs; approval lifetimes default to
++//! also holds `Network Connect`, or whose secret target declares an unbounded
++//! egress, is upgraded from `Allow` to `RequireApproval`. Egress is only
++//! unbounded when the request's egress list contains the global `*` wildcard
++//! or is empty (egress declared without bounding it); a bounded list of
++//! concrete hosts or documented suffixes does not upgrade. The draft cites
++//! both capabilities and carries a deterministic template nonce, so the
++//! upgrade is stable for identical inputs; `approvals::create_request` assigns
++//! the canonical nonce it binds (D10) and approval lifetimes default to
+ //! [`DEFAULT_APPROVAL_TTL_MS`] past `now_ms`. Denials never carry target or
+ //! secret content.
+ 
+-use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet};
+ 
+ use domain::ids::{ActorId, CapabilityGrantId, PrincipalId, RunId};
+ use identity::delegation::{
+-    Capability, CapabilityAction, CapabilityFamily, DelegationChain, Hop, validate_chain,
++    Capability, CapabilityAction, CapabilityFamily, DelegationChain, validate_chain,
+ };
+ 
+ use crate::capabilities;
+ 
+ /// Default approval lifetime added to `now_ms` when a draft is produced.
+ pub const DEFAULT_APPROVAL_TTL_MS: i64 = 15 * 60 * 1_000;
+ 
+ /// The target an operation is scoped to.
+@@ -84,28 +108,42 @@ pub enum ScopedTarget {
+     ChildCount {
+         /// Maximum number of children.
+         max: u32,
+     },
+     /// No scoped target; valid only for unscoped families.
+     None,
+ }
+ 
++/// One grant row loaded from `capability_grants` (D9).
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct GrantScope {
++    /// Identifier of the backing grant.
++    pub grant_id: CapabilityGrantId,
++    /// Capability the grant carries.
++    pub capability: Capability,
++    /// `None` means the grant is unscoped for this capability.
++    pub scope: Option<ScopedTarget>,
++    /// Absolute expiry; `None` never expires.
++    pub expires_at_ms: Option<i64>,
++}
++
+ /// Why a request was denied.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum DenyReason {
+-    /// No hop in the chain carries the requested capability.
++    /// No hop in the chain carries the requested capability, or no supplied
++    /// grant row backs it.
+     NoGrant,
+-    /// The target is malformed or outside the capability's scope.
++    /// The target is malformed or outside every matching grant's scope.
+     OutOfScope,
+     /// An ancestor hop narrowed away the capability the tip claims.
+     AncestorConstraint,
+     /// The tool's allow list excludes the requested capability.
+     ToolRestriction,
+-    /// A grant backing the request has lapsed.
++    /// Every matching grant has lapsed.
+     ExpiredGrant,
+     /// The capability pair is not in the contract.
+     Unsupported,
+ }
+ 
+ impl DenyReason {
+     /// Returns the stable lowercase token for this reason.
+     pub const fn as_str(self) -> &'static str {
+@@ -156,37 +194,43 @@ pub struct ApprovalDraft {
+     /// Exercised capabilities, sorted by family then action.
+     pub capabilities: Vec<Capability>,
+     /// Extension bundle digest when the operation is extension-bound.
+     pub extension_digest: Option<String>,
+     /// Configuration generation digest when the operation is config-bound.
+     pub config_digest: Option<String>,
+     /// Expiry of the requested approval.
+     pub expiry_ms: i64,
+-    /// Deterministic request nonce.
++    /// Deterministic template nonce; `create_request` assigns the bound nonce.
+     pub nonce: String,
+ }
+ 
+ /// Everything the engine needs to authorize one operation.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct PermissionRequest {
+     /// Principal on whose behalf the operation runs.
+     pub principal_id: PrincipalId,
+     /// Actor exercising the authority.
+     pub actor_id: ActorId,
+     /// Run context when the operation belongs to a run.
+     pub run_id: Option<RunId>,
+     /// Loaded delegation chain from root to tip.
+     pub chain: DelegationChain,
++    /// Grant rows loaded from `capability_grants` for the chain's grants.
++    pub grant_scopes: Vec<GrantScope>,
+     /// The tool's own allow list, when it has one.
+     pub tool_capabilities: Option<Vec<Capability>>,
+     /// Capability the operation requests.
+     pub capability: Capability,
+     /// Target the operation is scoped to.
+     pub target: ScopedTarget,
++    /// Extension bundle digest the approval should bind, when applicable.
++    pub extension_digest: Option<String>,
++    /// Configuration generation digest the approval should bind, when applicable.
++    pub config_digest: Option<String>,
+     /// Evaluation time.
+     pub now_ms: i64,
+ }
+ 
+ /// Evaluates a permission request, returning exactly one decision variant.
+ pub fn evaluate(request: &PermissionRequest) -> Decision {
+     let capability = request.capability;
+     if !capabilities::supports(&capability) {
+@@ -220,29 +264,29 @@ pub fn evaluate(request: &PermissionRequest) -> Decision {
+         effective.retain(|held| tool_capabilities.contains(held));
+         if !effective.contains(&capability) {
+             return Decision::Deny {
+                 reason: DenyReason::ToolRestriction,
+             };
+         }
+     }
+ 
+-    let target_token = match scoped_target_token(&capability, &request.target) {
+-        Ok(token) => token,
++    let (backing, target_token) = match backing_grants(request, &capability) {
++        Ok(resolved) => resolved,
+         Err(reason) => return Decision::Deny { reason },
+     };
+ 
+     if let Some(exercised) = joint_risk(&capability, &request.target, &effective) {
+         return Decision::RequireApproval {
+             request: approval_draft(request, target_token, &exercised),
+         };
+     }
+ 
+     Decision::Allow {
+-        grant_refs: tip_grant_refs(request.chain.hops.last()),
++        grant_refs: backing,
+     }
+ }
+ 
+ /// Applies the documented exact/suffix/wildcard rule to a concrete host.
+ ///
+ /// The rule is normalized first: matching is case-insensitive, `*` matches any
+ /// host, a leading dot matches the named domain and every subdomain, and every
+ /// other token matches exactly.
+@@ -260,62 +304,226 @@ pub fn domain_matches(rule: &str, host: &str) -> bool {
+         return true;
+     }
+     match rule.strip_prefix('.') {
+         Some(suffix) => host == suffix || host.ends_with(&rule),
+         None => host == rule,
+     }
+ }
+ 
++/// Resolves the tip grants that back the request and the canonical target.
++///
++/// Only grants the chain's tip actually holds are considered; a matching grant
++/// must be unexpired and either unscoped or covering the target. The returned
++/// refs are exactly the covering grants.
++fn backing_grants(
++    request: &PermissionRequest,
++    capability: &Capability,
++) -> Result<(Vec<CapabilityGrantId>, String), DenyReason> {
++    let tip_grants: BTreeSet<CapabilityGrantId> = request
++        .chain
++        .hops
++        .last()
++        .map(|tip| tip.grant_ids.iter().copied().collect())
++        .unwrap_or_default();
++    let mut rows: BTreeMap<CapabilityGrantId, Vec<&GrantScope>> = BTreeMap::new();
++    for row in &request.grant_scopes {
++        if tip_grants.contains(&row.grant_id) && row.capability == *capability {
++            rows.entry(row.grant_id).or_default().push(row);
++        }
++    }
++    if rows.is_empty() {
++        return Err(DenyReason::NoGrant);
++    }
++
++    let target_token = scoped_target_token(capability, &request.target)?;
++    let mut any_unexpired = false;
++    let mut covering = BTreeSet::new();
++    for (grant_id, rows) in &rows {
++        let unexpired = rows
++            .iter()
++            .all(|row| !grant_expired(row.expires_at_ms, request.now_ms));
++        let covers = rows.iter().all(|row| {
++            row.scope
++                .as_ref()
++                .is_none_or(|scope| target_covers(scope, &request.target))
++        });
++        if unexpired {
++            any_unexpired = true;
++        }
++        if unexpired && covers {
++            covering.insert(*grant_id);
++        }
++    }
++
++    if !covering.is_empty() {
++        return Ok((covering.into_iter().collect(), target_token));
++    }
++    Err(if any_unexpired {
++        DenyReason::OutOfScope
++    } else {
++        DenyReason::ExpiredGrant
++    })
++}
++
++/// Returns whether a grant with this expiry has lapsed at `now_ms`.
++fn grant_expired(expires_at_ms: Option<i64>, now_ms: i64) -> bool {
++    expires_at_ms.is_some_and(|expiry| expiry <= now_ms)
++}
++
++/// Returns whether a grant scope covers a request target.
++fn target_covers(scope: &ScopedTarget, target: &ScopedTarget) -> bool {
++    match (scope, target) {
++        (
++            ScopedTarget::Workspace {
++                uri: scope_uri,
++                path: scope_path,
++            },
++            ScopedTarget::Workspace {
++                uri: target_uri,
++                path: target_path,
++            },
++        ) => match (
++            normalized_workspace(scope_uri, scope_path.as_deref()),
++            normalized_workspace(target_uri, target_path.as_deref()),
++        ) {
++            (Some(scope), Some(target)) => segment_prefix(&scope, &target),
++            _ => false,
++        },
++        (
++            ScopedTarget::Network { domains: allowed },
++            ScopedTarget::Network { domains: requested },
++        ) => requested
++            .iter()
++            .all(|domain| requested_domain_covered(allowed, domain)),
++        (
++            ScopedTarget::Secret {
++                uri: scope_uri,
++                egress: scope_egress,
++            },
++            ScopedTarget::Secret {
++                uri: target_uri,
++                egress: target_egress,
++            },
++        ) => {
++            let (Some(scope), Some(target)) = (normalize_uri(scope_uri), normalize_uri(target_uri))
++            else {
++                return false;
++            };
++            segment_prefix(&scope, &target)
++                && egress_covers(scope_egress.as_deref(), target_egress.as_deref())
++        }
++        (
++            ScopedTarget::Config {
++                operation: scope_operation,
++            },
++            ScopedTarget::Config {
++                operation: target_operation,
++            },
++        ) => scope_operation == target_operation,
++        (
++            ScopedTarget::ChildCount { max: scope_max },
++            ScopedTarget::ChildCount { max: target_max },
++        ) => target_max <= scope_max,
++        (ScopedTarget::None, ScopedTarget::None) => true,
++        _ => false,
++    }
++}
++
++/// Returns whether `scope` is the same path as `target` or a segment prefix.
++fn segment_prefix(scope: &str, target: &str) -> bool {
++    target == scope || target.starts_with(&format!("{scope}/"))
++}
++
++/// Returns whether every requested domain fits the allowed rules.
++fn requested_domain_covered(allowed: &[String], requested: &str) -> bool {
++    let Some(requested) = normalize_domain(requested) else {
++        return false;
++    };
++    if requested == "*" {
++        return allowed
++            .iter()
++            .any(|rule| normalize_domain(rule).as_deref() == Some("*"));
++    }
++    match requested.strip_prefix('.') {
++        Some(body) => allowed.iter().any(|rule| {
++            let Some(rule) = normalize_domain(rule) else {
++                return false;
++            };
++            if rule == "*" || rule == requested {
++                return true;
++            }
++            rule.strip_prefix('.')
++                .is_some_and(|suffix| body == suffix || body.ends_with(&format!(".{suffix}")))
++        }),
++        None => allowed.iter().any(|rule| domain_matches(rule, &requested)),
++    }
++}
++
++/// Returns whether a granted egress bounds a requested egress.
++fn egress_covers(grant: Option<&[String]>, request: Option<&[String]>) -> bool {
++    match (grant, request) {
++        (None, Some(_)) => false,
++        (_, None) => true,
++        (Some(grant), Some(request)) => {
++            if request.is_empty() {
++                return grant.is_empty()
++                    || grant
++                        .iter()
++                        .any(|domain| normalize_domain(domain).as_deref() == Some("*"));
++            }
++            request
++                .iter()
++                .all(|requested| requested_domain_covered(grant, requested))
++        }
++    }
++}
++
+ /// Intersects every hop's capability set, root through tip.
+ fn ancestor_capabilities(chain: &DelegationChain) -> BTreeSet<Capability> {
+     let mut intersection: Option<BTreeSet<Capability>> = None;
+     for hop in &chain.hops {
+         let held: BTreeSet<Capability> = hop.capabilities.iter().copied().collect();
+         intersection = Some(match intersection {
+             Some(current) => current.intersection(&held).copied().collect(),
+             None => held,
+         });
+     }
+     intersection.unwrap_or_default()
+ }
+ 
+-/// Returns the tip hop's grant identifiers, sorted and duplicate-free.
+-fn tip_grant_refs(tip: Option<&Hop>) -> Vec<CapabilityGrantId> {
+-    let mut refs = BTreeSet::new();
+-    if let Some(tip) = tip {
+-        refs.extend(tip.grant_ids.iter().copied());
+-    }
+-    refs.into_iter().collect()
+-}
+-
+ /// Upgrades a secret request to approval when joint risk is present.
+ fn joint_risk(
+     capability: &Capability,
+     target: &ScopedTarget,
+     effective: &BTreeSet<Capability>,
+ ) -> Option<BTreeSet<Capability>> {
+     if capability.family != CapabilityFamily::Secret
+         || !matches!(
+             capability.action,
+             CapabilityAction::Use | CapabilityAction::SignOrAct
+         )
+     {
+         return None;
+     }
+     let connect = Capability::new(CapabilityFamily::Network, CapabilityAction::Connect);
+     let connect_held = effective.contains(&connect);
+-    let egress_declared = matches!(
+-        target,
++    let egress_unbounded = match target {
+         ScopedTarget::Secret {
+-            egress: Some(_),
++            egress: Some(egress),
+             ..
++        } => {
++            egress.is_empty()
++                || egress
++                    .iter()
++                    .any(|domain| normalize_domain(domain).as_deref() == Some("*"))
+         }
+-    );
+-    if !connect_held && !egress_declared {
++        _ => false,
++    };
++    if !connect_held && !egress_unbounded {
+         return None;
+     }
+     let mut exercised = BTreeSet::new();
+     exercised.insert(*capability);
+     if connect_held {
+         exercised.insert(connect);
+     }
+     Some(exercised)
+@@ -327,27 +535,28 @@ fn approval_draft(
+     target_token: String,
+     exercised: &BTreeSet<Capability>,
+ ) -> ApprovalDraft {
+     let nonce = deterministic_nonce(request, &target_token);
+     ApprovalDraft {
+         operation: request.capability.to_string(),
+         target: target_token,
+         capabilities: exercised.iter().copied().collect(),
+-        extension_digest: None,
+-        config_digest: None,
++        extension_digest: request.extension_digest.clone(),
++        config_digest: request.config_digest.clone(),
+         expiry_ms: request.now_ms.saturating_add(DEFAULT_APPROVAL_TTL_MS),
+         nonce,
+     }
+ }
+ 
+-/// Derives a stable nonce from the request identity and target.
++/// Derives a stable template nonce from the request identity and target.
+ ///
+ /// The engine is pure, so the nonce cannot be random; it is a canonical
+-/// fingerprint of the inputs and the approval digest binds it.
++/// fingerprint of the inputs, and `approvals::create_request` assigns the
++/// canonical nonce it binds (D10).
+ fn deterministic_nonce(request: &PermissionRequest, target_token: &str) -> String {
+     let run = request
+         .run_id
+         .map_or_else(|| "none".to_string(), |run| run.to_string());
+     format!(
+         "v1|{}|{}|{}|{}|{}|{}",
+         request.principal_id,
+         request.actor_id,
+@@ -369,16 +578,17 @@ fn scoped_target_token(
+         }
+         (CapabilityFamily::Network, ScopedTarget::Network { domains }) => {
+             normalized_domains(domains).ok_or(DenyReason::OutOfScope)
+         }
+         (CapabilityFamily::Secret, ScopedTarget::Secret { uri, egress }) => {
+             let uri = normalize_uri(uri).ok_or(DenyReason::OutOfScope)?;
+             match egress {
+                 None => Ok(uri),
++                Some(egress) if egress.is_empty() => Ok(format!("{uri}|egress=*")),
+                 Some(egress) => {
+                     let egress = normalized_domains(egress).ok_or(DenyReason::OutOfScope)?;
+                     Ok(format!("{uri}|egress={egress}"))
+                 }
+             }
+         }
+         (CapabilityFamily::Agent, ScopedTarget::ChildCount { max }) if *max >= 1 => {
+             Ok(format!("child_count:{max}"))
+diff --git a/agent-os/crates/permissions/tests/policy.rs b/agent-os/crates/permissions/tests/policy.rs
+index f3a0e39..52491aa 100644
+--- a/agent-os/crates/permissions/tests/policy.rs
++++ b/agent-os/crates/permissions/tests/policy.rs
+@@ -1,23 +1,26 @@
+-//! Decision tables, scope rules, confused-deputy intersection, joint risk, and P2.
++//! Decision tables, grant scopes, scope rules, confused-deputy intersection,
++//! joint risk, and P2.
+ //!
+ //! Every case builds an in-memory request and asserts on the returned
+ //! `Decision`; the engine performs no I/O. Identifiers are parsed from
+-//! canonical UUIDv7 text, so the suite needs no provider dependency.
++//! canonical UUIDv7 text, so the suite needs no provider dependency. Grant
++//! rows are supplied as `GrantScope` values exactly as callers load them from
++//! `capability_grants`.
+ 
+ use std::collections::BTreeSet;
+ use std::str::FromStr;
+ 
+ use domain::ids::{ActorId, CapabilityGrantId, DelegationChainId, PrincipalId};
+ use identity::delegation::{DelegationChain, Hop};
+ use permissions::capabilities::{parse_capability, supports};
+ use permissions::policy::{
+-    DEFAULT_APPROVAL_TTL_MS, Decision, DenyReason, PermissionRequest, ScopedTarget, domain_matches,
+-    evaluate,
++    DEFAULT_APPROVAL_TTL_MS, Decision, DenyReason, GrantScope, PermissionRequest, ScopedTarget,
++    domain_matches, evaluate,
+ };
+ use permissions::{Capability, CapabilityAction, CapabilityFamily};
+ use proptest::prelude::*;
+ 
+ const NOW_MS: i64 = 1_700_000_000_000;
+ 
+ const WORKSPACE_READ: Capability =
+     Capability::new(CapabilityFamily::Workspace, CapabilityAction::Read);
+@@ -138,30 +141,89 @@ fn chain_holding(capability: Capability) -> (DelegationChain, CapabilityGrantId)
+         actor_id: actor_id(2_000_001),
+         run_id: None,
+         grant_ids: vec![tip_grant],
+         capabilities: vec![capability],
+     };
+     (chain(vec![root, tip]), tip_grant)
+ }
+ 
++/// Builds a chain whose tip holds `capability` backed by `grant_ids`.
++fn chain_with_grants(capability: Capability, grant_ids: Vec<CapabilityGrantId>) -> DelegationChain {
++    let root = hop(0, &ALL_CAPABILITIES, 1_000_000);
++    let tip = Hop {
++        hop_index: 1,
++        actor_id: actor_id(2_000_001),
++        run_id: None,
++        grant_ids,
++        capabilities: vec![capability],
++    };
++    chain(vec![root, tip])
++}
++
++fn unscoped_grant(grant_id: CapabilityGrantId, capability: Capability) -> GrantScope {
++    GrantScope {
++        grant_id,
++        capability,
++        scope: None,
++        expires_at_ms: None,
++    }
++}
++
++fn scoped_grant(
++    grant_id: CapabilityGrantId,
++    capability: Capability,
++    scope: ScopedTarget,
++) -> GrantScope {
++    GrantScope {
++        grant_id,
++        capability,
++        scope: Some(scope),
++        expires_at_ms: None,
++    }
++}
++
++fn expiring_grant(
++    grant_id: CapabilityGrantId,
++    capability: Capability,
++    scope: ScopedTarget,
++    expires_at_ms: i64,
++) -> GrantScope {
++    GrantScope {
++        grant_id,
++        capability,
++        scope: Some(scope),
++        expires_at_ms: Some(expires_at_ms),
++    }
++}
++
++/// Builds a chain plus one unscoped grant row for its tip.
++fn held(capability: Capability) -> (DelegationChain, Vec<GrantScope>) {
++    let (chain, tip_grant) = chain_holding(capability);
++    (chain, vec![unscoped_grant(tip_grant, capability)])
++}
++
+ fn request(
+     chain: DelegationChain,
++    grant_scopes: Vec<GrantScope>,
+     tool_capabilities: Option<Vec<Capability>>,
+     capability: Capability,
+     target: ScopedTarget,
+ ) -> PermissionRequest {
+     PermissionRequest {
+         principal_id: principal_id(100),
+         actor_id: actor_id(101),
+         run_id: None,
+         chain,
++        grant_scopes,
+         tool_capabilities,
+         capability,
+         target,
++        extension_digest: None,
++        config_digest: None,
+         now_ms: NOW_MS,
+     }
+ }
+ 
+ fn deny_reason(decision: &Decision) -> DenyReason {
+     match decision {
+         Decision::Deny { reason } => *reason,
+         other => panic!("expected a denial, got {other:?}"),
+@@ -244,17 +306,18 @@ fn every_contract_capability_allows_on_a_matching_grant_and_target() {
+         (CONFIG_ACTIVATE, config(CapabilityAction::Activate)),
+         (CONFIG_ROLLBACK, config(CapabilityAction::Rollback)),
+         (EFFECT_RECONCILE, ScopedTarget::None),
+         (EFFECT_RESOLVE_UNKNOWN, ScopedTarget::None),
+         (RESOURCE_RESERVE, ScopedTarget::None),
+     ];
+     for (capability, target) in cases {
+         let (chain, tip_grant) = chain_holding(capability);
+-        let decision = evaluate(&request(chain, None, capability, target));
++        let grants = vec![unscoped_grant(tip_grant, capability)];
++        let decision = evaluate(&request(chain, grants, None, capability, target));
+         assert_eq!(
+             decision,
+             Decision::Allow {
+                 grant_refs: vec![tip_grant]
+             },
+             "{capability}"
+         );
+     }
+@@ -264,19 +327,20 @@ fn every_contract_capability_allows_on_a_matching_grant_and_target() {
+ fn workspace_scope_accepts_normalized_roots_and_in_scope_paths() {
+     for (uri, path) in [
+         ("workspace://acme/proj", None),
+         ("workspace://acme/proj/", None),
+         ("workspace://acme/proj", Some("src/lib.rs")),
+         ("workspace://acme/proj", Some("workspace://acme/proj/src")),
+         ("workspace://acme/proj", Some("workspace://acme/proj")),
+     ] {
+-        let (chain, _) = chain_holding(WORKSPACE_READ);
++        let (chain, grants) = held(WORKSPACE_READ);
+         let decision = evaluate(&request(
+             chain,
++            grants,
+             None,
+             WORKSPACE_READ,
+             workspace_target(uri, path),
+         ));
+         assert!(
+             matches!(decision, Decision::Allow { .. }),
+             "{uri} {path:?} must be in scope, got {decision:?}"
+         );
+@@ -296,19 +360,20 @@ fn workspace_scope_rejects_traversal_and_foreign_paths() {
+             "workspace://acme/proj",
+             Some("workspace://acme/proj-evil/file"),
+         ),
+         ("workspace://acme/../etc", None),
+         ("workspace://acme/proj", Some("src//lib.rs")),
+         ("acme/proj", None),
+         ("workspace://", None),
+     ] {
+-        let (chain, _) = chain_holding(WORKSPACE_READ);
++        let (chain, grants) = held(WORKSPACE_READ);
+         let decision = evaluate(&request(
+             chain,
++            grants,
+             None,
+             WORKSPACE_READ,
+             workspace_target(uri, path),
+         ));
+         assert_eq!(
+             deny_reason(&decision),
+             DenyReason::OutOfScope,
+             "{uri} {path:?} must be out of scope"
+@@ -320,21 +385,21 @@ fn workspace_scope_rejects_traversal_and_foreign_paths() {
+ fn network_scope_accepts_exact_suffix_and_wildcard_domains() {
+     for domains in [
+         vec!["api.example.com"],
+         vec!["api.example.com", "cdn.example.com"],
+         vec![".example.com"],
+         vec!["*"],
+         vec!["API.Example.COM"],
+     ] {
+-        let (chain, _) = chain_holding(NETWORK_CONNECT);
++        let (chain, grants) = held(NETWORK_CONNECT);
+         let target = ScopedTarget::Network {
+             domains: domains.iter().map(|domain| domain.to_string()).collect(),
+         };
+-        let decision = evaluate(&request(chain, None, NETWORK_CONNECT, target));
++        let decision = evaluate(&request(chain, grants, None, NETWORK_CONNECT, target));
+         assert!(
+             matches!(decision, Decision::Allow { .. }),
+             "{domains:?} must be accepted, got {decision:?}"
+         );
+     }
+ }
+ 
+ #[test]
+@@ -346,21 +411,21 @@ fn network_scope_rejects_malformed_domains_and_empty_lists() {
+         vec!["api.example.com:443"],
+         vec!["-bad.example.com"],
+         vec!["bad-.example.com"],
+         vec!["api..example.com"],
+         vec!["api_example.com"],
+         vec!["api.example.com/path"],
+         vec![" "],
+     ] {
+-        let (chain, _) = chain_holding(NETWORK_CONNECT);
++        let (chain, grants) = held(NETWORK_CONNECT);
+         let target = ScopedTarget::Network {
+             domains: domains.iter().map(|domain| domain.to_string()).collect(),
+         };
+-        let decision = evaluate(&request(chain, None, NETWORK_CONNECT, target));
++        let decision = evaluate(&request(chain, grants, None, NETWORK_CONNECT, target));
+         assert_eq!(
+             deny_reason(&decision),
+             DenyReason::OutOfScope,
+             "{domains:?} must be rejected"
+         );
+     }
+ }
+ 
+@@ -381,25 +446,24 @@ fn domain_matching_follows_the_documented_exact_and_suffix_rule() {
+ }
+ 
+ #[test]
+ fn secret_scope_requires_a_uri_and_well_formed_egress() {
+     for target in [
+         secret_target("api-key", None),
+         secret_target("secret://", None),
+         secret_target("secret://prod/../other", None),
+-        secret_target("secret://prod/api-key", Some(vec![])),
+         secret_target(
+             "secret://prod/api-key",
+             Some(vec!["https://api.example.com"]),
+         ),
+         secret_target("secret://prod/api-key", Some(vec![" "])),
+     ] {
+-        let (chain, _) = chain_holding(SECRET_USE);
+-        let decision = evaluate(&request(chain, None, SECRET_USE, target));
++        let (chain, grants) = held(SECRET_USE);
++        let decision = evaluate(&request(chain, grants, None, SECRET_USE, target));
+         assert_eq!(
+             deny_reason(&decision),
+             DenyReason::OutOfScope,
+             "malformed secret scope must be denied"
+         );
+     }
+ }
+ 
+@@ -441,160 +505,710 @@ fn scoped_targets_must_match_the_capability_family() {
+         ),
+         (
+             RESOURCE_RESERVE,
+             secret_target("secret://prod/api-key", None),
+         ),
+         (WORKSPACE_READ, ScopedTarget::None),
+     ];
+     for (capability, target) in mismatches {
+-        let (chain, _) = chain_holding(capability);
+-        let decision = evaluate(&request(chain, None, capability, target));
++        let (chain, grants) = held(capability);
++        let decision = evaluate(&request(chain, grants, None, capability, target));
+         assert_eq!(
+             deny_reason(&decision),
+             DenyReason::OutOfScope,
+             "{capability} with a mismatched target must be out of scope"
+         );
+     }
+ }
+ 
++#[test]
++fn a_workspace_grant_scope_covers_its_prefix_and_rejects_foreign_roots() {
++    let cases: [(Option<&str>, &str, Option<&str>, bool); 8] = [
++        (None, "workspace://acme/proj", Some("src/lib.rs"), true),
++        (None, "workspace://acme/proj", None, true),
++        (None, "workspace://evil/proj", None, false),
++        (None, "workspace://acme/proj-evil", Some("x"), false),
++        (
++            Some("src"),
++            "workspace://acme/proj",
++            Some("src/lib.rs"),
++            true,
++        ),
++        (
++            Some("src"),
++            "workspace://acme/proj",
++            Some("workspace://acme/proj/src/deep"),
++            true,
++        ),
++        (
++            Some("src"),
++            "workspace://acme/proj",
++            Some("docs/readme"),
++            false,
++        ),
++        (None, "workspace://acme/proj", Some("../etc/passwd"), false),
++    ];
++    for (scope_path, target_uri, target_path, expected) in cases {
++        let (chain, tip_grant) = chain_holding(WORKSPACE_READ);
++        let grant = scoped_grant(
++            tip_grant,
++            WORKSPACE_READ,
++            workspace_target("workspace://acme/proj", scope_path),
++        );
++        let decision = evaluate(&request(
++            chain,
++            vec![grant],
++            None,
++            WORKSPACE_READ,
++            workspace_target(target_uri, target_path),
++        ));
++        assert_eq!(
++            matches!(decision, Decision::Allow { .. }),
++            expected,
++            "scope {scope_path:?} vs {target_uri} {target_path:?}"
++        );
++    }
++}
++
++#[test]
++fn a_workspace_grant_scope_covers_nested_workspaces() {
++    let (chain, tip_grant) = chain_holding(WORKSPACE_READ);
++    let grant = scoped_grant(
++        tip_grant,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme", None),
++    );
++    let decision = evaluate(&request(
++        chain,
++        vec![grant],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme/proj", Some("src")),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++}
++
++#[test]
++fn a_network_grant_scope_covers_only_matching_destinations() {
++    let cases: [(&[&str], &[&str], bool); 8] = [
++        (&["api.example.com"], &["api.example.com"], true),
++        (&["api.example.com"], &["evil.example.com"], false),
++        (
++            &["api.example.com"],
++            &["api.example.com", "evil.example.com"],
++            false,
++        ),
++        (&[".example.com"], &["api.example.com"], true),
++        (&[".example.com"], &["example.com"], true),
++        (&["api.example.com"], &[".example.com"], false),
++        (&["*"], &["anything.example"], true),
++        (&["api.example.com"], &["*"], false),
++    ];
++    for (allowed, requested, expected) in cases {
++        let (chain, tip_grant) = chain_holding(NETWORK_CONNECT);
++        let grant = scoped_grant(
++            tip_grant,
++            NETWORK_CONNECT,
++            ScopedTarget::Network {
++                domains: allowed.iter().map(|domain| domain.to_string()).collect(),
++            },
++        );
++        let target = ScopedTarget::Network {
++            domains: requested.iter().map(|domain| domain.to_string()).collect(),
++        };
++        let decision = evaluate(&request(chain, vec![grant], None, NETWORK_CONNECT, target));
++        assert_eq!(
++            matches!(decision, Decision::Allow { .. }),
++            expected,
++            "{allowed:?} vs {requested:?}"
++        );
++    }
++}
++
++#[test]
++fn unscoped_grants_allow_any_well_formed_target() {
++    let (chain, grants) = held(WORKSPACE_READ);
++    let decision = evaluate(&request(
++        chain,
++        grants,
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://anywhere/at/all", Some("deep/file.txt")),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let (chain, grants) = held(NETWORK_CONNECT);
++    let decision = evaluate(&request(
++        chain,
++        grants,
++        None,
++        NETWORK_CONNECT,
++        ScopedTarget::Network {
++            domains: vec!["anywhere.example".to_string()],
++        },
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++}
++
++#[test]
++fn expiry_decides_between_allow_out_of_scope_and_expired() {
++    let (chain, tip_grant) = chain_holding(WORKSPACE_WRITE);
++    let target = workspace_target("workspace://acme/proj", None);
++
++    for expiry in [NOW_MS - 1, NOW_MS] {
++        let grant = expiring_grant(
++            tip_grant,
++            WORKSPACE_WRITE,
++            workspace_target("workspace://acme/proj", None),
++            expiry,
++        );
++        let decision = evaluate(&request(
++            chain.clone(),
++            vec![grant],
++            None,
++            WORKSPACE_WRITE,
++            target.clone(),
++        ));
++        assert_eq!(deny_reason(&decision), DenyReason::ExpiredGrant, "{expiry}");
++    }
++
++    let grant = expiring_grant(
++        tip_grant,
++        WORKSPACE_WRITE,
++        workspace_target("workspace://acme/proj", None),
++        NOW_MS + 1,
++    );
++    let decision = evaluate(&request(chain, vec![grant], None, WORKSPACE_WRITE, target));
++    assert!(matches!(decision, Decision::Allow { .. }));
++}
++
++#[test]
++fn allow_cites_exactly_the_covering_grants() {
++    let cover = grant_id(2_000_000);
++    let other = grant_id(2_000_001);
++    let chain = chain_with_grants(WORKSPACE_READ, vec![cover, other]);
++    let covering = scoped_grant(
++        cover,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme/proj", None),
++    );
++    let non_covering = scoped_grant(
++        other,
++        WORKSPACE_READ,
++        workspace_target("workspace://other", None),
++    );
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![covering.clone(), non_covering.clone()],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme/proj", Some("src")),
++    ));
++    assert_eq!(
++        decision,
++        Decision::Allow {
++            grant_refs: vec![cover]
++        }
++    );
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![covering, non_covering],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://other", Some("x")),
++    ));
++    assert_eq!(
++        decision,
++        Decision::Allow {
++            grant_refs: vec![other]
++        }
++    );
++
++    let decision = evaluate(&request(
++        chain,
++        vec![
++            scoped_grant(
++                cover,
++                WORKSPACE_READ,
++                workspace_target("workspace://acme/proj", None),
++            ),
++            scoped_grant(
++                other,
++                WORKSPACE_READ,
++                workspace_target("workspace://other", None),
++            ),
++        ],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://third", None),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++}
++
++#[test]
++fn expired_grants_are_ignored_while_other_backing_grants_cover() {
++    let cover = grant_id(2_000_000);
++    let other = grant_id(2_000_001);
++    let chain = chain_with_grants(WORKSPACE_WRITE, vec![cover, other]);
++    let target = workspace_target("workspace://acme/proj", None);
++
++    let covering = scoped_grant(
++        cover,
++        WORKSPACE_WRITE,
++        workspace_target("workspace://acme/proj", None),
++    );
++    let mut expired = unscoped_grant(other, WORKSPACE_WRITE);
++    expired.expires_at_ms = Some(NOW_MS - 1);
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![expired, covering],
++        None,
++        WORKSPACE_WRITE,
++        target.clone(),
++    ));
++    assert_eq!(
++        decision,
++        Decision::Allow {
++            grant_refs: vec![cover]
++        }
++    );
++
++    let mut expired_cover = scoped_grant(
++        cover,
++        WORKSPACE_WRITE,
++        workspace_target("workspace://acme/proj", None),
++    );
++    expired_cover.expires_at_ms = Some(NOW_MS - 1);
++    let non_covering = scoped_grant(
++        other,
++        WORKSPACE_WRITE,
++        workspace_target("workspace://other", None),
++    );
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![expired_cover, non_covering],
++        None,
++        WORKSPACE_WRITE,
++        target.clone(),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let mut first = unscoped_grant(cover, WORKSPACE_WRITE);
++    first.expires_at_ms = Some(NOW_MS - 1);
++    let mut second = unscoped_grant(other, WORKSPACE_WRITE);
++    second.expires_at_ms = Some(NOW_MS - 1);
++    let decision = evaluate(&request(
++        chain,
++        vec![first, second],
++        None,
++        WORKSPACE_WRITE,
++        target,
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::ExpiredGrant);
++}
++
++#[test]
++fn grants_not_held_by_the_tip_do_not_authorize() {
++    let (chain, _) = chain_holding(WORKSPACE_READ);
++    let root_grant = chain.hops[0].grant_ids[0];
++    let grant = unscoped_grant(root_grant, WORKSPACE_READ);
++    let decision = evaluate(&request(
++        chain,
++        vec![grant],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme/proj", None),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
++}
++
++#[test]
++fn a_capability_without_grant_scope_rows_denies_with_no_grant() {
++    let (chain, _) = chain_holding(WORKSPACE_READ);
++    let decision = evaluate(&request(
++        chain,
++        vec![],
++        None,
++        WORKSPACE_READ,
++        workspace_target("workspace://acme/proj", None),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
++}
++
++#[test]
++fn a_secret_grant_scope_bounds_uri_prefix_and_egress() {
++    let (chain, tip_grant) = chain_holding(SECRET_USE);
++    let prefix = scoped_grant(tip_grant, SECRET_USE, secret_target("secret://prod", None));
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![prefix.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", None),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![prefix.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://other/api-key", None),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![prefix],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["api.example.com"])),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let bounded = scoped_grant(
++        tip_grant,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["api.example.com"])),
++    );
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![bounded.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["api.example.com"])),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![bounded.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", None),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![bounded.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["evil.example.com"])),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![bounded],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["*"])),
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let broad = scoped_grant(
++        tip_grant,
++        SECRET_USE,
++        secret_target("secret://prod", Some(vec!["*"])),
++    );
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![broad.clone()],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api", Some(vec!["anything.example"])),
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let decision = evaluate(&request(
++        chain,
++        vec![broad],
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api", Some(vec!["*"])),
++    ));
++    assert!(matches!(decision, Decision::RequireApproval { .. }));
++}
++
++#[test]
++fn config_and_child_count_grants_bound_their_targets() {
++    let (chain, tip_grant) = chain_holding(CONFIG_ACTIVATE);
++    let grant = scoped_grant(
++        tip_grant,
++        CONFIG_ACTIVATE,
++        ScopedTarget::Config {
++            operation: CapabilityAction::Activate,
++        },
++    );
++    let decision = evaluate(&request(
++        chain.clone(),
++        vec![grant],
++        None,
++        CONFIG_ACTIVATE,
++        ScopedTarget::Config {
++            operation: CapabilityAction::Activate,
++        },
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let mismatched = scoped_grant(
++        tip_grant,
++        CONFIG_ACTIVATE,
++        ScopedTarget::Config {
++            operation: CapabilityAction::Test,
++        },
++    );
++    let decision = evaluate(&request(
++        chain,
++        vec![mismatched],
++        None,
++        CONFIG_ACTIVATE,
++        ScopedTarget::Config {
++            operation: CapabilityAction::Activate,
++        },
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++
++    let (chain, tip_grant) = chain_holding(AGENT_SPAWN);
++    let grant = scoped_grant(tip_grant, AGENT_SPAWN, ScopedTarget::ChildCount { max: 4 });
++    for (max, expected) in [(4, true), (3, true), (5, false)] {
++        let decision = evaluate(&request(
++            chain.clone(),
++            vec![grant.clone()],
++            None,
++            AGENT_SPAWN,
++            ScopedTarget::ChildCount { max },
++        ));
++        assert_eq!(
++            matches!(decision, Decision::Allow { .. }),
++            expected,
++            "child count {max}"
++        );
++    }
++
++    let (chain, tip_grant) = chain_holding(EXTENSION_INSTALL);
++    let none_grant = scoped_grant(tip_grant, EXTENSION_INSTALL, ScopedTarget::None);
++    let decision = evaluate(&request(
++        chain,
++        vec![none_grant],
++        None,
++        EXTENSION_INSTALL,
++        ScopedTarget::None,
++    ));
++    assert!(matches!(decision, Decision::Allow { .. }));
++
++    let (chain, tip_grant) = chain_holding(AGENT_SPAWN);
++    let none_grant = scoped_grant(tip_grant, AGENT_SPAWN, ScopedTarget::None);
++    let decision = evaluate(&request(
++        chain,
++        vec![none_grant],
++        None,
++        AGENT_SPAWN,
++        ScopedTarget::ChildCount { max: 2 },
++    ));
++    assert_eq!(deny_reason(&decision), DenyReason::OutOfScope);
++}
++
+ #[test]
+ fn an_empty_chain_denies_with_no_grant() {
+     let decision = evaluate(&request(
+         chain(vec![]),
++        vec![],
+         None,
+         WORKSPACE_READ,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+ }
+ 
+ #[test]
+ fn a_missing_capability_denies_with_no_grant() {
+     let (chain, _) = chain_holding(WORKSPACE_READ);
+     let decision = evaluate(&request(
+         chain,
++        vec![],
+         None,
+         WORKSPACE_WRITE,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+ }
+ 
+ #[test]
+ fn confused_deputy_intersects_child_grants_with_the_tool_allow_list() {
+     let root = hop(0, &[WORKSPACE_READ, WORKSPACE_WRITE], 1_000_000);
+     let child = hop(1, &[WORKSPACE_READ], 2_000_000);
+     let privileged_helper = Some(vec![WORKSPACE_WRITE]);
+     let decision = evaluate(&request(
+         chain(vec![root, child]),
++        vec![],
+         privileged_helper,
+         WORKSPACE_WRITE,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+ }
+ 
+ #[test]
+ fn tool_restriction_denies_capabilities_outside_the_tool_allow_list() {
+-    let (chain, _) = chain_holding(WORKSPACE_WRITE);
++    let (chain, grants) = held(WORKSPACE_WRITE);
+     let decision = evaluate(&request(
+         chain,
++        grants,
+         Some(vec![WORKSPACE_READ]),
+         WORKSPACE_WRITE,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::ToolRestriction);
+ }
+ 
+ #[test]
+ fn tool_allow_list_does_not_widen_authority() {
+-    let (chain, _) = chain_holding(WORKSPACE_WRITE);
++    let (chain, grants) = held(WORKSPACE_WRITE);
+     let decision = evaluate(&request(
+         chain,
++        grants,
+         Some(vec![WORKSPACE_WRITE]),
+         WORKSPACE_WRITE,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert!(matches!(decision, Decision::Allow { .. }));
+ }
+ 
+ #[test]
+ fn a_tip_that_exceeds_its_ancestor_denies_with_ancestor_constraint() {
+     let root = hop(0, &[WORKSPACE_READ], 1_000_000);
+     let over_broad_tip = hop(1, &[WORKSPACE_READ, WORKSPACE_WRITE], 2_000_000);
+     let decision = evaluate(&request(
+         chain(vec![root, over_broad_tip]),
++        vec![],
+         None,
+         WORKSPACE_WRITE,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::AncestorConstraint);
+ }
+ 
+ #[test]
+ fn an_invalid_chain_shape_denies_with_no_grant() {
+     let root = hop(0, &[WORKSPACE_READ], 1_000_000);
+     let mut gapped = hop(1, &[WORKSPACE_READ], 2_000_000);
+     gapped.hop_index = 5;
+     let decision = evaluate(&request(
+         chain(vec![root, gapped]),
++        vec![],
+         None,
+         WORKSPACE_READ,
+         workspace_target("workspace://acme/proj", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+ }
+ 
+ #[test]
+ fn an_off_contract_capability_denies_as_unsupported() {
+     let rogue = Capability::new(CapabilityFamily::Network, CapabilityAction::Read);
+     let (chain, _) = chain_holding(rogue);
+     let decision = evaluate(&request(
+         chain,
++        vec![],
+         None,
+         rogue,
+         ScopedTarget::Network {
+             domains: vec!["api.example.com".to_string()],
+         },
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::Unsupported);
+ }
+ 
+ #[test]
+-fn secret_use_with_egress_requires_approval_with_a_deterministic_draft() {
+-    let (chain, _) = chain_holding(SECRET_USE);
++fn secret_use_with_global_egress_requires_approval_with_a_deterministic_draft() {
++    let (chain, grants) = held(SECRET_USE);
+     let request = request(
+         chain,
++        grants,
+         None,
+         SECRET_USE,
+-        secret_target("secret://prod/api-key", Some(vec!["api.example.com"])),
++        secret_target("secret://prod/api-key", Some(vec!["*"])),
+     );
+     let first = evaluate(&request);
+     let second = evaluate(&request);
+     assert_eq!(
+         first, second,
+         "identical inputs must yield identical drafts"
+     );
+     let draft = approval_draft(&first);
+     assert_eq!(draft.operation, "secret.use");
+-    assert_eq!(draft.target, "secret://prod/api-key|egress=api.example.com");
++    assert_eq!(draft.target, "secret://prod/api-key|egress=*");
+     assert_eq!(draft.capabilities, vec![SECRET_USE]);
+     assert_eq!(draft.expiry_ms, NOW_MS + DEFAULT_APPROVAL_TTL_MS);
+     assert!(!draft.nonce.is_empty());
+     assert!(draft.extension_digest.is_none());
+     assert!(draft.config_digest.is_none());
+ }
+ 
++#[test]
++fn bounded_secret_egress_allows_while_unbounded_egress_requires_approval() {
++    let cases: [(Option<Vec<&str>>, bool); 4] = [
++        (Some(vec!["api.example.com"]), false),
++        (Some(vec![".example.com"]), false),
++        (Some(vec!["*"]), true),
++        (Some(vec![]), true),
++    ];
++    for (egress, expected_approval) in cases {
++        let (chain, grants) = held(SECRET_USE);
++        let decision = evaluate(&request(
++            chain,
++            grants,
++            None,
++            SECRET_USE,
++            secret_target("secret://prod/api-key", egress.clone()),
++        ));
++        assert_eq!(
++            matches!(decision, Decision::RequireApproval { .. }),
++            expected_approval,
++            "{egress:?}"
++        );
++    }
++}
++
++#[test]
++fn drafts_propagate_extension_and_config_digests() {
++    let (chain, grants) = held(SECRET_USE);
++    let mut request = request(
++        chain,
++        grants,
++        None,
++        SECRET_USE,
++        secret_target("secret://prod/api-key", Some(vec!["*"])),
++    );
++    request.extension_digest = Some("sha256:extension".to_string());
++    request.config_digest = Some("sha256:config".to_string());
++    let decision = evaluate(&request);
++    let draft = approval_draft(&decision);
++    assert_eq!(draft.extension_digest.as_deref(), Some("sha256:extension"));
++    assert_eq!(draft.config_digest.as_deref(), Some("sha256:config"));
++}
++
+ #[test]
+ fn secret_sign_or_act_with_held_network_connect_requires_approval() {
+     let root = hop(0, &ALL_CAPABILITIES, 1_000_000);
+     let tip = hop(1, &[NETWORK_CONNECT, SECRET_SIGN_OR_ACT], 2_000_000);
++    let grants = tip
++        .grant_ids
++        .iter()
++        .zip(tip.capabilities.iter())
++        .map(|(grant, capability)| unscoped_grant(*grant, *capability))
++        .collect();
+     let decision = evaluate(&request(
+         chain(vec![root, tip]),
++        grants,
+         None,
+         SECRET_SIGN_OR_ACT,
+         secret_target("secret://prod/signing-key", None),
+     ));
+     let draft = approval_draft(&decision);
+     assert_eq!(
+         draft.capabilities,
+         vec![NETWORK_CONNECT, SECRET_SIGN_OR_ACT]
+@@ -602,59 +1216,69 @@ fn secret_sign_or_act_with_held_network_connect_requires_approval() {
+     assert_eq!(draft.target, "secret://prod/signing-key");
+ }
+ 
+ #[test]
+ fn secret_use_without_egress_or_connect_allows() {
+     let (chain, tip_grant) = chain_holding(SECRET_USE);
+     let decision = evaluate(&request(
+         chain,
++        vec![unscoped_grant(tip_grant, SECRET_USE)],
+         None,
+         SECRET_USE,
+         secret_target("secret://prod/api-key", None),
+     ));
+     assert_eq!(
+         decision,
+         Decision::Allow {
+             grant_refs: vec![tip_grant]
+         }
+     );
+ }
+ 
+ #[test]
+ fn joint_risk_respects_the_tool_intersection() {
+     let root = hop(0, &ALL_CAPABILITIES, 1_000_000);
+     let tip = hop(1, &[NETWORK_CONNECT, SECRET_USE], 2_000_000);
++    let grants = tip
++        .grant_ids
++        .iter()
++        .zip(tip.capabilities.iter())
++        .map(|(grant, capability)| unscoped_grant(*grant, *capability))
++        .collect();
+     let decision = evaluate(&request(
+         chain(vec![root, tip]),
++        grants,
+         Some(vec![SECRET_USE]),
+         SECRET_USE,
+         secret_target("secret://prod/api-key", None),
+     ));
+     assert!(
+         matches!(decision, Decision::Allow { .. }),
+         "a tool without network authority cannot trigger the connect joint rule"
+     );
+ }
+ 
+ #[test]
+ fn denial_takes_precedence_over_joint_risk() {
+     let decision = evaluate(&request(
+         chain(vec![]),
++        vec![],
+         None,
+         SECRET_USE,
+-        secret_target("secret://prod/api-key", Some(vec!["api.example.com"])),
++        secret_target("secret://prod/api-key", Some(vec!["*"])),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+ }
+ 
+ #[test]
+ fn denial_reasons_carry_no_target_content() {
+     let decision = evaluate(&request(
+         chain(vec![]),
++        vec![],
+         None,
+         SECRET_USE,
+         secret_target("secret://prod/payments-key", None),
+     ));
+     assert_eq!(deny_reason(&decision), DenyReason::NoGrant);
+     let rendered = format!("{decision:?}");
+     assert!(!rendered.contains("secret://"));
+     assert!(!rendered.contains("payments-key"));
+@@ -719,41 +1343,79 @@ fn target_strategy() -> impl Strategy<Value = ScopedTarget> {
+ 
+ fn request_strategy() -> impl Strategy<Value = PermissionRequest> {
+     (
+         chain_strategy(),
+         prop::option::of(prop::collection::vec(capability_strategy(), 0..=6)),
+         capability_strategy(),
+         0usize..8,
+         target_strategy(),
++        prop::option::of(target_strategy()),
++        prop::option::of(0i64..2_000_000_000),
++        prop::option::of("[a-f0-9]{8}"),
++        prop::option::of("[a-f0-9]{8}"),
+         0i64..1_000_000_000,
+     )
+-        .prop_map(|(chain, tool, fallback, index, target, now_ms)| {
+-            let capability = match chain.hops.last() {
+-                Some(tip) if !tip.capabilities.is_empty() => {
+-                    tip.capabilities[index % tip.capabilities.len()]
+-                }
+-                _ => fallback,
+-            };
+-            let tool_capabilities = tool.map(|mut tool| {
+-                tool.sort();
+-                tool.dedup();
+-                tool
+-            });
+-            PermissionRequest {
+-                principal_id: principal_id(7),
+-                actor_id: actor_id(8),
+-                run_id: None,
++        .prop_map(
++            |(
+                 chain,
+-                tool_capabilities,
+-                capability,
++                tool,
++                fallback,
++                index,
+                 target,
++                scope,
++                expiry,
++                extension_digest,
++                config_digest,
+                 now_ms,
+-            }
+-        })
++            )| {
++                let capability = match chain.hops.last() {
++                    Some(tip) if !tip.capabilities.is_empty() => {
++                        tip.capabilities[index % tip.capabilities.len()]
++                    }
++                    _ => fallback,
++                };
++                let grant_scopes = match chain.hops.last() {
++                    Some(tip) => tip
++                        .grant_ids
++                        .iter()
++                        .enumerate()
++                        .map(|(position, grant_id)| GrantScope {
++                            grant_id: *grant_id,
++                            capability: tip
++                                .capabilities
++                                .get(position)
++                                .copied()
++                                .unwrap_or(capability),
++                            scope: scope.clone(),
++                            expires_at_ms: expiry,
++                        })
++                        .collect(),
++                    None => Vec::new(),
++                };
++                let tool_capabilities = tool.map(|mut tool| {
++                    tool.sort();
++                    tool.dedup();
++                    tool
++                });
++                PermissionRequest {
++                    principal_id: principal_id(7),
++                    actor_id: actor_id(8),
++                    run_id: None,
++                    chain,
++                    grant_scopes,
++                    tool_capabilities,
++                    capability,
++                    target,
++                    extension_digest,
++                    config_digest,
++                    now_ms,
++                }
++            },
++        )
+ }
+ 
+ proptest! {
+     #[test]
+     fn p2_every_input_yields_exactly_one_deterministic_variant(request in request_strategy()) {
+         let first = evaluate(&request);
+         let second = evaluate(&request);
+         prop_assert_eq!(&first, &second, "evaluate must be deterministic");
+@@ -770,16 +1432,18 @@ proptest! {
+                     .map(|tip| tip.grant_ids.iter().copied().collect())
+                     .unwrap_or_default();
+                 prop_assert!(cited.is_subset(&tip_grants), "allow must cite the tip's own grants");
+             }
+             Decision::Deny { .. } => {}
+             Decision::RequireApproval { request: draft } => {
+                 prop_assert!(!draft.nonce.is_empty());
+                 prop_assert!(draft.capabilities.contains(&request.capability));
++                prop_assert_eq!(&draft.extension_digest, &request.extension_digest);
++                prop_assert_eq!(&draft.config_digest, &request.config_digest);
+             }
+         }
+     }
+ 
+     #[test]
+     fn p2_tool_allow_lists_never_widen_authority(request in request_strategy()) {
+         let unrestricted = evaluate(&PermissionRequest {
+             tool_capabilities: None,
+@@ -795,9 +1459,21 @@ proptest! {
+         );
+         if matches!(evaluate(&request), Decision::Allow { .. }) {
+             prop_assert!(
+                 !matches!(unrestricted, Decision::Deny { .. }),
+                 "dropping the tool allow list cannot deny an operation the tool allowed"
+             );
+         }
+     }
++
++    #[test]
++    fn p2_missing_grant_scope_metadata_never_allows(request in request_strategy()) {
++        let bare = PermissionRequest {
++            grant_scopes: Vec::new(),
++            ..request
++        };
++        prop_assert!(
++            !matches!(evaluate(&bare), Decision::Allow { .. }),
++            "a request without loaded grant rows must fail closed"
++        );
++    }
+ }

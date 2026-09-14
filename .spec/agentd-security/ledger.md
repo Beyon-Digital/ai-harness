@@ -13,3 +13,8 @@
 - 2026-09-14T05:36:27Z SEC-001 -> review (@agent-sec001)
 - 2026-09-14T06:28:39Z SEC-001 -> done (@agent-sec001)
 - 2026-09-14T06:28:40Z SEC-001 approved; minors deferred (blob codec doc, grant-existence note, contract-bump story). 2/5 done; SEC-002 dispatched.
+- 2026-09-14T06:28:49Z SEC-002 -> claimed (@agent-sec002)
+- 2026-09-14T06:30:19Z SEC-002 -> in_progress (@agent-sec002)
+- 2026-09-14T08:04:12Z SEC-002 -> review (@agent-sec002)
+- 2026-09-14T08:40:24Z SEC-002 -> done (@agent-sec002)
+- 2026-09-14T08:40:25Z SEC-002 approved after one fix round (grant-scope enforcement + digest binding + tightened joint rule). 3/5 done; SEC-003 dispatched.

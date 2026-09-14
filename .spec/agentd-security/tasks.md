@@ -102,8 +102,8 @@
 
 ### Task SEC-002: Capability and permission engine
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-sec002
 - depends_on: SEC-001
 - files: `agent-os/crates/permissions/src/lib.rs`, `agent-os/crates/permissions/src/capabilities.rs`, `agent-os/crates/permissions/src/policy.rs`, `agent-os/crates/permissions/tests/policy.rs`
 - requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, P2, N2
