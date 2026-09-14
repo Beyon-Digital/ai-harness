@@ -21,7 +21,7 @@ pub const fn condition_met(condition: DependencyCondition, source_state: RunStat
         DependencyCondition::CompletedSuccessfully => {
             matches!(source_state, RunState::Completed)
         }
-        DependencyCondition::AnyTerminal => is_terminal(source_state),
+        DependencyCondition::AnyTerminal => source_state.is_terminal(),
         DependencyCondition::CompletedOrCancelled => {
             matches!(source_state, RunState::Completed | RunState::Cancelled)
         }
@@ -51,11 +51,4 @@ pub async fn dependencies_satisfied(
         }
     }
     Ok(true)
-}
-
-const fn is_terminal(state: RunState) -> bool {
-    matches!(
-        state,
-        RunState::Completed | RunState::Failed | RunState::Cancelled
-    )
 }

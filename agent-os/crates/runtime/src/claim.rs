@@ -23,14 +23,13 @@ use run_graph::repository::{has_live_claim, load_run};
 
 use crate::{RuntimeDeps, decode_contract, invalid_field, required_id, stage_catalogued};
 
-/// Claims a ready run for `owner`, fencing it for `ttl_ms`.
+/// Claims a ready run for `owner`, fencing it for `ttl_ms`, using system-minted
+/// identifiers.
 ///
-/// Rejections never mutate: a non-`Ready` state or a live unexpired claim is
-/// `Conflict`; a non-`Normal` recovery disposition or an unmet dependency is
-/// `FailedPrecondition`. An expired claim does not block reclamation, but the
-/// disposition gate still applies (R4.5). The winning CAS also fences the
-/// update on the observed revision and `Ready` state, so racing claimants
-/// serialize and exactly one commits.
+/// Service-level convenience for callers that do not carry an [`IdProvider`];
+/// command handlers call [`claim_with_ids`] with the injected
+/// [`RuntimeDeps::ids`](crate::RuntimeDeps::ids) so deterministic tests control
+/// the claim token and event ids.
 pub async fn claim(
     txn: &mut dyn KernelTxn,
     run_id: RunId,
@@ -38,6 +37,36 @@ pub async fn claim(
     ttl_ms: u64,
     now_ms: i64,
     daemon_epoch: u64,
+) -> errors::Result<()> {
+    claim_with_ids(
+        txn,
+        run_id,
+        owner,
+        ttl_ms,
+        now_ms,
+        daemon_epoch,
+        &SystemIdProvider,
+    )
+    .await
+}
+
+/// Claims a ready run for `owner`, fencing it for `ttl_ms`, drawing the claim
+/// token and both event ids from `ids`.
+///
+/// Rejections never mutate: a non-`Ready` state or a live unexpired claim is
+/// `Conflict`; a non-`Normal` recovery disposition or an unmet dependency is
+/// `FailedPrecondition`. An expired claim does not block reclamation, but the
+/// disposition gate still applies (R4.5). The winning CAS also fences the
+/// update on the observed revision and `Ready` state, so racing claimants
+/// serialize and exactly one commits.
+pub async fn claim_with_ids(
+    txn: &mut dyn KernelTxn,
+    run_id: RunId,
+    owner: String,
+    ttl_ms: u64,
+    now_ms: i64,
+    daemon_epoch: u64,
+    ids: &dyn IdProvider,
 ) -> errors::Result<()> {
     let current = load_run(txn, run_id).await?;
     if current.state != RunState::Ready {
@@ -69,7 +98,7 @@ pub async fn claim(
                 state: Some(RunState::Running),
                 claim: Some(ClaimPatch {
                     owner,
-                    token: fresh_token(),
+                    token: fresh_token(ids),
                     expires_unix_ms,
                     daemon_epoch,
                 }),
@@ -90,10 +119,9 @@ pub async fn claim(
     })?;
 
     let payload = run_payload(&claimed).encode_to_vec();
-    let ids = SystemIdProvider;
     stage_catalogued(
         txn,
-        EventId::new(&ids),
+        EventId::new(ids),
         "RunClaimed",
         StreamKey::run(run_id),
         payload.clone(),
@@ -103,7 +131,7 @@ pub async fn claim(
     .await?;
     stage_catalogued(
         txn,
-        EventId::new(&ids),
+        EventId::new(ids),
         "RunStarted",
         StreamKey::run(run_id),
         payload,
@@ -114,14 +142,13 @@ pub async fn claim(
     Ok(())
 }
 
-/// Mints the claim token.
+/// Mints the claim token from the injected provider.
 ///
-/// The design signature for [`claim`] carries no `IdProvider`, so the token is
-/// a fresh `SystemIdProvider` UUIDv7 masked to the positive `u64` range the
-/// SQLite `claim_token` column admits; the low 63 bits of a UUIDv7 are random,
-/// which is what the fence needs.
-fn fresh_token() -> u64 {
-    (SystemIdProvider.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
+/// The SQLite `claim_token` column carries a non-negative `i64`, so the
+/// UUIDv7's low 63 bits are kept; those bits are random, which is what the
+/// fence needs.
+fn fresh_token(ids: &dyn IdProvider) -> u64 {
+    (ids.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
 }
 
 fn run_payload(row: &RunRow) -> contract::AgentRun {
@@ -179,13 +206,14 @@ impl CommandHandler for ClaimReadyRunHandler {
         }
         let now_ms = self.deps.now_unix_ms();
         let daemon_epoch = txn.context().daemon_epoch;
-        claim(
+        claim_with_ids(
             txn,
             run_id,
             raw.claim_owner,
             raw.claim_ttl_ms,
             now_ms,
             daemon_epoch,
+            self.deps.ids.as_ref(),
         )
         .await?;
         Ok(CommandOutcome {

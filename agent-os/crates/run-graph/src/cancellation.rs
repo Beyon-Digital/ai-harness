@@ -16,7 +16,6 @@
 use domain::generated::contract;
 use domain::ids::{EventId, EventStreamKey, RunId};
 use domain::provider::SystemIdProvider;
-use domain::run::RunState;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use events::outbox::{DraftEvent, stage};
@@ -32,26 +31,31 @@ const CANCELLATION_EPOCH_ADVANCED: &str = "CancellationEpochAdvanced";
 
 /// Advances the root's cancellation epoch and reports the eligible subtree.
 ///
-/// The epoch CAS fences on the root's revision, state, and observed epoch, so a
-/// racing cancellation loses with `Conflict` and leaves the row untouched; on
-/// success the revision increments exactly once and
-/// `CancellationEpochAdvanced` is staged on the root's stream in the same
-/// transaction (R5.1, R5.3, R5.4). The returned ids start with the root when it
-/// is eligible and continue with the breadth-first descendant closure over
-/// `runs.parent_run_id`; every returned run is non-terminal and not already
-/// `Cancelling`, so the caller transitions each exactly once (R5.2, R5.5).
+/// The epoch CAS fences on the caller's `expected_run_revision` when one is
+/// given (the request's revision arm), plus the freshly loaded root state and
+/// observed epoch, so a racing cancellation loses with `Conflict` and leaves
+/// the row untouched; passing `None` fences on the freshly loaded revision,
+/// which keeps duplicate cancellations working. On success the revision
+/// increments exactly once and `CancellationEpochAdvanced` is staged on the
+/// root's stream in the same transaction (R5.1, R5.3, R5.4). The returned ids
+/// start with the root when it is eligible and continue with the breadth-first
+/// descendant closure over `runs.parent_run_id`; every returned run's
+/// `cancellation_target` is `Some`, so the caller transitions each exactly
+/// once (R5.2, R5.5).
 pub async fn cancel_subtree(
     txn: &mut dyn KernelTxn,
     root: RunId,
+    expected_run_revision: Option<u64>,
     _reason: &str,
     _now_ms: i64,
 ) -> errors::Result<Vec<RunId>> {
     let root_row = load_run(txn, root).await?;
-    let advanced = advance_epoch(txn, &root_row).await?;
+    let expected_revision = expected_run_revision.unwrap_or(root_row.run_revision);
+    let advanced = advance_epoch(txn, &root_row, expected_revision).await?;
     stage_epoch_event(txn, &advanced).await?;
 
     let mut eligible = Vec::new();
-    if is_eligible(advanced.state) {
+    if advanced.state.cancellation_target().is_some() {
         eligible.push(root);
     }
     for descendant in descendants(txn, root).await? {
@@ -62,42 +66,29 @@ pub async fn cancel_subtree(
                 "descendant vanished during the cancellation walk",
             )
         })?;
-        if is_eligible(row.state) {
+        if row.state.cancellation_target().is_some() {
             eligible.push(descendant);
         }
     }
     Ok(eligible)
 }
 
-/// Returns true when cancellation still has to move the run: every non-terminal
-/// state except `Cancelling`, which is already draining (R5.2, R5.5).
-///
-/// The eligible set deliberately mirrors the cancellation edges of
-/// `runtime/src/state.rs`, which stays the transition authority and is applied
-/// by `runtime::cancel`; the mirror lives here only to respect the crate
-/// direction (`runtime` depends on `run-graph`, never the reverse), and it must
-/// move with the table's cancellation edges.
-const fn is_eligible(state: RunState) -> bool {
-    matches!(
-        state,
-        RunState::Created
-            | RunState::Ready
-            | RunState::Running
-            | RunState::WaitingTool
-            | RunState::WaitingChild
-            | RunState::WaitingHuman
-            | RunState::Suspended
-    )
-}
-
 /// Compare-and-set increments `cancellation_epoch` and bumps the revision once.
-async fn advance_epoch(txn: &mut dyn KernelTxn, root: &RunRow) -> errors::Result<RunRow> {
+///
+/// The CAS requires the caller's expected revision (or the freshly loaded one
+/// when the request carried none) alongside the loaded state and epoch, so a
+/// stale expectation conflicts with no epoch advance and no staged event.
+async fn advance_epoch(
+    txn: &mut dyn KernelTxn,
+    root: &RunRow,
+    expected_revision: u64,
+) -> errors::Result<RunRow> {
     let updated = txn
         .runs()
         .cas_update(
             root.run_id,
             RunCas {
-                run_revision: root.run_revision,
+                run_revision: expected_revision,
                 state: Some(root.state),
                 cancellation_epoch: Some(root.cancellation_epoch),
             },

@@ -2,17 +2,16 @@
 //! dispositions.
 //!
 //! [`reconstruct`] enumerates every non-terminal run under the acquired daemon
-//! epoch, loads its effects, timers, and frozen environment bindings, and
-//! assigns exactly one [`RecoveryDisposition`] per the normative recovery
-//! matrix (`specs/recovery-table.md`, R6.2). The matrix is implemented for the
-//! rows the current read surface reaches: effects, timers, and adapter
-//! bindings. The `WaitingHuman` expired-approval row is deferred to the
-//! approvals module because the port has no approvals-by-run read, so a
-//! `WaitingHuman` run currently always classifies `Normal` (see [`matrix`]).
-//! Precedence is first-match: blocked-unknown-effect, then reconciliation,
-//! then missing resource, then the ordinary run-state row (D5). A
-//! `(run state, effect state)` pair no row assigns fails closed with
-//! `Internal` before any disposition is written (R6.3, D8).
+//! epoch, loads its effects, timers, frozen environment bindings, and
+//! approvals, and assigns exactly one [`RecoveryDisposition`] per the
+//! normative recovery matrix (`specs/recovery-table.md`, R6.2). A
+//! `WaitingHuman` run whose latest approval request has expired classifies
+//! `RequiresHumanDecision`; a pending (or absent) approval keeps the
+//! pending-approval `Normal` row. Precedence is first-match:
+//! blocked-unknown-effect, then reconciliation, then missing resource, then
+//! the ordinary run-state row (D5). A `(run state, effect state)` pair no row
+//! assigns fails closed with `Internal` before any disposition is written
+//! (R6.3, D8).
 //!
 //! Changed dispositions are persisted with a revision-bumping patch and a
 //! catalogued `RunRecoveryDispositionChanged` event; run state is never
@@ -39,7 +38,6 @@ use run_graph::readiness::condition_met;
 pub use domain::time::Clock;
 
 use crate::stage_catalogued;
-use crate::state::is_terminal;
 
 /// Summary of one startup reconstruction pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,12 +52,11 @@ pub struct RecoveryReport {
 ///
 /// The read pass classifies all active runs before the write pass begins, so
 /// a fail-closed combination aborts startup with no partial disposition state.
-/// `_clock` is carried for interface stability with the composition root, in
-/// the same way [`crate::run::transition`] carries an unused mutation
-/// timestamp; the disposition patch surface has no time column yet.
+/// The clock supplies the wall time the `WaitingHuman` approval-expiry row
+/// compares against.
 pub async fn reconstruct(
     store: &dyn KernelStore,
-    _clock: Arc<dyn Clock>,
+    clock: Arc<dyn Clock>,
 ) -> errors::Result<RecoveryReport> {
     let fence = store.current_fence().await?.ok_or_else(|| {
         KernelError::new(
@@ -68,6 +65,7 @@ pub async fn reconstruct(
             "startup recovery requires an acquired daemon fence",
         )
     })?;
+    let now_ms = clock.now_unix_ms();
 
     let planned = {
         let mut read = store.begin_read().await?;
@@ -76,8 +74,15 @@ pub async fn reconstruct(
         for run in runs {
             let effects = read.effects().list_by_run(run.run_id).await?;
             let timers = read.timers().list_by_run(run.run_id).await?;
-            let disposition =
-                classify(read.as_mut(), &run, &effects, &timers, fence.epoch.0).await?;
+            let disposition = classify(
+                read.as_mut(),
+                &run,
+                &effects,
+                &timers,
+                fence.epoch.0,
+                now_ms,
+            )
+            .await?;
             planned.push((run, disposition));
         }
         planned
@@ -159,6 +164,7 @@ async fn classify(
     effects: &[EffectRow],
     timers: &[TimerRow],
     daemon_epoch: u64,
+    now_ms: i64,
 ) -> errors::Result<RecoveryDisposition> {
     let Some(class) = EffectClass::aggregate(effects) else {
         let offending = effects
@@ -189,6 +195,16 @@ async fn classify(
         } else {
             RecoveryDisposition::Normal
         };
+    }
+
+    // Matrix A distinguishes a `WaitingHuman` whose latest approval request
+    // has expired (an operator must renew, respond, or cancel) from one whose
+    // approval is still pending.
+    if run.state == RunState::WaitingHuman
+        && class == EffectClass::None
+        && latest_approval_expired(read, run.run_id, now_ms).await?
+    {
+        disposition = RecoveryDisposition::RequiresHumanDecision;
     }
 
     // A timer claim held by a prior daemon instance must be reclaimed before
@@ -291,15 +307,12 @@ fn dispatched_is_unsafe(effect: &EffectRow) -> bool {
 ///
 /// Matrix C (terminal owning run) is unreachable here: terminal runs are never
 /// enumerated, so a terminal state reaching classification is treated as
-/// unmapped rather than guessed. The `WaitingChild` arm is a placeholder that
-/// [`classify`] refines with the declared-condition check.
+/// unmapped rather than guessed. The `WaitingChild` and `WaitingHuman` arms
+/// are placeholders that [`classify`] refines with the declared-condition and
+/// approval-expiry checks respectively.
 ///
-/// The `WaitingHuman` arm implements the pending-approval row only. The
-/// expired-approval row selects `RecoveryDisposition::RequiresHumanDecision`
-/// but is deferred to the approvals module because the port has no
-/// approvals-by-run read, so an expired approval currently classifies
-/// `Normal`. `Suspended` genuinely selects `RequiresHumanDecision` (no resume
-/// path exists, design D8) and is implemented.
+/// `Suspended` selects `RequiresHumanDecision` (no resume path exists, design
+/// D8).
 fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition> {
     use EffectClass as E;
     use RecoveryDisposition as D;
@@ -310,8 +323,8 @@ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition
         (S::Running, E::None) => D::Recovering,
         (S::WaitingTool, E::None) => D::Normal,
         (S::WaitingChild, E::None) => D::Normal,
-        // Pending-approval row only; the expired-approval `RequiresHumanDecision`
-        // row is deferred to the approvals module (no approvals-by-run read yet).
+        // Pending or unexpired approval; `classify` refines an expired latest
+        // approval to `RequiresHumanDecision`.
         (S::WaitingHuman, E::None) => D::Normal,
         (
             S::Suspended,
@@ -330,6 +343,28 @@ fn matrix(run_state: RunState, class: EffectClass) -> Option<RecoveryDisposition
         _ => return None,
     };
     Some(disposition)
+}
+
+/// Matrix A `WaitingHuman` refinement: true when the run's latest approval
+/// request has expired. A run with no approval rows, or whose latest request
+/// is still live, keeps the pending-approval `Normal` row.
+///
+/// "Latest" is the greatest `(created_at_ms, request_id)` the by-run read
+/// returns; the read orders the same way, and a renewed approval supersedes an
+/// older expired one.
+async fn latest_approval_expired(
+    read: &mut dyn KernelReadTxn,
+    run_id: RunId,
+    now_ms: i64,
+) -> errors::Result<bool> {
+    let approvals = read.security().list_approvals_by_run(run_id).await?;
+    let Some(latest) = approvals
+        .iter()
+        .max_by_key(|row| (row.created_at_ms, row.request_id))
+    else {
+        return Ok(false);
+    };
+    Ok(latest.expires_at_ms <= now_ms)
 }
 
 /// Loads the run's frozen environment and bindings when one is referenced.
@@ -422,7 +457,7 @@ async fn waiting_child_advanced(
     Ok(runs
         .iter()
         .filter(|row| row.parent_run_id == Some(run.run_id))
-        .all(|child| is_terminal(child.state)))
+        .all(|child| child.state.is_terminal()))
 }
 
 /// A claimed timer is stale unless the current daemon epoch owns the claim;

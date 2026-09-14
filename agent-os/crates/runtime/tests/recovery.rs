@@ -1,28 +1,26 @@
 //! Startup recovery acceptance tests (R6.1-R6.6, P4): enumeration of
-//! non-terminal runs, matrix classification over the real SQLite store for the
-//! rows the read surface reaches (effects, timers, adapter bindings),
-//! fail-closed unmapped combinations, disposition persistence, and the
-//! guarantee that an ambiguous effect never leaves a run resumable.
-//!
-//! The `WaitingHuman` expired-approval row is deferred to the approvals module
-//! (no approvals-by-run read yet); the matrix table test pins the deferred
-//! pending-approval behaviour explicitly.
+//! non-terminal runs, matrix classification over the real SQLite store for
+//! effects, timers, adapter bindings, and approval expiry, fail-closed
+//! unmapped combinations, disposition persistence, and the guarantee that an
+//! ambiguous effect never leaves a run resumable.
 
 use std::sync::Arc;
 
 use domain::effect::{EffectClass, EffectState, IdempotencySemantics, ReconciliationSemantics};
 use domain::generated::contract;
 use domain::ids::{
-    AdapterId, AgentSpecId, ConfigGenerationId, DaemonInstanceId, DecisionId, EnvironmentId,
-    EventCursor, EventStreamKey, PrincipalId, RunId, TaskId, TimerId,
+    AdapterId, AgentSpecId, ApprovalRequestId, ConfigGenerationId, DaemonInstanceId, DecisionId,
+    EnvironmentId, EventCursor, EventId, EventStreamKey, PrincipalId, RunId, TaskId, TimerId,
 };
+use domain::provider::IdProvider;
 use domain::resource::{DependencyCondition, TimerState, WorkspaceAccessMode};
 use domain::run::{RecoveryDisposition, RunState};
+use domain::security::ApprovalState;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::KernelStore;
 use kernel_store::models::{
-    NewEffect, NewResolvedBinding, NewResolvedEnvironment, NewRun, NewTask, NewTimer,
-    OutboxEventRow, RunCas, RunPatch, RunRow, TimerPatch,
+    NewApprovalRequest, NewEffect, NewResolvedBinding, NewResolvedEnvironment, NewRun, NewTask,
+    NewTimer, OutboxEventRow, RunCas, RunPatch, RunRow, TimerPatch,
 };
 use kernel_store::{KernelTxn, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
@@ -330,6 +328,38 @@ impl Harness {
         timer_id
     }
 
+    async fn seed_approval(
+        &self,
+        run_id: RunId,
+        expires_at_ms: i64,
+        created_at_ms: i64,
+    ) -> ApprovalRequestId {
+        let request_id = ApprovalRequestId::new(self.ids.as_ref());
+        let mut txn = self.write().await;
+        txn.security()
+            .insert_approval_request(NewApprovalRequest {
+                request_id,
+                request_digest: format!("digest-{request_id}"),
+                principal_id: self.principal,
+                actor_id: domain::ids::ActorId::new(self.ids.as_ref()),
+                run_id: Some(run_id),
+                operation: "invoke".to_owned(),
+                target_resource: None,
+                capability_ids: Vec::new(),
+                extension_bundle_digest: None,
+                config_generation_digest: None,
+                expires_at_ms,
+                nonce: format!("nonce-{request_id}"),
+                state: ApprovalState::Pending,
+                created_at_ms,
+                resolved_at_ms: None,
+            })
+            .await
+            .expect("seed approval");
+        txn.commit().await.expect("approval commits");
+        request_id
+    }
+
     async fn add_edge(
         &self,
         source: RunId,
@@ -451,13 +481,14 @@ async fn unknown_effect_blocks_the_run_and_never_leaves_it_resumable() {
     harness.force_state(run, RunState::Ready).await;
     let error = {
         let mut txn = harness.write().await;
-        let result = runtime::claim::claim(
+        let result = runtime::claim::claim_with_ids(
             txn.as_mut(),
             run,
             "worker-1".to_owned(),
             60_000,
             SEED_MS,
             harness.epoch,
+            harness.ids.as_ref(),
         )
         .await;
         txn.rollback().await.expect("rollback");
@@ -624,18 +655,17 @@ async fn terminal_runs_are_never_enumerated() {
 }
 
 #[tokio::test]
-async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
+async fn classification_follows_the_recovery_matrix() {
     struct Case {
         run_state: RunState,
         effect: Option<(EffectState, ReconciliationSemantics, IdempotencySemantics)>,
         expected: RecoveryDisposition,
     }
 
-    // Coverage is complete for the rows the current read surface reaches
-    // (effects, timers, adapter bindings). The `WaitingHuman`
-    // expired-approval row is deferred to the approvals module because the
-    // port has no approvals-by-run read; the case below pins the deferred
-    // pending-approval behaviour.
+    // Coverage is complete for the matrix rows: effects, timers, adapter
+    // bindings, and the `WaitingHuman` approval-expiry refinement (the cases
+    // below seed no approval, so the pending-approval `Normal` row applies;
+    // the dedicated expiry test covers the `RequiresHumanDecision` row).
     let cases = vec![
         Case {
             run_state: RunState::Created,
@@ -658,9 +688,9 @@ async fn classification_follows_the_matrix_rows_the_read_surface_reaches() {
             expected: RecoveryDisposition::Normal,
         },
         Case {
-            // Deferred: an expired approval must select `RequiresHumanDecision`
-            // once approvals-by-run exists; until then `WaitingHuman`
-            // classifies `Normal` (pending-approval row).
+            // Pending-approval row: no approval row exists, so the run stays
+            // `Normal`; an expired latest approval selects
+            // `RequiresHumanDecision` (see the dedicated expiry test).
             run_state: RunState::WaitingHuman,
             effect: None,
             expected: RecoveryDisposition::Normal,
@@ -943,4 +973,118 @@ async fn stale_claimed_timers_hold_the_run_out_of_normal() {
     let stale_row = harness.run(stale).await.expect("run persists");
     assert_eq!(stale_row.recovery, RecoveryDisposition::Recovering);
     assert_eq!(stale_row.run_revision, 1);
+}
+
+#[tokio::test]
+async fn waiting_human_approval_expiry_selects_requires_human_decision() {
+    let harness = Harness::new().await;
+    let task = TaskId::new(harness.ids.as_ref());
+    harness.seed_task(task).await;
+
+    let expired = harness
+        .seed_run_at(task, RunState::WaitingHuman, SEED_MS)
+        .await;
+    harness.seed_approval(expired, SEED_MS, SEED_MS - 10).await;
+
+    let pending = harness
+        .seed_run_at(task, RunState::WaitingHuman, SEED_MS + 1)
+        .await;
+    harness
+        .seed_approval(pending, SEED_MS + 60_000, SEED_MS)
+        .await;
+
+    // A renewed live approval supersedes an older expired one.
+    let renewed = harness
+        .seed_run_at(task, RunState::WaitingHuman, SEED_MS + 2)
+        .await;
+    harness
+        .seed_approval(renewed, SEED_MS - 1, SEED_MS - 10)
+        .await;
+    harness
+        .seed_approval(renewed, SEED_MS + 60_000, SEED_MS + 1)
+        .await;
+
+    let report = reconstruct(harness.store.as_ref(), harness.clock.clone())
+        .await
+        .expect("reconstruction succeeds");
+    assert_eq!(
+        report.dispositions,
+        vec![
+            (expired, RecoveryDisposition::RequiresHumanDecision),
+            (pending, RecoveryDisposition::Normal),
+            (renewed, RecoveryDisposition::Normal),
+        ]
+    );
+
+    let expired_row = harness.run(expired).await.expect("run persists");
+    assert_eq!(
+        expired_row.state,
+        RunState::WaitingHuman,
+        "recovery never changes state"
+    );
+    assert_eq!(
+        expired_row.recovery,
+        RecoveryDisposition::RequiresHumanDecision
+    );
+    assert_eq!(expired_row.run_revision, 1, "one disposition patch");
+    let events = harness.events().await;
+    let staged = stream_events_for(&events, expired);
+    assert_eq!(staged.len(), 1, "one disposition event");
+    assert_eq!(staged[0].event_type, "RunRecoveryDispositionChanged");
+
+    for unchanged in [pending, renewed] {
+        let row = harness.run(unchanged).await.expect("run persists");
+        assert_eq!(row.recovery, RecoveryDisposition::Normal, "{unchanged}");
+        assert_eq!(
+            row.run_revision, 0,
+            "a live approval is not rewritten: {unchanged}"
+        );
+        assert!(
+            stream_events_for(&events, unchanged).is_empty(),
+            "no audit event for {unchanged}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn claims_draw_tokens_and_event_ids_from_the_injected_provider() {
+    let harness = Harness::new().await;
+    let task = TaskId::new(harness.ids.as_ref());
+    harness.seed_task(task).await;
+    let run = harness.seed_run(task, RunState::Ready).await;
+
+    let provider = DeterministicIds::new(SEED_MS);
+    let expected = DeterministicIds::new(SEED_MS);
+    let token_uuid = expected.new_uuid_v7();
+    let claimed_event = EventId::new(&expected);
+    let started_event = EventId::new(&expected);
+
+    let mut txn = harness.write().await;
+    runtime::claim::claim_with_ids(
+        txn.as_mut(),
+        run,
+        "worker-1".to_owned(),
+        30_000,
+        SEED_MS,
+        harness.epoch,
+        &provider,
+    )
+    .await
+    .expect("a ready run is claimed");
+    txn.commit().await.expect("claim commits");
+
+    let persisted = harness.run(run).await.expect("run persists");
+    assert_eq!(
+        persisted.claim_token,
+        Some((token_uuid.as_u128() & i64::MAX as u128) as u64),
+        "the token is the injected provider's masked UUIDv7"
+    );
+
+    let events = harness.events().await;
+    let staged: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
+    assert_eq!(
+        staged,
+        vec![claimed_event, started_event],
+        "event ids come from the injected provider in staging order"
+    );
 }

@@ -155,6 +155,36 @@ impl Harness {
         row
     }
 
+    /// Bumps a run's revision through a no-op patch so a nonzero revision
+    /// expectation can be exercised.
+    async fn bump_revision(&self, run_id: RunId) {
+        let mut txn = self.write().await;
+        let current = txn
+            .runs()
+            .get(run_id)
+            .await
+            .expect("run read")
+            .expect("seeded run exists");
+        let updated = txn
+            .runs()
+            .cas_update(
+                run_id,
+                kernel_store::models::RunCas {
+                    run_revision: current.run_revision,
+                    state: None,
+                    cancellation_epoch: None,
+                },
+                kernel_store::models::RunPatch {
+                    bump_revision: true,
+                    ..kernel_store::models::RunPatch::default()
+                },
+            )
+            .await
+            .expect("revision patch applies");
+        assert!(updated, "revision patch lands");
+        txn.commit().await.expect("revision patch commits");
+    }
+
     async fn events(&self) -> Vec<OutboxEventRow> {
         let mut txn = self.write().await;
         let rows = txn
@@ -369,7 +399,7 @@ async fn cancel_service_reports_the_changed_runs() {
     let child = harness.seed_run(task, Some(root), RunState::Created).await;
 
     let mut txn = harness.write().await;
-    let report = cancel(txn.as_mut(), root, "operator cancelled", SEED_MS)
+    let report = cancel(txn.as_mut(), root, None, "operator cancelled", SEED_MS)
         .await
         .expect("the cancel service commits");
     txn.commit()
@@ -454,6 +484,65 @@ async fn cancel_rejects_a_stale_expected_revision_without_mutation() {
     assert_eq!(persisted.cancellation_epoch, 0);
     assert_eq!(persisted.run_revision, 0);
     assert!(harness.events().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cancels_sharing_one_expectation_commit_exactly_once() {
+    let harness = Arc::new(Harness::new().await);
+    let task = TaskId::new(harness.ids.as_ref());
+    harness.seed_task(task).await;
+    let root = harness.seed_run(task, None, RunState::Running).await;
+    harness.bump_revision(root).await;
+    let expected = harness.run(root).await.expect("root persists").run_revision;
+    assert_eq!(expected, 1, "the shared expectation is nonzero");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut cancels = Vec::new();
+    for _ in 0..2 {
+        let harness = Arc::clone(&harness);
+        let barrier = Arc::clone(&barrier);
+        cancels.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let mut txn = harness.write().await;
+            let result = cancel(txn.as_mut(), root, Some(expected), "race", SEED_MS).await;
+            txn.commit()
+                .await
+                .expect("cancel transaction commits regardless of outcome");
+            result
+        }));
+    }
+
+    let mut winners = 0_usize;
+    let mut losers = 0_usize;
+    for cancel_task in cancels {
+        match cancel_task.await.expect("cancel task joins") {
+            Ok(_) => winners += 1,
+            Err(error) => {
+                assert_eq!(error.code(), ErrorCode::Conflict);
+                assert_eq!(error.retry_class(), RetryClass::Never);
+                losers += 1;
+            }
+        }
+    }
+    assert_eq!(winners, 1, "exactly one cancel commits");
+    assert_eq!(losers, 1, "the stale expectation loses");
+
+    let persisted = harness.run(root).await.expect("root persists");
+    assert_eq!(persisted.state, RunState::Cancelling);
+    assert_eq!(persisted.cancellation_epoch, 1, "exactly one epoch advance");
+    assert_eq!(
+        persisted.run_revision, 3,
+        "one seeded bump, one epoch bump, one transition"
+    );
+
+    let events = harness.events().await;
+    assert_eq!(
+        events_of(&events, "CancellationEpochAdvanced").len(),
+        1,
+        "the loser stages no epoch event"
+    );
+    assert_eq!(events_of(&events, "RunStateChanged").len(), 1);
+    assert_eq!(events_of(&events, "RunCancelled").len(), 0);
 }
 
 #[tokio::test]

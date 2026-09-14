@@ -21,7 +21,6 @@ use kernel_store::KernelTxn;
 use kernel_store::models::RunRow;
 use prost::Message;
 use run_graph::cancellation::cancel_subtree;
-use run_graph::repository::load_run;
 
 use crate::run::transition;
 use crate::state::REASON_CANCELLATION_REQUESTED;
@@ -48,13 +47,19 @@ pub struct CancellationReport {
 /// always been allowed, so every changed run commits exactly one transition.
 /// The committed revision increments once per transition plus once for the
 /// epoch advance (R5.4).
+///
+/// When `expected_run_revision` is `Some`, the epoch CAS requires that exact
+/// revision; a stale expectation conflicts before any epoch advance or staged
+/// event, so two concurrent cancels sharing one expectation commit at most
+/// once. `None` fences on the freshly loaded revision instead.
 pub async fn cancel(
     txn: &mut dyn KernelTxn,
     run_id: RunId,
+    expected_run_revision: Option<u64>,
     reason: &str,
     now_ms: i64,
 ) -> errors::Result<CancellationReport> {
-    let eligible = cancel_subtree(txn, run_id, reason, now_ms).await?;
+    let eligible = cancel_subtree(txn, run_id, expected_run_revision, reason, now_ms).await?;
 
     let mut changed = Vec::new();
     for candidate in eligible {
@@ -65,8 +70,8 @@ pub async fn cancel(
                 "eligible run vanished during cancellation",
             )
         })?;
-        let (final_row, event_type) = match row.state {
-            RunState::Created | RunState::Ready => (
+        let (final_row, event_type) = match row.state.cancellation_target() {
+            Some(RunState::Cancelled) => (
                 transition(
                     txn,
                     candidate,
@@ -78,11 +83,7 @@ pub async fn cancel(
                 .await?,
                 "RunCancelled",
             ),
-            RunState::Running
-            | RunState::WaitingTool
-            | RunState::WaitingChild
-            | RunState::WaitingHuman
-            | RunState::Suspended => (
+            Some(RunState::Cancelling) => (
                 transition(
                     txn,
                     candidate,
@@ -196,22 +197,19 @@ impl CommandHandler for CancelRunHandler {
         if raw.reason.trim().is_empty() {
             return Err(invalid_field("reason", "must not be empty"));
         }
-        if raw.expected_run_revision != 0 {
-            let current = load_run(txn, run_id).await?;
-            if current.run_revision != raw.expected_run_revision {
-                return Err(conflict(
-                    "run revision does not match the cancellation expectation",
-                ));
-            }
-        }
-        let report = cancel(txn, run_id, &raw.reason, self.deps.now_unix_ms()).await?;
+        let expected_run_revision =
+            (raw.expected_run_revision != 0).then_some(raw.expected_run_revision);
+        let report = cancel(
+            txn,
+            run_id,
+            expected_run_revision,
+            &raw.reason,
+            self.deps.now_unix_ms(),
+        )
+        .await?;
         Ok(CommandOutcome {
             code: OutcomeCode::Ok,
             payload: report.root.to_string().into_bytes(),
         })
     }
-}
-
-fn conflict(detail: &'static str) -> KernelError {
-    KernelError::new(ErrorCode::Conflict, RetryClass::Never, detail)
 }

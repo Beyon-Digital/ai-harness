@@ -32,7 +32,6 @@ use domain::ids::{
     RunId, SessionId, TaskId, TimerId, TurnId, WorkspaceId,
 };
 use domain::resource::{LeaseEnforcementState, WorkspaceAccessMode};
-use domain::run::RunState;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::*;
@@ -639,19 +638,12 @@ impl RunRead for MockRunRepo {
         let mut rows: Vec<RunRow> = state
             .runs
             .values()
-            .filter(|row| !is_terminal_state(row.state))
+            .filter(|row| !row.state.is_terminal())
             .cloned()
             .collect();
         rows.sort_by_key(|row| (row.created_at_ms, row.run_id));
         Ok(rows)
     }
-}
-
-fn is_terminal_state(state: RunState) -> bool {
-    matches!(
-        state,
-        RunState::Completed | RunState::Failed | RunState::Cancelled
-    )
 }
 
 #[async_trait]
@@ -1369,6 +1361,21 @@ impl SecurityRead for MockSecurityRepo {
         id: ApprovalRequestId,
     ) -> errors::Result<Option<ApprovalRequestRow>> {
         Ok(lock(&self.state)?.approval_requests.get(&id).cloned())
+    }
+
+    async fn list_approvals_by_run(
+        &mut self,
+        run_id: RunId,
+    ) -> errors::Result<Vec<ApprovalRequestRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<ApprovalRequestRow> = state
+            .approval_requests
+            .values()
+            .filter(|row| row.run_id == Some(run_id))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| (row.created_at_ms, row.request_id));
+        Ok(rows)
     }
 
     async fn list_approval_responses(

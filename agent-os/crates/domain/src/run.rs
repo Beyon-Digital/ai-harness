@@ -146,6 +146,38 @@ mirror_enum! {
     }
 }
 
+impl RunState {
+    /// Returns true for the absorbing terminal states `Completed`, `Failed`,
+    /// and `Cancelled`.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    /// Returns the state a cancellation request moves this run to, or `None`
+    /// when cancellation no longer applies.
+    ///
+    /// Never-started runs (`Created`, `Ready`) end `Cancelled` directly: there
+    /// is no cleanup to drain and no resolved environment to fabricate. Every
+    /// other started non-terminal state drains through `Cancelling`, and
+    /// `Cancelling`, terminal, and `Unspecified` runs are not cancellation
+    /// targets.
+    pub const fn cancellation_target(self) -> Option<Self> {
+        match self {
+            Self::Created | Self::Ready => Some(Self::Cancelled),
+            Self::Running
+            | Self::WaitingTool
+            | Self::WaitingChild
+            | Self::WaitingHuman
+            | Self::Suspended => Some(Self::Cancelling),
+            Self::Unspecified
+            | Self::Cancelling
+            | Self::Completed
+            | Self::Failed
+            | Self::Cancelled => None,
+        }
+    }
+}
+
 mirror_enum! {
     /// Recovery disposition of an agent run, mirroring `contract::RecoveryDisposition`.
     RecoveryDisposition, "RecoveryDisposition", {
@@ -189,5 +221,38 @@ mod tests {
                 enum_name: "RecoveryDisposition"
             })
         );
+    }
+
+    #[test]
+    fn terminality_and_cancellation_targets_are_centralized() {
+        for state in [RunState::Completed, RunState::Failed, RunState::Cancelled] {
+            assert!(state.is_terminal(), "{state:?}");
+            assert_eq!(state.cancellation_target(), None, "{state:?}");
+        }
+        for state in [RunState::Created, RunState::Ready] {
+            assert!(!state.is_terminal(), "{state:?}");
+            assert_eq!(
+                state.cancellation_target(),
+                Some(RunState::Cancelled),
+                "{state:?}"
+            );
+        }
+        for state in [
+            RunState::Running,
+            RunState::WaitingTool,
+            RunState::WaitingChild,
+            RunState::WaitingHuman,
+            RunState::Suspended,
+        ] {
+            assert!(!state.is_terminal(), "{state:?}");
+            assert_eq!(
+                state.cancellation_target(),
+                Some(RunState::Cancelling),
+                "{state:?}"
+            );
+        }
+        assert!(!RunState::Cancelling.is_terminal());
+        assert_eq!(RunState::Cancelling.cancellation_target(), None);
+        assert_eq!(RunState::Unspecified.cancellation_target(), None);
     }
 }

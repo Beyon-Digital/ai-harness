@@ -57,9 +57,9 @@ pub const fn allows(from: RunState, to: RunState) -> bool {
 
 /// Returns true for the absorbing terminal states `Completed`, `Failed`, and
 /// `Cancelled`.
+///
+/// [`RunState::is_terminal`] is the single authority; this alias keeps the
+/// crate-root spelling used by the state-machine suite.
 pub const fn is_terminal(state: RunState) -> bool {
-    matches!(
-        state,
-        RunState::Completed | RunState::Failed | RunState::Cancelled
-    )
+    state.is_terminal()
 }

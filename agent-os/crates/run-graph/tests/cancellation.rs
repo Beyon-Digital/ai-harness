@@ -162,13 +162,49 @@ impl Harness {
     /// Runs `cancel_subtree` in its own transaction and commits regardless of
     /// outcome, so a mutation smuggled alongside an error would be observed by
     /// the next read (same policy as the state-machine suite).
-    async fn try_cancel(&self, root: RunId, reason: &str) -> errors::Result<Vec<RunId>> {
+    async fn try_cancel(
+        &self,
+        root: RunId,
+        expected_run_revision: Option<u64>,
+        reason: &str,
+    ) -> errors::Result<Vec<RunId>> {
         let mut txn = self.write().await;
-        let result = cancel_subtree(txn.as_mut(), root, reason, SEED_MS).await;
+        let result =
+            cancel_subtree(txn.as_mut(), root, expected_run_revision, reason, SEED_MS).await;
         txn.commit()
             .await
             .expect("cancel transaction commits regardless of outcome");
         result
+    }
+
+    /// Bumps a run's revision through a no-op patch so a nonzero revision
+    /// expectation can be exercised.
+    async fn bump_revision(&self, run_id: RunId) {
+        let mut txn = self.write().await;
+        let current = txn
+            .runs()
+            .get(run_id)
+            .await
+            .expect("run read")
+            .expect("seeded run exists");
+        let updated = txn
+            .runs()
+            .cas_update(
+                run_id,
+                RunCas {
+                    run_revision: current.run_revision,
+                    state: None,
+                    cancellation_epoch: None,
+                },
+                RunPatch {
+                    bump_revision: true,
+                    ..RunPatch::default()
+                },
+            )
+            .await
+            .expect("revision patch applies");
+        assert!(updated, "revision patch lands");
+        txn.commit().await.expect("revision patch commits");
     }
 }
 
@@ -188,7 +224,7 @@ async fn cancel_subtree_advances_the_root_epoch_and_stages_the_epoch_event() {
     let root = harness.seed_run(task, None, RunState::Running).await;
 
     let eligible = harness
-        .try_cancel(root, "operator cancelled")
+        .try_cancel(root, None, "operator cancelled")
         .await
         .expect("cancel commits");
     assert_eq!(eligible, vec![root], "a running root is eligible");
@@ -240,7 +276,7 @@ async fn cancel_subtree_walks_nested_descendants_in_breadth_first_order() {
     let unrelated = harness.seed_run(task, None, RunState::Running).await;
 
     let eligible = harness
-        .try_cancel(root, "operator cancelled")
+        .try_cancel(root, None, "operator cancelled")
         .await
         .expect("cancel commits");
     assert_eq!(
@@ -286,7 +322,7 @@ async fn cancel_subtree_lists_only_eligible_runs() {
     }
 
     let eligible = harness
-        .try_cancel(root, "operator cancelled")
+        .try_cancel(root, None, "operator cancelled")
         .await
         .expect("cancel commits");
     assert_eq!(eligible, expected, "only non-terminal, non-cancelling runs");
@@ -324,14 +360,14 @@ async fn duplicate_cancel_advances_the_epoch_again_and_lists_nothing() {
     let root = harness.seed_run(task, None, RunState::Running).await;
 
     let first = harness
-        .try_cancel(root, "operator cancelled")
+        .try_cancel(root, None, "operator cancelled")
         .await
         .expect("first cancel commits");
     assert_eq!(first, vec![root]);
     harness.set_state(root, RunState::Cancelling).await;
 
     let second = harness
-        .try_cancel(root, "operator cancelled")
+        .try_cancel(root, None, "operator cancelled")
         .await
         .expect("a duplicate cancel commits");
     assert!(second.is_empty(), "an already-cancelling root is skipped");
@@ -350,11 +386,42 @@ async fn duplicate_cancel_advances_the_epoch_again_and_lists_nothing() {
 }
 
 #[tokio::test]
+async fn stale_revision_expectations_conflict_without_an_epoch_advance() {
+    let harness = Harness::new().await;
+    let task = TaskId::new(harness.ids.as_ref());
+    harness.seed_task(task).await;
+    let root = harness.seed_run(task, None, RunState::Running).await;
+    harness.bump_revision(root).await;
+
+    let error = harness
+        .try_cancel(root, Some(0), "operator cancelled")
+        .await
+        .expect_err("a stale expectation conflicts");
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(error.retry_class(), RetryClass::Never);
+
+    let persisted = harness.run(root).await.expect("root persists");
+    assert_eq!(persisted.state, RunState::Running);
+    assert_eq!(persisted.cancellation_epoch, 0, "no epoch advance");
+    assert_eq!(persisted.run_revision, 1);
+    assert!(harness.events().await.is_empty(), "no staged epoch event");
+
+    let eligible = harness
+        .try_cancel(root, Some(1), "operator cancelled")
+        .await
+        .expect("the matching expectation commits");
+    assert_eq!(eligible, vec![root]);
+    let persisted = harness.run(root).await.expect("root persists");
+    assert_eq!(persisted.cancellation_epoch, 1);
+    assert_eq!(persisted.run_revision, 2);
+}
+
+#[tokio::test]
 async fn missing_roots_are_not_found() {
     let harness = Harness::new().await;
     let absent = RunId::new(harness.ids.as_ref());
     let error = harness
-        .try_cancel(absent, "operator cancelled")
+        .try_cancel(absent, None, "operator cancelled")
         .await
         .expect_err("unknown roots cannot be cancelled");
     assert_eq!(error.code(), ErrorCode::NotFound);
