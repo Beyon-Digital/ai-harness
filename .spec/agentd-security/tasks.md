@@ -26,8 +26,8 @@
 
 ### Task SEC-000: Declare security-module dependencies
 
-- status: pending
-- owner: -
+- status: done
+- owner: agent-sec000
 - depends_on: none
 - files: `agent-os/Cargo.toml`, `agent-os/Cargo.lock`, `agent-os/crates/identity/Cargo.toml`, `agent-os/crates/permissions/Cargo.toml`, `agent-os/crates/approvals/Cargo.toml`, `agent-os/crates/secrets/Cargo.toml`
 - requirements: N3, G1, G2

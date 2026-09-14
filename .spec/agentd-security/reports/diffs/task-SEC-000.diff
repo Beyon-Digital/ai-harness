@@ -1,0 +1,257 @@
+diff --git a/agent-os/Cargo.lock b/agent-os/Cargo.lock
+index 2ddd764..494ee9a 100644
+--- a/agent-os/Cargo.lock
++++ b/agent-os/Cargo.lock
+@@ -64,15 +64,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+ 
+ [[package]]
+ name = "approvals"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
++ "command-coordinator",
+  "domain",
+  "errors",
++ "events",
+  "identity",
++ "kernel-store",
++ "kernel-store-sqlite",
++ "proptest",
++ "prost",
++ "sha2",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "artifacts"
+ version = "0.1.0"
+ dependencies = [
+@@ -221,12 +232,28 @@ dependencies = [
+  "command-coordinator",
+  "domain",
+  "errors",
+  "events",
+ ]
+ 
++[[package]]
++name = "core-foundation"
++version = "0.9.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
++[[package]]
++name = "core-foundation-sys"
++version = "0.8.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
++
+ [[package]]
+ name = "cpufeatures"
+ version = "0.2.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+ dependencies = [
+@@ -744,15 +771,21 @@ dependencies = [
+ ]
+ 
+ [[package]]
+ name = "identity"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "kernel-store",
++ "kernel-store-sqlite",
++ "proptest",
++ "tempfile",
++ "testkit",
++ "tokio",
+ ]
+ 
+ [[package]]
+ name = "idna"
+ version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1067,15 +1100,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+ 
+ [[package]]
+ name = "permissions"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
+  "identity",
++ "proptest",
+ ]
+ 
+ [[package]]
+ name = "petgraph"
+ version = "0.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1581,14 +1616,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+ 
+ [[package]]
+ name = "secrets"
+ version = "0.1.0"
+ dependencies = [
++ "async-trait",
+  "domain",
+  "errors",
++ "identity",
++ "observability",
++ "permissions",
++ "security-framework",
++ "sha2",
++ "testkit",
++ "tokio",
++ "zeroize",
++]
++
++[[package]]
++name = "security-framework"
++version = "2.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
++dependencies = [
++ "bitflags",
++ "core-foundation",
++ "core-foundation-sys",
++ "libc",
++ "security-framework-sys",
++]
++
++[[package]]
++name = "security-framework-sys"
++version = "2.17.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
+ ]
+ 
+ [[package]]
+ name = "serde"
+ version = "1.0.229"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+diff --git a/agent-os/Cargo.toml b/agent-os/Cargo.toml
+index 9e5244f..506cf48 100644
+--- a/agent-os/Cargo.toml
++++ b/agent-os/Cargo.toml
+@@ -47,21 +47,23 @@ prost = "0.14"
+ prost-build = "0.14"
+ protoc-bin-vendored = "3"
+ proptest = "1"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ serde_yaml = "0.9"
++security-framework = "2"
+ sha2 = "0.10"
+ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
+ tempfile = "3"
+ thiserror = "2"
+ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+ tonic = "0.14"
+ tracing = "0.1"
+ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+ uuid = { version = "1", features = ["serde", "v7"] }
++zeroize = "1"
+ 
+ adapter-protocol = { path = "crates/adapter-protocol" }
+ adapter-registry = { path = "crates/adapter-registry" }
+ agentctl = { path = "crates/agentctl" }
+ approvals = { path = "crates/approvals" }
+ artifacts = { path = "crates/artifacts" }
+diff --git a/agent-os/crates/approvals/Cargo.toml b/agent-os/crates/approvals/Cargo.toml
+index 6f3c23d..3478959 100644
+--- a/agent-os/crates/approvals/Cargo.toml
++++ b/agent-os/crates/approvals/Cargo.toml
+@@ -6,6 +6,19 @@ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ identity.workspace = true
++kernel-store.workspace = true
++command-coordinator.workspace = true
++events.workspace = true
++sha2.workspace = true
++async-trait.workspace = true
++prost.workspace = true
++
++[dev-dependencies]
++kernel-store-sqlite.workspace = true
++testkit.workspace = true
++tempfile.workspace = true
++tokio.workspace = true
++proptest.workspace = true
+diff --git a/agent-os/crates/identity/Cargo.toml b/agent-os/crates/identity/Cargo.toml
+index a231911..b82a6ef 100644
+--- a/agent-os/crates/identity/Cargo.toml
++++ b/agent-os/crates/identity/Cargo.toml
+@@ -6,6 +6,14 @@ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ kernel-store.workspace = true
++async-trait.workspace = true
++
++[dev-dependencies]
++kernel-store-sqlite.workspace = true
++testkit.workspace = true
++tempfile.workspace = true
++tokio.workspace = true
++proptest.workspace = true
+diff --git a/agent-os/crates/permissions/Cargo.toml b/agent-os/crates/permissions/Cargo.toml
+index 637cc35..268b23b 100644
+--- a/agent-os/crates/permissions/Cargo.toml
++++ b/agent-os/crates/permissions/Cargo.toml
+@@ -6,6 +6,10 @@ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
+ identity.workspace = true
++async-trait.workspace = true
++
++[dev-dependencies]
++proptest.workspace = true
+diff --git a/agent-os/crates/secrets/Cargo.toml b/agent-os/crates/secrets/Cargo.toml
+index b843e80..5e738bf 100644
+--- a/agent-os/crates/secrets/Cargo.toml
++++ b/agent-os/crates/secrets/Cargo.toml
+@@ -5,6 +5,19 @@ edition.workspace = true
+ rust-version.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
+ domain.workspace = true
+ errors.workspace = true
++identity.workspace = true
++permissions.workspace = true
++observability.workspace = true
++async-trait.workspace = true
++zeroize.workspace = true
++sha2.workspace = true
++
++[target.'cfg(target_os = "macos")'.dependencies]
++security-framework.workspace = true
++
++[dev-dependencies]
++testkit.workspace = true
++tokio.workspace = true
