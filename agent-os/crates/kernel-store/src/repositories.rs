@@ -167,6 +167,8 @@ pub trait EffectRepo: EffectRead {
 pub trait ResourceRead: Send + Sync {
     async fn get(&mut self, id: ReservationId) -> Result<Option<ReservationRow>>;
     async fn list_by_run(&mut self, run: RunId) -> Result<Vec<ReservationRow>>;
+    /// Direct children of `parent`, ordered by id (delegation accounting).
+    async fn list_children(&mut self, parent: ReservationId) -> Result<Vec<ReservationRow>>;
 }
 
 #[async_trait]

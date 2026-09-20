@@ -1221,6 +1221,21 @@ impl ResourceRead for MockResourceRepo {
         rows.sort_by_key(|row| row.reservation_id);
         Ok(rows)
     }
+
+    async fn list_children(
+        &mut self,
+        parent: ReservationId,
+    ) -> errors::Result<Vec<ReservationRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<ReservationRow> = state
+            .reservations
+            .values()
+            .filter(|row| row.parent_reservation_id == Some(parent))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| row.reservation_id);
+        Ok(rows)
+    }
 }
 
 #[async_trait]

@@ -1510,7 +1510,13 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "events",
  "kernel-store",
+ "kernel-store-sqlite",
+ "prost",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
