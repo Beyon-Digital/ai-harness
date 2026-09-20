@@ -31,7 +31,11 @@ use events::StreamKey;
 use kernel_store::models::{
     EffectRow, ResolvedBindingRow, ResolvedEnvironmentRow, RunCas, RunPatch, RunRow, TimerRow,
 };
-use kernel_store::{KernelReadTxn, KernelStore, TxContext};
+use kernel_store::repositories::{
+    AdapterRead, AgentSpecRead, ArtifactRead, ConfigRead, EffectRead, EnvironmentRead, GraphRead,
+    LoopRead, ResourceRead, RunRead, SecurityRead, SessionRead, TaskRead, TimerRead, WorkspaceRead,
+};
+use kernel_store::{KernelReadTxn, KernelStore, KernelTxn, TxContext};
 use prost::Message;
 use run_graph::readiness::condition_met;
 
@@ -105,46 +109,27 @@ pub async fn reconstruct(
             command_id: CommandId::new(&SystemIdProvider),
             correlation_id: None,
         };
+        let env = effects::EffectEnv {
+            ids: &SystemIdProvider,
+            clock: clock.as_ref(),
+            correlation_id: None,
+            causation_id: None,
+        };
         let mut txn = store.begin_write(context).await?;
         for (run, disposition) in changed {
-            let updated = txn
-                .runs()
-                .cas_update(
-                    run.run_id,
-                    RunCas {
-                        run_revision: run.run_revision,
-                        state: Some(run.state),
-                        cancellation_epoch: None,
-                    },
-                    RunPatch {
-                        recovery: Some(disposition),
-                        bump_revision: true,
-                        ..RunPatch::default()
-                    },
-                )
-                .await?;
-            if !updated {
-                return Err(KernelError::new(
-                    ErrorCode::Conflict,
-                    RetryClass::Never,
-                    "run changed during startup recovery",
-                ));
+            // Unsafe `Dispatched` rows behind a blocked run must become
+            // `Unknown` in the same transaction: `ResolveUnknownEffect` only
+            // accepts `Unknown`, and a still-`Dispatched` row would leave the
+            // blocked run with no resolution path (spec: recovery marks unsafe
+            // dispatched effects Unknown before requiring that command).
+            if disposition == RecoveryDisposition::BlockedUnknownEffect {
+                mark_unsafe_dispatched(txn.as_mut(), run.run_id, &env).await?;
             }
-            let current = txn.runs().get(run.run_id).await?.ok_or_else(|| {
-                KernelError::new(
-                    ErrorCode::Internal,
-                    RetryClass::Never,
-                    "run vanished during startup recovery",
-                )
-            })?;
-            stage_catalogued(
+            persist_disposition_change(
                 txn.as_mut(),
+                &run,
+                disposition,
                 EventId::new(&SystemIdProvider),
-                "RunRecoveryDispositionChanged",
-                StreamKey::run(run.run_id),
-                run_payload(&current).encode_to_vec(),
-                None,
-                None,
             )
             .await?;
         }
@@ -157,8 +142,142 @@ pub async fn reconstruct(
     })
 }
 
+/// Marks every unsafe `Dispatched` effect of `run_id` `Unknown` inside `txn`.
+async fn mark_unsafe_dispatched(
+    txn: &mut dyn KernelTxn,
+    run_id: RunId,
+    env: &effects::EffectEnv<'_>,
+) -> errors::Result<()> {
+    for effect in txn.effects().list_by_run(run_id).await? {
+        if effect.state == EffectState::Dispatched && dispatched_is_unsafe(&effect) {
+            effects::mark_unknown(txn, env, effect.effect_id, None).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Persists a changed recovery disposition: revision-bumped CAS patch plus
+/// the catalogued `RunRecoveryDispositionChanged` event.
+pub(crate) async fn persist_disposition_change(
+    txn: &mut dyn KernelTxn,
+    run: &RunRow,
+    disposition: RecoveryDisposition,
+    event_id: EventId,
+) -> errors::Result<()> {
+    let updated = txn
+        .runs()
+        .cas_update(
+            run.run_id,
+            RunCas {
+                run_revision: run.run_revision,
+                state: Some(run.state),
+                cancellation_epoch: None,
+            },
+            RunPatch {
+                recovery: Some(disposition),
+                bump_revision: true,
+                ..RunPatch::default()
+            },
+        )
+        .await?;
+    if !updated {
+        return Err(KernelError::new(
+            ErrorCode::Conflict,
+            RetryClass::Never,
+            "run changed while its recovery disposition was applied",
+        ));
+    }
+    let current = txn.runs().get(run.run_id).await?.ok_or_else(|| {
+        KernelError::new(
+            ErrorCode::Internal,
+            RetryClass::Never,
+            "run vanished during recovery disposition write",
+        )
+    })?;
+    stage_catalogued(
+        txn,
+        event_id,
+        "RunRecoveryDispositionChanged",
+        StreamKey::run(run.run_id),
+        run_payload(&current).encode_to_vec(),
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read facade over a write transaction: every write repo is a supertrait
+/// extension of the matching read repo, so each accessor upcasts in place
+/// and `classify` can run against in-flight write state.
+struct WriteTxnRead<'a>(&'a mut dyn KernelTxn);
+
+#[allow(clippy::missing_trait_methods)]
+impl KernelReadTxn for WriteTxnRead<'_> {
+    fn runs(&mut self) -> &mut dyn RunRead {
+        self.0.runs()
+    }
+    fn tasks(&mut self) -> &mut dyn TaskRead {
+        self.0.tasks()
+    }
+    fn sessions(&mut self) -> &mut dyn SessionRead {
+        self.0.sessions()
+    }
+    fn agent_specs(&mut self) -> &mut dyn AgentSpecRead {
+        self.0.agent_specs()
+    }
+    fn graph(&mut self) -> &mut dyn GraphRead {
+        self.0.graph()
+    }
+    fn environments(&mut self) -> &mut dyn EnvironmentRead {
+        self.0.environments()
+    }
+    fn effects(&mut self) -> &mut dyn EffectRead {
+        self.0.effects()
+    }
+    fn resources(&mut self) -> &mut dyn ResourceRead {
+        self.0.resources()
+    }
+    fn timers(&mut self) -> &mut dyn TimerRead {
+        self.0.timers()
+    }
+    fn security(&mut self) -> &mut dyn SecurityRead {
+        self.0.security()
+    }
+    fn config(&mut self) -> &mut dyn ConfigRead {
+        self.0.config()
+    }
+    fn workspaces(&mut self) -> &mut dyn WorkspaceRead {
+        self.0.workspaces()
+    }
+    fn adapters(&mut self) -> &mut dyn AdapterRead {
+        self.0.adapters()
+    }
+    fn artifacts(&mut self) -> &mut dyn ArtifactRead {
+        self.0.artifacts()
+    }
+    fn loop_turns(&mut self) -> &mut dyn LoopRead {
+        self.0.loop_turns()
+    }
+}
+
+/// Recomputes `run`'s recovery disposition inside a command's write
+/// transaction — e.g. after `ResolveUnknownEffect` settles its last `Unknown`
+/// effect, the command is the recorded exit from `BlockedUnknownEffect`.
+pub(crate) async fn reclassify(
+    txn: &mut dyn KernelTxn,
+    run: &RunRow,
+    now_ms: i64,
+) -> errors::Result<RecoveryDisposition> {
+    let effects = txn.effects().list_by_run(run.run_id).await?;
+    let timers = txn.timers().list_by_run(run.run_id).await?;
+    let daemon_epoch = txn.context().daemon_epoch;
+    let mut read = WriteTxnRead(txn);
+    classify(&mut read, run, &effects, &timers, daemon_epoch, now_ms).await
+}
+
 /// Classifies one non-terminal run against the recovery matrix.
-async fn classify(
+pub(crate) async fn classify(
     read: &mut dyn KernelReadTxn,
     run: &RunRow,
     effects: &[EffectRow],

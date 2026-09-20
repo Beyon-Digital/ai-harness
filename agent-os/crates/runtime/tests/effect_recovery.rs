@@ -220,15 +220,9 @@ impl Harness {
         .expect("prepare");
         txn.commit().await.expect("prepare commits");
         let mut txn = self.write().await;
-        let outcome = effects::claim(
-            txn.as_mut(),
-            &self.env(),
-            effect_id,
-            "executor",
-            effects::EFFECT_LEASE_MS,
-        )
-        .await
-        .expect("claim");
+        let outcome = effects::claim(txn.as_mut(), &self.env(), effect_id, "executor")
+            .await
+            .expect("claim");
         let effects::ClaimOutcome::Claimed { fencing_token, .. } = outcome else {
             panic!("claim wins")
         };
@@ -246,7 +240,13 @@ impl Harness {
         effect_id
     }
 
-    async fn seed_approval(&self, run_id: RunId, state: ApprovalState) -> ApprovalRequestId {
+    async fn seed_approval(
+        &self,
+        run_id: RunId,
+        state: ApprovalState,
+        action: &str,
+        effect_id: EffectId,
+    ) -> ApprovalRequestId {
         let request_id = ApprovalRequestId::new(self.ids.as_ref());
         let mut txn = self.write().await;
         txn.security()
@@ -256,8 +256,8 @@ impl Harness {
                 principal_id: self.principal,
                 actor_id: self.actor,
                 run_id: Some(run_id),
-                operation: "effect.resolve_unknown".to_owned(),
-                target_resource: None,
+                operation: format!("effect.resolve_unknown:{action}"),
+                target_resource: Some(effect_id.to_string()),
                 capability_ids: Vec::new(),
                 extension_bundle_digest: None,
                 config_generation_digest: None,
@@ -362,21 +362,118 @@ async fn missing_capability_denies_resolution() {
 }
 
 #[tokio::test]
-async fn approved_request_compensates_missing_capability() {
+async fn denied_policy_is_not_bypassed_by_approval() {
     let h = Harness::new().await;
     let run_id = h.seed_run().await;
+    // A chain lacking `effect.resolve_unknown` produces Deny; an approval
+    // covering the exact action+effect still cannot override it.
     let chain = h.seed_chain(OTHER_GRANT).await;
     let effect_id = h.seed_unknown_effect(run_id).await;
-    let approval = h.seed_approval(run_id, ApprovalState::Approved).await;
-    h.coordinator
+    let approval = h
+        .seed_approval(run_id, ApprovalState::Approved, "mark_succeeded", effect_id)
+        .await;
+    let err = h
+        .coordinator
         .execute(h.envelope(
-            "resolve-approved",
+            "resolve-approved-deny",
             Some(chain),
             resolve_payload(effect_id, "mark_succeeded", &approval.to_string()),
         ))
         .await
-        .expect("approved resolution executes");
-    assert_eq!(h.effect(effect_id).await.state, EffectState::Committed);
+        .expect_err("approval cannot bypass an explicit denial");
+    assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(h.effect(effect_id).await.state, EffectState::Unknown);
+}
+
+#[tokio::test]
+async fn retry_requires_approved_request_even_with_capability() {
+    let h = Harness::new().await;
+    let run_id = h.seed_run().await;
+    let chain = h.seed_chain(RESOLVE_UNKNOWN).await;
+    let effect_id = h.seed_unknown_effect(run_id).await;
+    let err = h
+        .coordinator
+        .execute(h.envelope(
+            "resolve-retry-no-approval",
+            Some(chain),
+            resolve_payload(effect_id, "retry_accepting_duplicate_risk", ""),
+        ))
+        .await
+        .expect_err("duplicate-risk retry requires an approval");
+    assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(h.effect(effect_id).await.state, EffectState::Unknown);
+    let approval = h
+        .seed_approval(
+            run_id,
+            ApprovalState::Approved,
+            "retry_accepting_duplicate_risk",
+            effect_id,
+        )
+        .await;
+    h.coordinator
+        .execute(h.envelope(
+            "resolve-retry-approved",
+            Some(chain),
+            resolve_payload(
+                effect_id,
+                "retry_accepting_duplicate_risk",
+                &approval.to_string(),
+            ),
+        ))
+        .await
+        .expect("approved retry executes");
+    assert_eq!(h.effect(effect_id).await.state, EffectState::Prepared);
+}
+
+#[tokio::test]
+async fn approval_must_cover_the_requested_action_and_effect() {
+    let h = Harness::new().await;
+    let run_id = h.seed_run().await;
+    let chain = h.seed_chain(RESOLVE_UNKNOWN).await;
+    let effect_id = h.seed_unknown_effect(run_id).await;
+    // Approved for a different action on this same effect.
+    let wrong_action = h
+        .seed_approval(run_id, ApprovalState::Approved, "mark_failed", effect_id)
+        .await;
+    let err = h
+        .coordinator
+        .execute(h.envelope(
+            "resolve-wrong-action",
+            Some(chain),
+            resolve_payload(
+                effect_id,
+                "retry_accepting_duplicate_risk",
+                &wrong_action.to_string(),
+            ),
+        ))
+        .await
+        .expect_err("approval for another action is not a cover");
+    assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+    // Approved for the action but targeting a different effect.
+    let other_effect = h.seed_unknown_effect(run_id).await;
+    let wrong_effect = h
+        .seed_approval(
+            run_id,
+            ApprovalState::Approved,
+            "retry_accepting_duplicate_risk",
+            other_effect,
+        )
+        .await;
+    let err = h
+        .coordinator
+        .execute(h.envelope(
+            "resolve-wrong-effect",
+            Some(chain),
+            resolve_payload(
+                effect_id,
+                "retry_accepting_duplicate_risk",
+                &wrong_effect.to_string(),
+            ),
+        ))
+        .await
+        .expect_err("approval for another effect is not a cover");
+    assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+    assert_eq!(h.effect(effect_id).await.state, EffectState::Unknown);
 }
 
 #[tokio::test]
@@ -384,29 +481,53 @@ async fn foreign_or_pending_approval_does_not_cover() {
     let h = Harness::new().await;
     let run_id = h.seed_run().await;
     let other_run = h.seed_run().await;
-    let chain_no_grant = h.seed_chain(OTHER_GRANT).await;
+    // Retry requires an approval even with standing capability, so this
+    // chain reaches the approval check.
+    let chain = h.seed_chain(RESOLVE_UNKNOWN).await;
     // An approval bound to a different run must never cover this effect.
     let effect_id = h.seed_unknown_effect(run_id).await;
-    let wrong_run = h.seed_approval(other_run, ApprovalState::Approved).await;
+    let wrong_run = h
+        .seed_approval(
+            other_run,
+            ApprovalState::Approved,
+            "retry_accepting_duplicate_risk",
+            effect_id,
+        )
+        .await;
     let err = h
         .coordinator
         .execute(h.envelope(
             "resolve-wrong-run",
-            Some(chain_no_grant),
-            resolve_payload(effect_id, "mark_failed", &wrong_run.to_string()),
+            Some(chain),
+            resolve_payload(
+                effect_id,
+                "retry_accepting_duplicate_risk",
+                &wrong_run.to_string(),
+            ),
         ))
         .await
         .expect_err("foreign approval is not a cover");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);
     // A still-pending approval on the right run does not cover either.
     let effect_id = h.seed_unknown_effect(run_id).await;
-    let pending = h.seed_approval(run_id, ApprovalState::Pending).await;
+    let pending = h
+        .seed_approval(
+            run_id,
+            ApprovalState::Pending,
+            "retry_accepting_duplicate_risk",
+            effect_id,
+        )
+        .await;
     let err = h
         .coordinator
         .execute(h.envelope(
             "resolve-pending",
-            Some(chain_no_grant),
-            resolve_payload(effect_id, "mark_failed", &pending.to_string()),
+            Some(chain),
+            resolve_payload(
+                effect_id,
+                "retry_accepting_duplicate_risk",
+                &pending.to_string(),
+            ),
         ))
         .await
         .expect_err("pending approval is not a cover");
@@ -468,4 +589,62 @@ async fn non_unknown_effect_cannot_be_resolved() {
         .await
         .expect_err("prepared effects are not resolvable");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn resolving_last_unknown_effect_unblocks_the_run() {
+    let h = Harness::new().await;
+    let run_id = h.seed_run().await;
+    // Seed the run as blocked on this unknown effect (the state recovery
+    // would have left after a crash with an unsafe dispatch).
+    {
+        let mut txn = h.write().await;
+        let run = txn
+            .runs()
+            .get(run_id)
+            .await
+            .expect("run read")
+            .expect("run");
+        let updated = txn
+            .runs()
+            .cas_update(
+                run_id,
+                kernel_store::models::RunCas {
+                    run_revision: run.run_revision,
+                    state: Some(run.state),
+                    cancellation_epoch: None,
+                },
+                kernel_store::models::RunPatch {
+                    recovery: Some(domain::run::RecoveryDisposition::BlockedUnknownEffect),
+                    bump_revision: true,
+                    ..kernel_store::models::RunPatch::default()
+                },
+            )
+            .await
+            .expect("block run");
+        assert!(updated);
+        txn.commit().await.expect("commit");
+    }
+    let chain = h.seed_chain(RESOLVE_UNKNOWN).await;
+    let effect_id = h.seed_unknown_effect(run_id).await;
+    h.coordinator
+        .execute(h.envelope(
+            "resolve-unblocks-run",
+            Some(chain),
+            resolve_payload(effect_id, "mark_failed", ""),
+        ))
+        .await
+        .expect("resolution executes");
+    let mut txn = h.write().await;
+    let run = txn
+        .runs()
+        .get(run_id)
+        .await
+        .expect("run read")
+        .expect("run");
+    txn.rollback().await.expect("rollback");
+    assert_ne!(
+        run.recovery,
+        domain::run::RecoveryDisposition::BlockedUnknownEffect
+    );
 }

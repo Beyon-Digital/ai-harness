@@ -118,8 +118,9 @@ pub fn reconcile_plan(row: &EffectRow, observed: ObservedOutcome) -> ReconcilePl
 /// Applies a [`ReconcilePlan`] inside `txn`, staging the transition events and
 /// a terminal `EffectReconciled` audit record.
 ///
-/// `Redispatch` re-stamps the row `Dispatched` with a fresh fencing token so a
-/// later claim sees a claimable effect — the operation identity is unchanged.
+/// `Redispatch` returns the row to `Prepared` so the ordinary claim path
+/// re-arms it with a fresh fencing token — the operation identity is
+/// unchanged and `claim` stays the single hand-off point.
 pub async fn apply_observed(
     txn: &mut dyn KernelTxn,
     env: &EffectEnv<'_>,
@@ -205,10 +206,10 @@ pub async fn apply_observed(
                 effect_id,
                 None,
                 Transition {
-                    to: EffectState::Dispatched,
-                    event_type: "EffectDispatched",
+                    to: EffectState::Prepared,
+                    event_type: "EffectPrepared",
                     patch: EffectPatch {
-                        state: Some(EffectState::Dispatched),
+                        state: Some(EffectState::Prepared),
                         ..EffectPatch::default()
                     },
                 },

@@ -19,9 +19,10 @@ use domain::effect::EffectState;
 /// Returns whether `from -> to` is a legal effect transition.
 ///
 /// Reclaim of an expired `Claimed` lease is expressed as
-/// `Claimed -> Claimed`; re-dispatch during recovery re-enters through
-/// `Dispatched -> Dispatched` (new fencing token, same operation identity).
-/// `Unknown` resolves only through `ResolveUnknownEffect`.
+/// `Claimed -> Claimed`; a reconciliation redispatch re-arms through
+/// `Dispatched -> Prepared` so the normal claim path (with a fresh fencing
+/// token) can re-drive the same operation identity. `Unknown` resolves only
+/// through `ResolveUnknownEffect`.
 pub const fn can_transition(from: EffectState, to: EffectState) -> bool {
     matches!(
         (from, to),
@@ -30,7 +31,7 @@ pub const fn can_transition(from: EffectState, to: EffectState) -> bool {
             | (EffectState::Claimed, EffectState::Claimed)
             | (EffectState::Claimed, EffectState::Dispatched)
             | (EffectState::Claimed, EffectState::Cancelled)
-            | (EffectState::Dispatched, EffectState::Dispatched)
+            | (EffectState::Dispatched, EffectState::Prepared)
             | (EffectState::Dispatched, EffectState::Acknowledged)
             | (EffectState::Dispatched, EffectState::Failed)
             | (EffectState::Dispatched, EffectState::Cancelled)
@@ -103,7 +104,7 @@ mod tests {
             (EffectState::Prepared, EffectState::Dispatched),
             (EffectState::Prepared, EffectState::Committed),
             (EffectState::Claimed, EffectState::Acknowledged),
-            (EffectState::Dispatched, EffectState::Prepared),
+            (EffectState::Dispatched, EffectState::Committed),
             (EffectState::Acknowledged, EffectState::Dispatched),
             (EffectState::Committed, EffectState::Unknown),
         ] {

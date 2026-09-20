@@ -36,8 +36,7 @@ pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
 pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 /// Fully-qualified command type of `CancelRun`.
 pub const CMD_CANCEL_RUN: &str = "agentos.spec.v1.CancelRun";
-/// Fully-qualified command type of `ResolveUnknownEffect`.
-pub const CMD_RESOLVE_UNKNOWN_EFFECT: &str = "agentos.spec.v1.ResolveUnknownEffect";
+pub use effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT;
 
 /// Dependencies shared by the runtime command handlers.
 #[derive(Clone)]

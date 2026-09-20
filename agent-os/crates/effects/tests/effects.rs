@@ -195,7 +195,7 @@ impl Harness {
 
     async fn claim(&self, effect_id: EffectId, executor: &str) -> ClaimOutcome {
         let mut txn = self.write().await;
-        let outcome = effects::claim(&mut *txn, &self.env(), effect_id, executor, EFFECT_LEASE_MS)
+        let outcome = effects::claim(&mut *txn, &self.env(), effect_id, executor)
             .await
             .expect("claim");
         txn.commit().await.expect("claim commits");
@@ -300,14 +300,7 @@ async fn no_dispatch_without_a_committed_prepared_record() {
     txn.rollback().await.expect("rollback");
     // Claim cannot find the uncommitted record.
     let mut txn = h.write().await;
-    let outcome = effects::claim(
-        &mut *txn,
-        &h.env(),
-        effect_id,
-        "executor-a",
-        EFFECT_LEASE_MS,
-    )
-    .await;
+    let outcome = effects::claim(&mut *txn, &h.env(), effect_id, "executor-a").await;
     txn.rollback().await.expect("rollback");
     let err = outcome.expect_err("uncommitted record is not claimable");
     assert_eq!(err.code(), ErrorCode::NotFound);
@@ -372,14 +365,8 @@ async fn hundred_workers_single_current_claim() {
                 correlation_id: None,
                 causation_id: None,
             };
-            let outcome = effects::claim(
-                &mut *txn,
-                &env,
-                effect_id,
-                &format!("executor-{worker}"),
-                EFFECT_LEASE_MS,
-            )
-            .await;
+            let outcome =
+                effects::claim(&mut *txn, &env, effect_id, &format!("executor-{worker}")).await;
             match outcome {
                 Ok(ClaimOutcome::Claimed { fencing_token, .. }) => {
                     txn.commit().await.is_ok().then_some(fencing_token)

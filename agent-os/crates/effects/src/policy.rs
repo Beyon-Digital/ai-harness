@@ -80,12 +80,29 @@ pub fn resolve(inputs: &ResolveInputs) -> EffectContract {
         .into_iter()
         .flatten()
         .collect();
+    // A declared `Unspecified` always outranks real evidence, then normalizes
+    // to the most conservative *persistable* variant — the schema CHECK
+    // rejects wire value 0, so `Unspecified` itself can never be stored.
     EffectContract {
         effect_class: weakest(&sources, |s| s.effect_class, class_rank)
+            .map(|class| match class {
+                EffectClass::Unspecified => EffectClass::Opaque,
+                other => other,
+            })
             .unwrap_or(EffectClass::Opaque),
         idempotency: weakest(&sources, |s| s.idempotency, idempotency_rank)
+            .map(|semantics| match semantics {
+                IdempotencySemantics::Unspecified => IdempotencySemantics::UnknownIdempotency,
+                other => other,
+            })
             .unwrap_or(IdempotencySemantics::UnknownIdempotency),
         reconciliation: weakest(&sources, |s| s.reconciliation, reconciliation_rank)
+            .map(|semantics| match semantics {
+                ReconciliationSemantics::Unspecified => {
+                    ReconciliationSemantics::UnknownReconciliation
+                }
+                other => other,
+            })
             .unwrap_or(ReconciliationSemantics::UnknownReconciliation),
         cancellation: weakest(&sources, |s| s.cancellation, cancellation_rank)
             .unwrap_or(CancellationSemantics::Unsupported),

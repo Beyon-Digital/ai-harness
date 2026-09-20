@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcome, OutcomeCode};
 use domain::effect::EffectState;
 use domain::generated::contract;
-use domain::ids::{ApprovalRequestId, EffectId};
+use domain::ids::{ApprovalRequestId, EffectId, EventId};
 use domain::security::ApprovalState;
 use effects::reconcile::{Resolution, apply_resolution};
 use errors::KernelError;
@@ -24,6 +24,7 @@ use kernel_store::KernelTxn;
 use kernel_store::models::EffectRow;
 use permissions::{Decision, PermissionRequest, evaluate};
 
+use crate::recovery;
 use crate::{RuntimeDeps, decode_contract, optional_id, required_id};
 
 /// Fully-qualified command type of `ResolveUnknownEffect`.
@@ -104,6 +105,28 @@ impl CommandHandler for ResolveUnknownEffectHandler {
             &request.reason,
         )
         .await?;
+        // The command is the recorded exit from `BlockedUnknownEffect`:
+        // recompute the owning run's disposition inside this transaction so a
+        // run whose last Unknown effect settled can resume immediately.
+        let run = txn.runs().get(row.run_id).await?.ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::Internal,
+                RetryClass::Never,
+                "owning run vanished during effect resolution",
+            )
+        })?;
+        if !run.state.is_terminal() {
+            let disposition = recovery::reclassify(txn, &run, self.deps.now_unix_ms()).await?;
+            if disposition != run.recovery {
+                recovery::persist_disposition_change(
+                    txn,
+                    &run,
+                    disposition,
+                    EventId::new(self.deps.ids.as_ref()),
+                )
+                .await?;
+            }
+        }
         Ok(CommandOutcome {
             code: OutcomeCode::Ok,
             payload: row.effect_id.to_string().into_bytes(),
@@ -143,12 +166,23 @@ impl ResolveUnknownEffectHandler {
             now_ms: self.deps.now_unix_ms(),
         });
         match decision {
-            Decision::Allow { .. } => Ok(()),
-            // An approved operator request is the compensating control when
-            // the delegation chain does not carry standing authority.
-            Decision::Deny { .. } | Decision::RequireApproval { .. } => {
-                self.verify_approval(txn, row, request).await
+            Decision::Allow { .. } => {
+                // `retry_accepting_duplicate_risk` always requires an approved
+                // request even with standing capability (command-catalog).
+                if request.action == "retry_accepting_duplicate_risk" {
+                    self.verify_approval(txn, row, request).await
+                } else {
+                    Ok(())
+                }
             }
+            // An approved operator request is the compensating control only
+            // when policy asks for one — an explicit denial is never bypassed.
+            Decision::RequireApproval { .. } => self.verify_approval(txn, row, request).await,
+            Decision::Deny { reason } => Err(KernelError::new(
+                ErrorCode::FailedPrecondition,
+                RetryClass::Never,
+                format!("ResolveUnknownEffect denied by policy: {reason}"),
+            )),
         }
     }
 
@@ -183,9 +217,14 @@ impl ResolveUnknownEffectHandler {
             .get_approval_request(approval_id)
             .await?
             .ok_or_else(needs_approval)?;
+        // Coverage is exact: the operation token embeds the requested action
+        // and `target_resource` names the effect, so an approval for one
+        // resolution cannot be replayed against a different effect or action
+        // in the same run.
         let covered = approval.state == ApprovalState::Approved
-            && approval.operation == RESOLVE_OPERATION
+            && approval.operation == format!("{RESOLVE_OPERATION}:{}", request.action)
             && approval.run_id == Some(row.run_id)
+            && approval.target_resource.as_deref() == Some(row.effect_id.to_string().as_str())
             && approval.expires_at_ms > self.deps.now_unix_ms();
         if covered {
             Ok(())

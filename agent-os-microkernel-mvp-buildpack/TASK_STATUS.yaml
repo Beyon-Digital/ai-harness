@@ -1,131 +1,152 @@
 schema_version: 1
 tasks:
   FND-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '52a09e3'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   FND-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '0e4b01f'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   FND-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '4bb0221'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   FND-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '80ec174'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   FND-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '0f4ac8e'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   FND-006:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'c43a6e6'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   PST-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '8514563'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   PST-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '7b3a52a'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   PST-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'b0ee13c'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   PST-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '33bd799'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   PST-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '949feef'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   CMD-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '4455507'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   EVT-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '584cc63'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   EVT-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '7150dea'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   EVT-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'c07edd0'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   EVT-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'b8bf062'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   RUN-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'c36dc27'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   RUN-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '41e42da'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   RUN-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'a42144a'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   RUN-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'bcb9e4a'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   RUN-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '2228e86'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   EFF-001:
     status: done
     commit: 'b4c0b31'
@@ -175,29 +196,33 @@ tasks:
     evidence: []
     notes: ''
   SEC-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '0fdfe38'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   SEC-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'f1999ba'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   SEC-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 'd33c591'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   SEC-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '2101de0'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'
   ADP-001:
     status: pending
     commit: null
@@ -361,8 +386,9 @@ tasks:
     evidence: []
     notes: ''
   RUN-000:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '5b4e2ab'
+    tests:
+      - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: 'Recorded retroactively; implementation commits predate status tracking.'

@@ -55,12 +55,13 @@ pub struct ExecutorRef<'a> {
 ///
 /// The predicate is `state = Prepared OR (state = Claimed AND lease expired)`;
 /// on success the fencing token increments and `EffectClaimed` is staged.
+/// The lease is always [`EFFECT_LEASE_MS`]: lease duration is kernel policy,
+/// not an executor choice.
 pub async fn claim(
     txn: &mut dyn KernelTxn,
     env: &EffectEnv<'_>,
     effect_id: EffectId,
     executor_id: &str,
-    lease_ms: i64,
 ) -> errors::Result<ClaimOutcome> {
     let now_ms = env.clock.now_unix_ms();
     let daemon_epoch = txn.context().daemon_epoch;
@@ -70,7 +71,7 @@ pub async fn claim(
             effect_id,
             executor_id,
             daemon_epoch,
-            now_ms + lease_ms,
+            now_ms + EFFECT_LEASE_MS,
             now_ms,
         )
         .await?;
