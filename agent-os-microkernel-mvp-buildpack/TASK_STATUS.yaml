@@ -127,29 +127,41 @@ tasks:
     evidence: []
     notes: ''
   EFF-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'b4c0b31'
+    tests:
+      - cargo test -p effects
+      - cargo test --workspace
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-EFF-001.md
+    notes: 'Conservative resolver; claims contribute only when Trusted+Passed.'
   EFF-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'b4c0b31'
+    tests:
+      - cargo test -p effects
+      - cargo test --workspace
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-EFF-002.md
+    notes: 'Dedupe by logical identity; no dispatch without committed Prepared.'
   EFF-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'b4c0b31'
+    tests:
+      - cargo test -p effects
+      - cargo test --workspace
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-EFF-003.md
+    notes: 'Atomic claim + monotonic fencing token + daemon epoch + lease checks.'
   EFF-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'b4c0b31,65e987a'
+    tests:
+      - cargo test -p runtime
+      - cargo test --workspace
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-EFF-004.md
+    notes: 'Reconcile by stable operation id; Unknown never auto-retried.'
   RES-001:
     status: pending
     commit: null
