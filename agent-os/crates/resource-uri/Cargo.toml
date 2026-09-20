@@ -8,3 +8,8 @@ publish.workspace = true
 [dependencies]
 domain.workspace = true
 errors.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+testkit.workspace = true
+tokio.workspace = true
