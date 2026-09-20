@@ -1129,6 +1129,34 @@ impl EffectRepo for MockEffectRepo {
         )
     }
 
+    async fn claim(
+        &mut self,
+        id: EffectId,
+        executor_id: &str,
+        daemon_epoch: u64,
+        lease_expires_ms: i64,
+        now_ms: i64,
+    ) -> errors::Result<Option<u64>> {
+        let mut state = lock(&self.state)?;
+        let Some(effect) = state.effects.get_mut(&id) else {
+            return Ok(None);
+        };
+        let eligible = effect.state == domain::effect::EffectState::Prepared
+            || (effect.state == domain::effect::EffectState::Claimed
+                && effect.lease_expires_ms.is_some_and(|lease| lease <= now_ms));
+        if !eligible {
+            return Ok(None);
+        }
+        let token = effect.executor_fencing_token.unwrap_or(0) + 1;
+        effect.state = domain::effect::EffectState::Claimed;
+        effect.executor_id = Some(executor_id.to_owned());
+        effect.executor_fencing_token = Some(token);
+        effect.daemon_fencing_epoch = Some(daemon_epoch);
+        effect.lease_expires_ms = Some(lease_expires_ms);
+        effect.updated_at_ms = now_ms;
+        Ok(Some(token))
+    }
+
     async fn cas_transition(
         &mut self,
         id: EffectId,

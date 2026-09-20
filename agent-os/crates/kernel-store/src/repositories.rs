@@ -141,6 +141,19 @@ pub trait EffectRead: Send + Sync {
 #[async_trait]
 pub trait EffectRepo: EffectRead {
     async fn insert(&mut self, effect: NewEffect) -> Result<()>;
+    /// Atomically claims an effect eligible for execution: `Prepared`, or
+    /// `Claimed` with an expired lease. On success the executor identity,
+    /// daemon fencing epoch, lease expiry, and a monotonically increasing
+    /// fencing token are stamped; returns the new token. `None` means the
+    /// effect is held by a live claim or has left the claimable states.
+    async fn claim(
+        &mut self,
+        id: EffectId,
+        executor_id: &str,
+        daemon_epoch: u64,
+        lease_expires_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<u64>>;
     async fn cas_transition(
         &mut self,
         id: EffectId,
