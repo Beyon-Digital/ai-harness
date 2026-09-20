@@ -1218,6 +1218,13 @@ dependencies = [
  "adapter-protocol",
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "prost",
+ "rustix",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]

@@ -1763,6 +1763,16 @@ impl AdapterRead for MockAdapterRepo {
             .get(&(adapter_id, version.to_owned(), bundle_digest.to_owned()))
             .cloned())
     }
+
+    async fn get_instance(
+        &mut self,
+        adapter_instance_id: AdapterInstanceId,
+    ) -> errors::Result<Option<AdapterInstanceRow>> {
+        Ok(lock(&self.state)?
+            .instances
+            .get(&adapter_instance_id)
+            .cloned())
+    }
 }
 
 #[async_trait]

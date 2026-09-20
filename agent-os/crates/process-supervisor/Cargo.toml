@@ -9,3 +9,12 @@ publish.workspace = true
 adapter-protocol.workspace = true
 domain.workspace = true
 errors.workspace = true
+kernel-store.workspace = true
+prost.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testkit.workspace = true
+kernel-store-sqlite.workspace = true

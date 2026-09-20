@@ -16,17 +16,18 @@ use domain::resource::{ReservationState, TimerState};
 use errors::Result;
 
 use crate::models::{
-    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow, AgentSpecRow,
-    ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow, ConfigGenerationRow,
-    ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch, EffectRow,
-    IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
-    NewAdapterRegistration, NewAgentSpec, NewApprovalRequest, NewApprovalResponse, NewArtifact,
-    NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
-    NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewReservation,
-    NewResolvedBinding, NewResolvedEnvironment, NewRun, NewRunDependency, NewSession, NewTask,
-    NewTimer, NewWorkspace, NewWorkspaceLease, OutboxEventRow, ReservationPatch, ReservationRow,
-    ResolvedBindingRow, ResolvedEnvironmentRow, RunCas, RunDependencyRow, RunGraphHeadRow,
-    RunPatch, RunRow, SessionRow, TaskRow, TimerPatch, TimerRow, WorkspaceLeaseRow, WorkspaceRow,
+    ActiveConfigGenerationRow, AdapterInstanceRow, AdapterInstanceStatePatch,
+    AdapterRegistrationRow, AgentSpecRow, ApprovalRequestRow, ApprovalResponseRow, ArtifactRow,
+    CapabilityGrantRow, ConfigGenerationRow, ConformanceReportRow, DecisionRow, DelegationHopRow,
+    EffectPatch, EffectRow, IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow,
+    NewAdapterInstance, NewAdapterRegistration, NewAgentSpec, NewApprovalRequest,
+    NewApprovalResponse, NewArtifact, NewCapabilityGrant, NewConfigGeneration,
+    NewConformanceReport, NewDecision, NewDelegationHop, NewEffect, NewIdempotencyRecord,
+    NewLoopTurn, NewOutboxEvent, NewReservation, NewResolvedBinding, NewResolvedEnvironment,
+    NewRun, NewRunDependency, NewSession, NewTask, NewTimer, NewWorkspace, NewWorkspaceLease,
+    OutboxEventRow, ReservationPatch, ReservationRow, ResolvedBindingRow, ResolvedEnvironmentRow,
+    RunCas, RunDependencyRow, RunGraphHeadRow, RunPatch, RunRow, SessionRow, TaskRow, TimerPatch,
+    TimerRow, WorkspaceLeaseRow, WorkspaceRow,
 };
 
 /// Publication phase observed by [`StreamRepo::mark_published`].
@@ -281,6 +282,10 @@ pub trait AdapterRead: Send + Sync {
         version: &str,
         bundle_digest: &str,
     ) -> Result<Option<ConformanceReportRow>>;
+    async fn get_instance(
+        &mut self,
+        adapter_instance_id: AdapterInstanceId,
+    ) -> Result<Option<AdapterInstanceRow>>;
 }
 
 #[async_trait]
