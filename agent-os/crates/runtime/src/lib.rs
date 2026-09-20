@@ -12,6 +12,7 @@ pub mod run;
 pub mod session;
 pub mod state;
 pub mod task;
+pub mod timers;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -36,6 +37,10 @@ pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
 pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 /// Fully-qualified command type of `CancelRun`.
 pub const CMD_CANCEL_RUN: &str = "agentos.spec.v1.CancelRun";
+/// Fully-qualified command type of `ScheduleTimer`.
+pub const CMD_SCHEDULE_TIMER: &str = scheduler::CMD_SCHEDULE_TIMER;
+/// Fully-qualified command type of `CancelTimer`.
+pub const CMD_CANCEL_TIMER: &str = scheduler::CMD_CANCEL_TIMER;
 pub use effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT;
 
 /// Dependencies shared by the runtime command handlers.
@@ -75,6 +80,14 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
     registry.register(
         CMD_CANCEL_RUN,
         Arc::new(cancel::CancelRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        scheduler::CMD_SCHEDULE_TIMER,
+        Arc::new(timers::ScheduleTimerHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        scheduler::CMD_CANCEL_TIMER,
+        Arc::new(timers::CancelTimerHandler::new(deps.clone())),
     )?;
     registry.register(
         effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT,

@@ -1,1 +1,186 @@
 //! Scheduler worker.
+//!
+//! One iteration claims the next dispatchable timer (winning `Scheduled ->
+//! Claimed`, re-owning its own pending claim, or re-fencing a claim left by
+//! a dead daemon epoch), submits the row's `timer_kind`/`payload` as a
+//! normal internal kernel command through the coordinator, then commits
+//! `Fired` if the claim is still current. The command's idempotency key is
+//! `timer.fire.<timer_id>`, so a crash between dispatch and commit replays
+//! to the stored outcome — the timer's effect happens at most once while
+//! the row is only ever fired once.
+//!
+//! The composition root wires this worker in a later task, so its items are
+//! not yet reachable from `main`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use std::str::FromStr;
+
+use command_coordinator::CommandCoordinator;
+use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
+use domain::ids::{ActorId, CommandId, IdempotencyKey, PrincipalId};
+use domain::provider::IdProvider;
+use domain::time::Clock;
+use kernel_store::KernelStore;
+use kernel_store::models::TimerRow;
+use kernel_store::TxContext;
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
+use tokio::time::{MissedTickBehavior, interval};
+
+use crate::workers::outbox::EpochSource;
+
+/// Poll interval bound for due-timer scans.
+const BATCH_LIMIT_PER_TICK: usize = 64;
+
+/// Supplies the daemon fencing epoch the worker claims under.
+pub type SchedulerEpochSource = dyn EpochSource;
+
+/// Interval loop that claims due timers, submits their kernel commands, and
+/// commits `Fired`.
+#[allow(dead_code)]
+pub struct SchedulerWorker {
+    store: Arc<dyn KernelStore>,
+    coordinator: Arc<CommandCoordinator>,
+    epoch: Arc<SchedulerEpochSource>,
+    poll: Duration,
+    ids: Arc<dyn IdProvider>,
+    clock: Arc<dyn Clock>,
+    principal: PrincipalId,
+    actor: ActorId,
+}
+
+impl SchedulerWorker {
+    /// Creates a worker claiming timers as `owner` under `epoch`.
+    #[allow(dead_code)]
+    pub fn new(
+        store: Arc<dyn KernelStore>,
+        coordinator: Arc<CommandCoordinator>,
+        epoch: Arc<SchedulerEpochSource>,
+        poll: Duration,
+        ids: Arc<dyn IdProvider>,
+        clock: Arc<dyn Clock>,
+        principal: PrincipalId,
+        actor: ActorId,
+    ) -> Self {
+        Self {
+            store,
+            coordinator,
+            epoch,
+            poll,
+            ids,
+            clock,
+            principal,
+            actor,
+        }
+    }
+
+    /// Dispatches timers until `shutdown` requests a stop.
+    #[allow(dead_code)]
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let mut ticker = interval(self.poll);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            // A claim failure mid-tick just retries on the next tick; a timer
+            // is never lost because its row is durable.
+            let _ = self.dispatch_tick().await;
+        }
+    }
+
+    /// Claims and dispatches up to `BATCH_LIMIT_PER_TICK` due timers.
+    async fn dispatch_tick(&self) -> errors::Result<()> {
+        let owner = format!("scheduler:{}", self.actor);
+        for _ in 0..BATCH_LIMIT_PER_TICK {
+            let Some(claimed) = self.claim_next(&owner).await? else {
+                return Ok(());
+            };
+            self.fire(claimed, &owner).await?;
+        }
+        Ok(())
+    }
+
+    /// Claims the next dispatchable timer inside one transaction.
+    async fn claim_next(&self, owner: &str) -> errors::Result<Option<TimerRow>> {
+        let mut txn = self
+            .store
+            .begin_write(TxContext {
+                daemon_epoch: self.epoch.epoch(),
+                principal_id: self.principal,
+                command_id: CommandId::new(self.ids.as_ref()),
+                correlation_id: None,
+            })
+            .await?;
+        let env = scheduler::SchedulerEnv {
+            ids: self.ids.as_ref(),
+            clock: self.clock.as_ref(),
+            correlation_id: None,
+            causation_id: None,
+        };
+        let claimed = scheduler::claim_next_due(
+            txn.as_mut(),
+            &env,
+            self.clock.now_unix_ms(),
+            owner,
+            self.epoch.epoch(),
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(claimed)
+    }
+
+    /// Submits the timer's kernel command and commits `Fired` if the claim
+    /// is still current.
+    async fn fire(&self, claimed: TimerRow, _owner: &str) -> errors::Result<()> {
+        let digest_hex: String = Sha256::digest(&claimed.payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new(self.ids.as_ref()),
+            idempotency_key: IdempotencyKey::new(scheduler::fire_idempotency_key(
+                claimed.timer_id,
+            ))
+            .expect("derived idempotency key is well formed"),
+            principal_id: self.principal,
+            actor_id: self.actor,
+            device_id: None,
+            delegation_chain_id: None,
+            request_digest: RequestDigest::from_str(&digest_hex)
+                .expect("sha256 hex is a valid request digest"),
+            correlation_id: Some(format!("timer/{}", claimed.timer_id)),
+            causation_id: None,
+            deadline_unix_ms: None,
+            command_type: claimed.timer_kind.clone(),
+            payload: claimed.payload.clone(),
+        };
+        self.coordinator.execute(envelope).await?;
+        let mut txn = self
+            .store
+            .begin_write(TxContext {
+                daemon_epoch: self.epoch.epoch(),
+                principal_id: self.principal,
+                command_id: CommandId::new(self.ids.as_ref()),
+                correlation_id: None,
+            })
+            .await?;
+        let env = scheduler::SchedulerEnv {
+            ids: self.ids.as_ref(),
+            clock: self.clock.as_ref(),
+            correlation_id: None,
+            causation_id: None,
+        };
+        scheduler::mark_fired(txn.as_mut(), &env, &claimed).await?;
+        txn.commit().await?;
+        Ok(())
+    }
+}

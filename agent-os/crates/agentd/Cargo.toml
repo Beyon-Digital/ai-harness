@@ -12,3 +12,7 @@ errors.workspace = true
 events.workspace = true
 kernel-store.workspace = true
 runtime.workspace = true
+command-coordinator.workspace = true
+domain.workspace = true
+scheduler.workspace = true
+sha2.workspace = true
