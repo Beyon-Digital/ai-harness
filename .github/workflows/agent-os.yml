@@ -44,10 +44,9 @@ jobs:
       - name: "Hygiene grep (N2: no wall-clock sleep in tests)"
         run: |
           violations=$(grep -RIlE 'thread::sleep|tokio::time::sleep' crates --include='*.rs' | while read -r file; do
-            case "$file" in
-              */tests/*) echo "$file" ;;
-              *) if grep -q '#\[cfg(test)\]' "$file"; then echo "$file"; fi ;;
-            esac
+            if [[ "$file" == */tests/* ]] || grep -q '#\[cfg(test)\]' "$file"; then
+              echo "$file"
+            fi
           done)
           if [ -n "$violations" ]; then
             echo "N2 violation: wall-clock sleep in test code:"
