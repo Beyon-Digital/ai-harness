@@ -357,10 +357,18 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 name = "effects"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "domain",
  "errors",
- "event-journal",
+ "events",
  "kernel-store",
+ "kernel-store-sqlite",
+ "proptest",
+ "prost",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -1542,10 +1550,13 @@ dependencies = [
  "async-trait",
  "command-coordinator",
  "domain",
+ "effects",
  "errors",
  "events",
+ "identity",
  "kernel-store",
  "kernel-store-sqlite",
+ "permissions",
  "proptest",
  "prost",
  "run-graph",
