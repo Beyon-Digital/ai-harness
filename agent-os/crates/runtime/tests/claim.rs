@@ -759,6 +759,7 @@ fn register_handlers_registers_claim_ready_run() {
         },
     )
     .expect("runtime handlers register");
-    assert_eq!(registry.len(), 5);
+    assert_eq!(registry.len(), 6);
     assert!(registry.get(CMD_CLAIM_READY_RUN).is_some());
+    assert!(registry.get(runtime::CMD_RESOLVE_UNKNOWN_EFFECT).is_some());
 }

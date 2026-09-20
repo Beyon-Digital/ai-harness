@@ -6,6 +6,7 @@ pub mod agent_spec;
 pub mod cancel;
 pub mod claim;
 pub mod create_run;
+pub mod effect_recovery;
 pub mod recovery;
 pub mod run;
 pub mod session;
@@ -35,6 +36,8 @@ pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
 pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 /// Fully-qualified command type of `CancelRun`.
 pub const CMD_CANCEL_RUN: &str = "agentos.spec.v1.CancelRun";
+/// Fully-qualified command type of `ResolveUnknownEffect`.
+pub const CMD_RESOLVE_UNKNOWN_EFFECT: &str = "agentos.spec.v1.ResolveUnknownEffect";
 
 /// Dependencies shared by the runtime command handlers.
 #[derive(Clone)]
@@ -72,7 +75,11 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
     )?;
     registry.register(
         CMD_CANCEL_RUN,
-        Arc::new(cancel::CancelRunHandler::new(deps)),
+        Arc::new(cancel::CancelRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT,
+        Arc::new(effect_recovery::ResolveUnknownEffectHandler::new(deps)),
     )?;
     Ok(())
 }

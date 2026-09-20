@@ -7,8 +7,11 @@ publish.workspace = true
 
 [dependencies]
 domain.workspace = true
+effects.workspace = true
 errors.workspace = true
+identity.workspace = true
 kernel-store.workspace = true
+permissions.workspace = true
 run-graph.workspace = true
 command-coordinator.workspace = true
 events.workspace = true
