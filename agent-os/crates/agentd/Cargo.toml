@@ -15,4 +15,5 @@ runtime.workspace = true
 command-coordinator.workspace = true
 domain.workspace = true
 scheduler.workspace = true
+control-api.workspace = true
 sha2.workspace = true

@@ -44,7 +44,7 @@ publish = false
 anyhow = "1"
 async-trait = "0.1"
 prost = "0.14"
-rustix = { version = "1", default-features = false, features = ["process", "std"] }
+rustix = { version = "1", default-features = false, features = ["process", "fs", "std"] }
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 proptest = "1"
@@ -57,7 +57,10 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tonic = "0.14"
+tonic = { version = "0.14", features = ["server", "transport", "codegen"] }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v7"] }

@@ -23,8 +23,8 @@ use domain::ids::{ActorId, CommandId, IdempotencyKey, PrincipalId};
 use domain::provider::IdProvider;
 use domain::time::Clock;
 use kernel_store::KernelStore;
-use kernel_store::models::TimerRow;
 use kernel_store::TxContext;
+use kernel_store::models::TimerRow;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::time::{MissedTickBehavior, interval};
@@ -33,6 +33,24 @@ use crate::workers::outbox::EpochSource;
 
 /// Poll interval bound for due-timer scans.
 const BATCH_LIMIT_PER_TICK: usize = 64;
+
+/// Shared dependencies of the scheduler worker.
+pub struct SchedulerWorkerDeps {
+    /// Durable store.
+    pub store: Arc<dyn KernelStore>,
+    /// Envelope dispatch path for fired commands.
+    pub coordinator: Arc<CommandCoordinator>,
+    /// Daemon fencing epoch the worker claims under.
+    pub epoch: Arc<SchedulerEpochSource>,
+    /// Id source for internal commands.
+    pub ids: Arc<dyn IdProvider>,
+    /// Wall clock for due checks.
+    pub clock: Arc<dyn Clock>,
+    /// Internal principal for worker commands.
+    pub principal: PrincipalId,
+    /// Internal actor for worker commands.
+    pub actor: ActorId,
+}
 
 /// Supplies the daemon fencing epoch the worker claims under.
 pub type SchedulerEpochSource = dyn EpochSource;
@@ -54,25 +72,16 @@ pub struct SchedulerWorker {
 impl SchedulerWorker {
     /// Creates a worker claiming timers as `owner` under `epoch`.
     #[allow(dead_code)]
-    pub fn new(
-        store: Arc<dyn KernelStore>,
-        coordinator: Arc<CommandCoordinator>,
-        epoch: Arc<SchedulerEpochSource>,
-        poll: Duration,
-        ids: Arc<dyn IdProvider>,
-        clock: Arc<dyn Clock>,
-        principal: PrincipalId,
-        actor: ActorId,
-    ) -> Self {
+    pub fn new(deps: SchedulerWorkerDeps, poll: Duration) -> Self {
         Self {
-            store,
-            coordinator,
-            epoch,
+            store: deps.store,
+            coordinator: deps.coordinator,
+            epoch: deps.epoch,
             poll,
-            ids,
-            clock,
-            principal,
-            actor,
+            ids: deps.ids,
+            clock: deps.clock,
+            principal: deps.principal,
+            actor: deps.actor,
         }
     }
 
@@ -147,10 +156,8 @@ impl SchedulerWorker {
             .collect();
         let envelope = CommandEnvelope {
             command_id: CommandId::new(self.ids.as_ref()),
-            idempotency_key: IdempotencyKey::new(scheduler::fire_idempotency_key(
-                claimed.timer_id,
-            ))
-            .expect("derived idempotency key is well formed"),
+            idempotency_key: IdempotencyKey::new(scheduler::fire_idempotency_key(claimed.timer_id))
+                .expect("derived idempotency key is well formed"),
             principal_id: self.principal,
             actor_id: self.actor,
             device_id: None,
