@@ -500,6 +500,16 @@ async fn register_bundle(
         version: registration.version,
         dir: dir.to_path_buf(),
         bundle_digest: registration.bundle_digest,
+        isolation: match manifest.runtime.isolation.as_deref() {
+            Some("user-ns") => {
+                process_supervisor::spawn::Isolation::UserNamespace { network: true }
+            }
+            Some("user-ns-no-net") => {
+                process_supervisor::spawn::Isolation::UserNamespace { network: false }
+            }
+            _ => process_supervisor::spawn::Isolation::None,
+        },
+        runtime_type: manifest.runtime.runtime_type.clone(),
     })
 }
 

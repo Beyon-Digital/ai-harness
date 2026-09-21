@@ -51,6 +51,13 @@
         },
         "language": {
           "type": "string"
+        },
+        "isolation": {
+          "enum": [
+            "none",
+            "user-ns",
+            "user-ns-no-net"
+          ]
         }
       },
       "additionalProperties": false

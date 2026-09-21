@@ -26,6 +26,22 @@ use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use rustix::process::{Pid, Signal, kill_process_group};
 
+/// Kernel-level isolation applied to the child (T1 sandbox tier).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// Plain supervised process (T0).
+    #[default]
+    None,
+    /// Linux user namespace via `unshare`: the adapter runs as fake root
+    /// in fresh user/IPC namespaces; `network: false` also unshares the
+    /// net namespace (no sockets). Falls back to [`Isolation::None`] when
+    /// `unshare` is unavailable or userns creation is denied.
+    UserNamespace {
+        /// Whether the child keeps the parent's network namespace.
+        network: bool,
+    },
+}
+
 /// Everything needed to launch one supervised adapter process.
 #[derive(Debug)]
 pub struct SpawnSpec {
@@ -51,6 +67,12 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     /// Working directory for the child.
     pub cwd: Option<PathBuf>,
+    /// Requested sandbox isolation.
+    pub isolation: Isolation,
+    /// Map the IPC socketpair onto the child's **stdout** as well as
+    /// stdin — wasm bundles spawn `agentos-wasm-host`, whose guest module
+    /// uses WASI stdio as the bidirectional protocol channel.
+    pub stdout_ipc: bool,
 }
 
 /// A spawned adapter child: its OS handle, identity, and parent end of the
@@ -161,22 +183,82 @@ impl std::fmt::Display for ExitReason {
 /// the launcher as non-CLOEXEC only where set).
 pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
     let (parent_end, child_end) = UnixStream::pair().map_err(|e| io("socketpair", e))?;
-    let mut command = Command::new(&spec.executable);
+    let mut command = match spec.isolation {
+        Isolation::None => {
+            let mut c = Command::new(&spec.executable);
+            c.args(&spec.argv);
+            c
+        }
+        Isolation::UserNamespace { network } => {
+            // Preflight: `Command::spawn` only proves `unshare` launched,
+            // not that unshare(2) succeeded inside it — a denied userns
+            // would surface later as a silent EOF at handshake. Probe the
+            // same flags up front; failure means the sandbox is
+            // unavailable and the spawn must fail closed — a T1 adapter
+            // never runs with T0 access.
+            let mut probe = Command::new("unshare");
+            probe.args(["--user", "--map-root-user", "--ipc"]);
+            if !network {
+                probe.arg("--net");
+            }
+            let available = probe
+                .arg("true")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !available {
+                return Err(KernelError::new(
+                    ErrorCode::FailedPrecondition,
+                    RetryClass::Never,
+                    "user-namespace isolation unavailable on this host",
+                ));
+            }
+            // `unshare --user --map-root-user` needs no privilege: the
+            // child becomes root inside a fresh userns only.
+            let mut c = Command::new("unshare");
+            c.args(["--user", "--map-root-user", "--ipc", "--kill-child"]);
+            if !network {
+                c.arg("--net");
+            }
+            c.arg(&spec.executable).args(&spec.argv);
+            c
+        }
+    };
+    // Wasm host: guest stdout must ALSO land on the child's socketpair
+    // end — clone it before stdin consumes `child_end`.
+    let child_stdout = if spec.stdout_ipc {
+        Some(OwnedFd::from(
+            child_end
+                .try_clone()
+                .map_err(|e| io("clone socketpair end", e))?,
+        ))
+    } else {
+        None
+    };
     command
-        .args(&spec.argv)
         .env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Private channel: the child's fd 0 is its socketpair end.
         .stdin(Stdio::from(OwnedFd::from(child_end)))
-        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Own process group, so descendant cleanup can signal the group.
         .process_group(0);
+    if let Some(fd) = child_stdout {
+        command.stdout(Stdio::from(fd));
+    } else {
+        command.stdout(Stdio::piped());
+    }
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
     let mut process = command.spawn().map_err(|e| io("spawn", e))?;
-    let stdout = process.stdout.take().expect("piped stdout");
+    let stdout = if spec.stdout_ipc {
+        None
+    } else {
+        process.stdout.take()
+    };
     let stderr = process.stderr.take().expect("piped stderr");
     let pid = process.id();
     Ok(Child {
@@ -191,7 +273,7 @@ pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
         protocol_version: spec.protocol_version,
         process,
         ipc: parent_end,
-        stdout: Some(stdout),
+        stdout,
         stderr: Some(stderr),
     })
 }

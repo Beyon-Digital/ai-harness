@@ -168,6 +168,35 @@ pub async fn check_bundle(bundle_dir: &Path) -> errors::Result<CheckReport> {
         expected_bundle_digest: digest.clone(),
         protocol_version: 1,
     };
+    let isolation = match manifest.runtime.isolation.as_deref() {
+        Some("user-ns") => process_supervisor::spawn::Isolation::UserNamespace { network: true },
+        Some("user-ns-no-net") => {
+            process_supervisor::spawn::Isolation::UserNamespace { network: false }
+        }
+        _ => process_supervisor::spawn::Isolation::None,
+    };
+    // `wasm` bundles spawn the wasm host with the module as argv[0];
+    // `process` bundles exec the verified entrypoint directly.
+    let (spawn_exec, spawn_argv) = if manifest.runtime.runtime_type == "wasm" {
+        let host = adapter_registry::wasm_host_binary().ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::FailedPrecondition,
+                RetryClass::Never,
+                "wasm bundle requires the agentos-wasm-host binary (set AGENTOS_WASM_HOST)",
+            )
+        })?;
+        (
+            host,
+            vec![
+                bundle_dir
+                    .join(&manifest.runtime.entrypoint)
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        )
+    } else {
+        (bundle_dir.join(&manifest.runtime.entrypoint), Vec::new())
+    };
     let mut child = process_supervisor::spawn(&SpawnSpec {
         adapter_id,
         adapter_version: manifest.version.clone(),
@@ -176,8 +205,8 @@ pub async fn check_bundle(bundle_dir: &Path) -> errors::Result<CheckReport> {
         daemon_instance_id: daemon,
         daemon_fencing_epoch: 1,
         protocol_version: 1,
-        executable: bundle_dir.join(&manifest.runtime.entrypoint),
-        argv: Vec::new(),
+        executable: spawn_exec.clone(),
+        argv: spawn_argv.clone(),
         // Fixture adapters self-assert identity from these env vars — the
         // same conventions spawn_loop/spawn_effect_adapter propagate.
         env: vec![
@@ -198,6 +227,8 @@ pub async fn check_bundle(bundle_dir: &Path) -> errors::Result<CheckReport> {
             ),
         ],
         cwd: None,
+        isolation,
+        stdout_ipc: manifest.runtime.runtime_type == "wasm",
     })?;
     child.drain_output();
     let smoke = probe(child.ipc(), &identity, &ids).await;

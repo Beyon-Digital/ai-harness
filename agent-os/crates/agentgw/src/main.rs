@@ -37,14 +37,22 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
+mod devices;
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("device") {
+        return ExitCode::from(devices::cli(&args[1..]) as u8);
+    }
     let mut socket = PathBuf::from("/tmp/agentd/control.sock");
     let mut listen = "127.0.0.1:7740".to_owned();
     let mut auth_token = std::env::var("AGENTGW_TOKEN").ok();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut devices_file: Option<PathBuf> = std::env::var("AGENTGW_DEVICES_FILE")
+        .ok()
+        .map(PathBuf::from);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -72,10 +80,20 @@ fn main() -> ExitCode {
                 auth_token = Some(arg[13..].to_owned());
                 i += 1;
             }
+            "--devices-file" if i + 1 < args.len() => {
+                devices_file = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            arg if arg.starts_with("--devices-file=") => {
+                devices_file = Some(PathBuf::from(&arg["--devices-file=".len()..]));
+                i += 1;
+            }
             "-h" | "--help" => {
                 println!(
                     "agentgw --socket <control.sock> [--listen 127.0.0.1:7740] \
-                     [--auth-token T]\n  non-loopback --listen requires AGENTGW_TOKEN or --auth-token"
+                     [--auth-token T] [--devices-file F]\n  \
+                     agentgw device <add|revoke|list> --devices-file F [--label L] [id]\n  \
+                     non-loopback --listen requires AGENTGW_TOKEN/--auth-token or --devices-file"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -85,11 +103,15 @@ fn main() -> ExitCode {
             }
         }
     }
-    if !is_loopback_addr(&listen) && auth_token.is_none() {
-        eprintln!("agentgw: refusing non-loopback --listen without AGENTGW_TOKEN/--auth-token");
+    if !is_loopback_addr(&listen) && auth_token.is_none() && devices_file.is_none() {
+        eprintln!(
+            "agentgw: refusing non-loopback --listen without \
+             AGENTGW_TOKEN/--auth-token/--devices-file"
+        );
         return ExitCode::FAILURE;
     }
-    match serve(socket, listen, auth_token) {
+    let loopback = is_loopback_addr(&listen);
+    match serve(socket, listen, auth_token, devices_file, loopback) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("agentgw: {e}");
@@ -111,7 +133,13 @@ fn is_loopback_addr(listen: &str) -> bool {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> std::io::Result<()> {
+async fn serve(
+    socket: PathBuf,
+    listen: String,
+    auth_token: Option<String>,
+    devices_file: Option<PathBuf>,
+    loopback: bool,
+) -> std::io::Result<()> {
     let daemon = agentctl::connect(&socket)
         .await
         .map_err(|e| std::io::Error::other(format!("{e}")))?;
@@ -123,7 +151,9 @@ async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> s
         index,
         index_path,
         auth_token,
+        devices_file,
         runtime_dir,
+        loopback,
     });
 
     let app = Router::new()
@@ -166,10 +196,22 @@ struct AppState {
     index: RwLock<Index>,
     index_path: PathBuf,
     auth_token: Option<String>,
+    /// Per-device credential file (Phase 14); revocations apply per
+    /// request without a restart.
+    devices_file: Option<PathBuf>,
     /// Daemon runtime dir (socket parent) — kernel.db + events.db are
     /// opened read-only here for the metrics/environment surface.
     runtime_dir: PathBuf,
+    /// Whether the listen address is loopback-only — credential-free
+    /// requests are only trusted as "local" on loopback binds.
+    loopback: bool,
 }
+
+/// Inserted into request extensions by `require_auth`: `"admin"` for the
+/// master token, a device id for a device token, `"local"` when the
+/// gateway runs unauthenticated (loopback default).
+#[derive(Clone, Debug)]
+pub struct AuthedCaller(pub String);
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -228,27 +270,73 @@ fn index_push<T>(v: &mut Vec<T>, item: T) {
     }
 }
 
-/// Bearer-token check; enforced only when a token was configured.
+/// Bearer check: master `--auth-token`, then per-device tokens (each
+/// request re-reads the file so `revoke` is immediate). Unauthenticated
+/// loopback mode tags the caller `"local"`.
 async fn require_auth(
     State(state): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if let Some(expected) = &state.auth_token {
-        let ok = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v: &str| v == format!("Bearer {expected}"));
-        if !ok {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "unauthorized" })),
-            )
-                .into_response();
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned));
+    // A registry read error is an outage, not a bad credential — answer
+    // 503 so operators can distinguish it from a 401.
+    #[allow(clippy::result_large_err)]
+    let device_caller = |t: &str| -> Result<Option<AuthedCaller>, Response> {
+        match state.devices_file.as_deref() {
+            Some(f) => match devices::authenticate(f, t) {
+                Ok(Some(id)) => Ok(Some(AuthedCaller(id))),
+                Ok(None) => Ok(None),
+                Err(e) => Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": format!("device registry unavailable: {e}") })),
+                )
+                    .into_response()),
+            },
+            None => Ok(None),
         }
-    }
+    };
+    let caller = if let Some(expected) = &state.auth_token {
+        match bearer.as_deref() {
+            Some(t) if t == expected => AuthedCaller("admin".to_owned()),
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
+            },
+            None => return unauthorized(),
+        }
+    } else if state.devices_file.is_some() {
+        // Devices configured without a master token: a valid device token
+        // identifies the caller. Credential-free requests are only "local"
+        // on a loopback bind — on a remote listener they're unauthorized.
+        match bearer.as_deref() {
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
+            },
+            None if state.loopback => AuthedCaller("local".to_owned()),
+            None => return unauthorized(),
+        }
+    } else {
+        AuthedCaller("local".to_owned())
+    };
+    let mut req = req;
+    req.extensions_mut().insert(caller);
     next.run(req).await
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 /// Minimal browser-isolation headers for the privileged dashboard.
@@ -1225,6 +1313,7 @@ async fn api_approvals(
 
 async fn api_respond_approval(
     State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<AuthedCaller>>,
     Json(body): Json<Value>,
 ) -> Response {
     let request_id = match req_string(&body, "request_id") {
@@ -1239,11 +1328,18 @@ async fn api_respond_approval(
         Ok(v) => v.to_owned(),
         Err(r) => return r.into_response(),
     };
+    // A device-authenticated caller's response is bound to that device;
+    // admin/local callers may still pass `device_id` explicitly.
+    let authenticated = caller.map(|axum::Extension(c)| c.0);
+    let device_id = match authenticated.as_deref() {
+        Some("admin") | Some("local") | None => opt_string(&body, "device_id"),
+        Some(id) => id.to_owned(),
+    };
     let request = contract::ApprovalResponseRequest {
         request_id,
         request_digest,
         decision,
-        device_id: opt_string(&body, "device_id"),
+        device_id,
         responder_principal_id: String::new(),
     };
     match state.daemon.control.clone().respond_approval(request).await {

@@ -174,6 +174,126 @@ fn gateway_serves_health_index_and_rest() {
     drop(agentd);
 }
 
+/// Phase-14 device auth: a per-device bearer token authenticates against
+/// `--devices-file`, revocation takes effect without a restart, and the
+/// master token keeps working.
+#[test]
+fn gateway_device_auth_and_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let devices = dir.path().join("devices.json");
+
+    // Register a device via the CLI.
+    let out = Command::new(target_bin("agentgw"))
+        .args([
+            "device",
+            "add",
+            "--devices-file",
+            devices.to_str().unwrap(),
+            "--label",
+            "laptop",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let device_id = v["device_id"].as_str().unwrap().to_owned();
+    let device_token = v["token"].as_str().unwrap().to_owned();
+    assert!(device_token.starts_with("gwdev_"));
+
+    // The file stores only the hash.
+    let on_disk = std::fs::read_to_string(&devices).unwrap();
+    assert!(!on_disk.contains(&device_token));
+    assert!(on_disk.contains("sha256:"));
+
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let agentd = Proc(
+        Command::new(target_bin("agentd"))
+            .arg("--runtime-dir")
+            .arg(&runtime)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = runtime.join("control.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "agentd socket never appeared");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    let port = free_port();
+    let agentgw = Proc(
+        Command::new(target_bin("agentgw"))
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--auth-token")
+            .arg("master-secret")
+            .arg("--devices-file")
+            .arg(&devices)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let authed_get = |token: &str| -> u16 {
+        let req = ureq::get(&format!("http://127.0.0.1:{port}/api/health"));
+        let req = if token.is_empty() {
+            req
+        } else {
+            req.header("Authorization", &format!("Bearer {token}"))
+        };
+        match req.call() {
+            Ok(r) => r.status().as_u16(),
+            Err(ureq::Error::StatusCode(c)) => c,
+            Err(_) => 0,
+        }
+    };
+
+    // Poll until up (master token).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if authed_get("master-secret") == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "agentgw never came up");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    assert_eq!(authed_get(""), 401);
+    assert_eq!(authed_get("wrong-token"), 401);
+    assert_eq!(authed_get(&device_token), 200);
+
+    // Revoke — the next request re-reads the file, no restart.
+    let out = Command::new(target_bin("agentgw"))
+        .args([
+            "device",
+            "revoke",
+            &device_id,
+            "--devices-file",
+            devices.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(authed_get(&device_token), 401);
+
+    drop(agentgw);
+    drop(agentd);
+}
+
 /// A scripted run under `local-trusted` produces LoopDecisionAccepted
 /// events the decisions endpoint decodes into readable JSON.
 #[test]

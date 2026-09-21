@@ -156,3 +156,86 @@ fencing_token, written_at_ms}}`. `memory.put` accepts `sensitivity` of
 record's sensitivity can only be raised — downgrades and cross-namespace
 writes with mismatched class are rejected (`sensitivity_downgrade`).
 Namespaces must match `[a-z0-9][a-z0-9._-]{0,63}`.
+
+## Context strategy (per-generation `limits.context`)
+
+The run's frozen generation caps what each turn's `LoopInput` carries:
+
+```yaml
+limits:
+  context:
+    max_state_bytes: 65536      # run-state snapshot fed to the loop
+    max_fed_events: 64          # settled-effect entries per turn
+    max_fed_event_bytes: 65536  # serialized events batch
+```
+
+Oversized state is truncated on a UTF-8 boundary; an oversized events
+batch keeps the most recent entries (dropping all if none fit). Absent
+`context:` the defaults above apply; existing documents keep parsing.
+
+## Adapter sandbox tiers (`runtime.isolation`)
+
+A bundle manifest may request kernel-level isolation:
+
+```json
+"runtime": {"type": "process", "entrypoint": "...", "isolation": "user-ns-no-net"}
+```
+
+`none` (default) | `user-ns` (fresh user+IPC namespaces, network kept) |
+`user-ns-no-net` (also isolates the net namespace — no sockets). Spawn
+runs through `unshare --user --map-root-user --ipc [--net]`; if userns
+creation is unavailable the daemon logs a warning and runs unsandboxed.
+`agentd adapter check` exercises the same isolation at smoke time. The
+spawn **fails closed**: if the host can't create the namespaces (`unshare`
+missing, or the kernel denies `CLONE_NEWUSER`), the adapter is refused —
+a T1 bundle never silently runs with T0 access.
+
+## Device registry (per-device gateway auth)
+
+```bash
+agentgw device add    --devices-file devices.json --label laptop   # prints a gwdev_… token once
+agentgw device list   --devices-file devices.json
+agentgw device revoke --devices-file devices.json <id-prefix>
+agentgw --socket … --listen … --auth-token MASTER --devices-file devices.json
+```
+
+The file stores only `sha256:` token hashes. `Authorization: Bearer
+<token>` accepts the master token (`admin`) or any enabled device token;
+`revoke` applies to the very next request — no restart. A
+device-authenticated `POST /api/approvals/respond` binds that device id
+into the durable `device_id` field.
+
+## Historical replay
+
+`agentctl replay RUN_ID` pages the `run/<id>` event stream and decodes
+every `LoopDecisionAccepted` payload into `{kind, decision_id, turn_id,
+step_sequence}` — reconstruct what the loop decided without it running.
+## Wasm adapter bundles (`runtime.type = "wasm"`)
+
+An adapter can ship a WASI module instead of a native binary:
+
+```json
+"runtime": {"type": "wasm", "entrypoint": "my-plugin.wasm"}
+```
+
+At spawn the daemon execs `agentos-wasm-host <module.wasm>` (resolved via
+`AGENTOS_WASM_HOST` or next to the `agentd` binary) and maps the private
+adapter socketpair onto the host's stdin **and** stdout — WASI p1 stdio
+inside the module is the framed `AdapterFrame` channel. The module is the
+sandbox: no filesystem preopens, no sockets, no clock — only stdio and
+the curated env allowlist. `runtime.isolation` is meaningful only for
+`type: "process"`.
+
+Sample plugin: `fixtures/wasm-echo` (`wasm.echo` — uppercases the effect
+payload); bind it with `config/wasm.yaml`'s `local-wasm` profile:
+
+```bash
+cargo build -p wasm-echo --target wasm32-wasip1   # requires that rustup target
+cargo build -p wasm-host                         # target/debug/agentos-wasm-host
+agentd --runtime-dir /tmp/run --config config/wasm.yaml \
+      --adapter-bundle <wasm-bundle-dir> ...
+```
+
+E2E proof: `agent-os/crates/agentd/tests/e2e_wasm.rs` runs a full
+create→invoke_effect→commit cycle through a real WASI module (skipped on
+toolchains without `wasm32-wasip1`).

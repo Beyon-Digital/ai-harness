@@ -321,6 +321,31 @@ pub fn write_lock(dir: &Path) -> errors::Result<()> {
     std::fs::write(dir.join(LOCK_FILE), out).map_err(|e| io("write bundle.lock", &e))
 }
 
+/// Locates the `agentos-wasm-host` binary that runs `runtime.type =
+/// "wasm"` bundles: `AGENTOS_WASM_HOST` env override first, else a
+/// sibling of the current executable (cargo keeps workspace bins in the
+/// same target dir).
+pub fn wasm_host_binary() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("AGENTOS_WASM_HOST") {
+        let path = std::path::PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    // Sibling of the current executable — covers `target/debug/agentd`
+    // in production and `target/debug/deps/<test>` under `cargo test`
+    // (walk up one when the exe sits in a `deps` dir).
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for dir in [Some(dir), dir.parent()] {
+        let candidate = dir.map(|d| d.join("agentos-wasm-host"));
+        if let Some(p) = candidate.filter(|p| p.is_file()) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn invalid(message: String) -> KernelError {
     KernelError::new(ErrorCode::InvalidArgument, RetryClass::Never, message)
 }

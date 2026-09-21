@@ -60,7 +60,8 @@ async fn main() -> std::process::ExitCode {
              \x20 approvals list [--run-id R]\n\
              \x20 approvals respond --request-id X --digest D --decision approve|deny [--device-id D]\n\
              \x20 events read --stream-key K [--from N] [--limit N]\n\
-             \x20 events tail --stream-key K [--after N] [--count N] [--timeout S]\n"
+             \x20 events tail --stream-key K [--after N] [--count N] [--timeout S]\n\
+             \x20 replay RUN_ID\n"
         );
         return std::process::ExitCode::SUCCESS;
     }

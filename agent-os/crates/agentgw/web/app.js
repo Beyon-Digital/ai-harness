@@ -162,6 +162,10 @@ function renderRunDetail(r) {
   }
   state._runFp = fp;
   state._decFp = null;
+  // The rebuild drops the populated env node — invalidate the cache so
+  // loadEnvironment refetches into the fresh `loading…` node instead of
+  // early-returning on the stale `runId` match.
+  state._envRun = null;
   const box = $("#run-detail");
   const decoded = r.output_ref?.startsWith("data:text/plain;base64,")
     ? decodeDataUri(r.output_ref)
@@ -185,12 +189,14 @@ function renderRunDetail(r) {
 /* Resolved run environment is frozen at run start — load once per run. */
 async function loadEnvironment(runId) {
   if (state._envRun === runId) return;
-  const el = $("#run-env");
-  if (!el) return;
   try {
     const { environment: env, bindings } = await api(
       "/api/runs/" + encodeURIComponent(runId) + "/environment");
-    if (state.selectedRun !== runId) return;
+    // Re-query after the await: a renderRunDetail rebuild between request
+    // and response would otherwise write to a detached node and leave the
+    // fresh `loading…` node stuck.
+    const el = $("#run-env");
+    if (!el || state.selectedRun !== runId) return;
     state._envRun = runId;
     const rows = [
       ["profile env", env.environment_id],
@@ -204,6 +210,8 @@ async function loadEnvironment(runId) {
       `<div class="env-row"><b>${esc(b.port_id)}</b><code>${esc(b.adapter_id)}@${esc(b.adapter_version)}</code></div>`).join("");
     el.innerHTML = `<div class="env-box">${rows}${binds ? `<h4>bindings</h4>${binds}` : ""}</div>`;
   } catch (e) {
+    const el = $("#run-env");
+    if (!el) return;
     // A 404 means the run has no frozen environment — cache it so we stop
     // repolling; any other failure retries on the next render.
     if (/no resolved environment/i.test(e.message)) state._envRun = runId;
@@ -335,7 +343,7 @@ $("#form-create-run").addEventListener("submit", async (ev) => {
         requested_capabilities: caps,
       }),
     });
-    toast("run submitted: " + (r.command_id || "ok"));
+    toast("run submitted: " + (r.run_id || r.command_id || "ok"));
     loadIndex();
     if (r.run_id) selectRun(r.run_id);
   } catch (e) { toast(e.message, true); }
@@ -401,9 +409,10 @@ async function loadAdapters() {
     $("#adapters-table tbody").innerHTML = adapters.map((a) => `<tr>
       <td><code>${esc(a.adapter?.id || "?")}</code></td>
       <td>${esc(a.adapter?.version || "")}</td>
+      <td>${esc(a.runtime_type || "process")}</td>
       <td>${esc(a.trust_state)} · ${esc(a.conformance_state)}</td>
       <td>${(a.ports || []).map((p) => `<code>${esc(p)}</code>`).join(" ")}</td>
-    </tr>`).join("") || '<tr><td colspan="4"><em>none registered</em></td></tr>';
+    </tr>`).join("") || '<tr><td colspan="5"><em>none registered</em></td></tr>';
   } catch (e) { toast(e.message, true); }
 }
 
