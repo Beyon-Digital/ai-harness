@@ -9,7 +9,6 @@ publish.workspace = true
 domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
-sandbox.workspace = true
 
 [dev-dependencies]
 kernel-store-sqlite.workspace = true
