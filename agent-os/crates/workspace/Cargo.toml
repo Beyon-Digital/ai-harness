@@ -8,4 +8,11 @@ publish.workspace = true
 [dependencies]
 domain.workspace = true
 errors.workspace = true
+kernel-store.workspace = true
 sandbox.workspace = true
+
+[dev-dependencies]
+kernel-store-sqlite.workspace = true
+tempfile.workspace = true
+testkit.workspace = true
+tokio.workspace = true
