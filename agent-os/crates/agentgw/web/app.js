@@ -150,6 +150,11 @@ function decodeDataUri(ref) {
 }
 
 function renderRunDetail(r) {
+  // Skip the rebuild when nothing changed — re-rendering collapses
+  // expanded decision payloads on every poll.
+  const fp = [r.state, r.run_revision, r.step_sequence, r.output_ref].join("|");
+  if (state._runFp === fp) return;
+  state._runFp = fp;
   const box = $("#run-detail");
   const decoded = r.output_ref?.startsWith("data:text/plain;base64,")
     ? decodeDataUri(r.output_ref)
@@ -163,11 +168,36 @@ function renderRunDetail(r) {
     <div class="kv"><b>session</b><code>${esc(r.session_id)}</code></div>
     <div class="kv"><b>state</b><span class="state state-${esc(r.state_name)}">${esc(r.state_name)} (${r.state})</span></div>
     <div class="kv"><b>revision</b>${r.run_revision} · <b>epoch</b> ${r.loop_epoch} · <b>step</b> ${r.step_sequence}</div>
-    ${out}`;
+    ${out}
+    <div class="kv"><b>decisions</b><div id="run-decisions"><em>loading…</em></div></div>`;
+  loadDecisions(r.run_id);
+}
+
+async function loadDecisions(runId) {
+  const el = $("#run-decisions");
+  if (!el) return;
+  try {
+    const { decisions } = await api(
+      "/api/runs/" + encodeURIComponent(runId) + "/decisions");
+    if (state.selectedRun !== runId) return;
+    el.innerHTML = (decisions || []).map((d) => {
+      const det = d.kind === "invoke_effect"
+        ? `<code>${esc(d.detail.operation)}</code>` +
+          (d.detail.payload
+            ? ` <details><summary>payload</summary><pre class="dec-payload">${esc(d.detail.payload)}</pre></details>`
+            : "")
+        : Object.entries(d.detail || {})
+            .map(([k, v]) => `${esc(k)}=${esc(v)}`).join(" ");
+      return `<div class="dec">step ${d.step_sequence} · <span class="badge">${esc(d.kind)}</span> ${det}</div>`;
+    }).join("") || "<em>none yet</em>";
+  } catch (e) {
+    el.innerHTML = `<em>${esc(e.message)}</em>`;
+  }
 }
 
 async function selectRun(runId) {
   state.selectedRun = runId;
+  state._runFp = null;
   try {
     renderRunDetail(await api("/api/runs/" + encodeURIComponent(runId)));
     $("#stream-key").value = "run/" + runId;

@@ -1,5 +1,5 @@
 [package]
-name = "openrouter-loop"
+name = "local-memory"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

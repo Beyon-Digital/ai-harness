@@ -147,6 +147,159 @@ fn gateway_serves_health_index_and_rest() {
     let (code, body) = http_get(port, &format!("/api/approvals?run_id={run_id}"));
     assert_eq!(code, 200, "{body}");
 
+    // The decisions endpoint answers even for a run with no decisions.
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/decisions"));
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["decisions"], serde_json::json!([]));
+
+    drop(agentgw);
+    drop(agentd);
+}
+
+/// A scripted run under `local-trusted` produces LoopDecisionAccepted
+/// events the decisions endpoint decodes into readable JSON.
+#[test]
+fn gateway_decisions_decodes_run_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+
+    // default.yaml's local-trusted profile needs the fixture bundles.
+    let ws = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mk = |bin: &str, manifest: &str, out: &str| {
+        Command::new("bash")
+            .arg(ws.join("scripts/make-adapter-bundle.sh"))
+            .arg(ws.join(format!("target/debug/{bin}")))
+            .arg(ws.join(manifest))
+            .arg(dir.path().join(out))
+            .output()
+            .unwrap();
+    };
+    mk(
+        "fixture-agent-loop",
+        "fixtures/agent-loop/adapter.manifest.json",
+        "fixture-loop",
+    );
+    mk(
+        "fixture-effect-adapter",
+        "fixtures/effect-adapter/adapter.manifest.json",
+        "fixture-effect",
+    );
+
+    let agentd = Proc(
+        Command::new(target_bin("agentd"))
+            .arg("--runtime-dir")
+            .arg(&runtime)
+            .arg("--config")
+            .arg(ws.join("config/default.yaml"))
+            .arg("--adapter-bundle")
+            .arg(dir.path().join("fixture-loop"))
+            .arg("--adapter-bundle")
+            .arg(dir.path().join("fixture-effect"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = runtime.join("control.sock");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "agentd socket never appeared");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    let port = free_port();
+    let agentgw = Proc(
+        Command::new(target_bin("agentgw"))
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (code, _) = http_get(port, "/api/health");
+        if code == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "agentgw never came up");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    // Session + spec (local-trusted) + run. The fixture loop has no script
+    // for this run id, so it answers `fail` — still an accepted decision.
+    let (code, body) = http_post_json(port, "/api/sessions", serde_json::json!({}));
+    let session_id: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(code, 200, "{body}");
+    let session_id = session_id["session_id"].as_str().unwrap().to_owned();
+
+    let spec_body =
+        serde_json::to_vec(&serde_json::json!({"runtime_profile_name": "local-trusted"})).unwrap();
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(&spec_body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let spec_id = "01999999-0000-7000-8000-00000000b0b1";
+    let (code, body) = http_post_json(
+        port,
+        "/api/specs",
+        serde_json::json!({
+            "agent_spec_id": spec_id,
+            "version": "v1",
+            "body": std::str::from_utf8(&spec_body).unwrap(),
+        }),
+    );
+    assert_eq!(code, 200, "{body}");
+
+    let run_id = "01905c5e-0000-7000-8000-00de51510001";
+    let (code, body) = http_post_json(
+        port,
+        "/api/runs",
+        serde_json::json!({
+            "session_id": session_id,
+            "task_id": run_id,
+            "run_id": run_id,
+            "agent_spec_id": spec_id,
+            "spec_version": "v1",
+            "spec_digest": digest,
+            "task_payload": "say hi",
+            "requested_profile": "local-trusted",
+        }),
+    );
+    assert_eq!(code, 200, "{body}");
+
+    // Wait for the terminal state, then read the decoded decisions.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (code, body) = http_get(port, &format!("/api/runs/{run_id}"));
+        if code == 200 {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if ["completed", "failed", "cancelled"]
+                .contains(&v["state_name"].as_str().unwrap_or(""))
+            {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "run never settled");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/decisions"));
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let decisions = v["decisions"].as_array().unwrap();
+    assert!(!decisions.is_empty(), "expected at least one decision");
+    assert_eq!(decisions[0]["kind"], "fail");
+    assert_eq!(
+        decisions[0]["detail"]["reason_code"].as_str().unwrap(),
+        "script_exhausted"
+    );
+
     drop(agentgw);
     drop(agentd);
 }

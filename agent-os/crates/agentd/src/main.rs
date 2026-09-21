@@ -16,8 +16,12 @@ use agentd::bootstrap::{DaemonConfig, boot};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> std::process::ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "backup") {
+        return backup_command(&argv[1..]).await;
+    }
     let mut config = DaemonConfig::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = arg
             .split_once('=')
@@ -48,7 +52,8 @@ async fn main() -> std::process::ExitCode {
             "--json" => config.json_logs = true,
             "--help" | "-h" => {
                 println!(
-                    "agentd --runtime-dir <dir> [--config <doc.yaml>] \\\n  [--adapter-bundle <dir>]... [--json]"
+                    "agentd --runtime-dir <dir> [--config <doc.yaml>] \\\n  [--adapter-bundle <dir>]... [--json]\n\
+                     agentd backup --runtime-dir <dir> --out <dir>"
                 );
                 return std::process::ExitCode::SUCCESS;
             }
@@ -91,5 +96,72 @@ async fn main() -> std::process::ExitCode {
             eprintln!("agentd: shutdown error: {error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// `agentd backup --runtime-dir <dir> --out <dir>` — consistent snapshots
+/// of `kernel.db`/`events.db` via `VACUUM INTO` (safe while the daemon is
+/// running; WAL contents are folded into the snapshot).
+async fn backup_command(args: &[String]) -> std::process::ExitCode {
+    use sqlx::Connection as _;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+
+    let mut runtime_dir = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let (flag, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(f, v)| (f, Some(v.to_owned())));
+        let value = inline.or_else(|| it.next().cloned());
+        match flag {
+            "--runtime-dir" => runtime_dir = value.map(PathBuf::from),
+            "--out" => out = value.map(PathBuf::from),
+            other => {
+                eprintln!("agentd backup: unknown flag {other}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+    let (Some(runtime_dir), Some(out)) = (runtime_dir, out) else {
+        eprintln!("agentd backup: --runtime-dir and --out are required");
+        return std::process::ExitCode::FAILURE;
+    };
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("agentd backup: cannot create {}: {e}", out.display());
+        return std::process::ExitCode::FAILURE;
+    }
+    let mut ok = true;
+    for name in ["kernel.db", "events.db"] {
+        let src = runtime_dir.join(name);
+        if !src.is_file() {
+            eprintln!("agentd backup: skipping missing {}", src.display());
+            continue;
+        }
+        let dst = out.join(name);
+        let options = SqliteConnectOptions::new()
+            .filename(&src)
+            .create_if_missing(false);
+        let result: Result<(), sqlx::Error> = async {
+            let mut conn = SqliteConnection::connect_with(&options).await?;
+            let lit = dst.display().to_string().replace('\'', "''");
+            sqlx::query(&format!("VACUUM INTO '{lit}'"))
+                .execute(&mut conn)
+                .await?;
+            conn.close().await
+        }
+        .await;
+        match result {
+            Ok(()) => println!("agentd backup: {} -> {}", src.display(), dst.display()),
+            Err(e) => {
+                eprintln!("agentd backup: {}: {e}", src.display());
+                ok = false;
+            }
+        }
+    }
+    if ok {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
     }
 }

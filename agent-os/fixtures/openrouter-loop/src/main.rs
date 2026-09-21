@@ -1,27 +1,28 @@
-//! OpenRouter-backed AgentLoop adapter.
+//! OpenRouter-driven AgentLoop adapter.
 //!
-//! Speaks the framed adapter protocol on fd 0 (socketpair), then serves
-//! `agent_loop.next` PortCallRequests by asking an OpenRouter chat model
-//! for the next `LoopDecision`. The model's job each turn: given the
-//! task payload (carried in `LoopInput.state`, utf-8), decide one action
-//! and answer with a single JSON object:
+//! Speaks the framed adapter protocol on fd 0 (socketpair). This loop
+//! performs no network I/O itself: the model call is requested as a
+//! durable `invoke_effect` decision (`model.chat`) so the kernel routes
+//! it through the Effect Coordinator — fenced, idempotent, reconciled —
+//! to the bound `effect.execute` adapter (`fixtures/openrouter-effect`).
+//!
+//! Turn flow per run:
+//!   1. No settled model effect yet -> `InvokeEffect{operation:
+//!      "model.chat", payload: <chat-completions request JSON>}`; the
+//!      run parks in `WaitingTool` while the effect executes.
+//!   2. Kernel feeds settled effect outcomes back in `LoopInput.events`
+//!      (JSON array) -> the committed `result_ref` data URI carries the
+//!      assistant's reply, which is parsed as the run's next decision:
 //!
 //!   {"complete": {"output": "<final answer text>"}}
 //!   {"fail": {"reason_code": "<snake_case code>", "reason": "<why>"}}
 //!   {"wait": {"reason": "<what it is waiting for>"}}
 //!   {"request_approval": {"operation": "<op>", "reason": "<why>"}}
 //!
-//! `invoke_effect` and `spawn_agent` are intentionally not offered: this
-//! adapter is a minimal real-inference loop, not a tool-using runtime.
-//!
 //! Env:
-//! - `OPENROUTER_API_KEY` (required) — passed through from the daemon env.
-//! - `OPENROUTER_MODEL` — chat model id (default `openrouter/free`).
-//! - `OPENROUTER_BASE_URL` — default `https://openrouter.ai/api/v1`; must be
-//!   an `https://` URL on `openrouter.ai` (or a subdomain) so the API key is
-//!   only sent to OpenRouter. `OPENROUTER_ALLOW_ANY_BASE_URL=1` opts out.
-//! - `OPENROUTER_SITE`, `OPENROUTER_APP_NAME` — optional referer headers.
-//! - `OPENROUTER_TIMEOUT_MS` — HTTP timeout (default 55000).
+//! - `OPENROUTER_MODEL` — chat model id embedded in the effect payload
+//!   (default `openrouter/free`); the bound effect adapter applies its
+//!   own default when the field is absent.
 //!
 //! A `complete` decision's output text is returned as a `data:` URI in
 //! `output_ref` (capped, so the run record stays small).
@@ -29,11 +30,10 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use adapter_protocol::framing::{read_frame, write_frame};
 use domain::generated::contract::{
-    AdapterFrame, AdapterHello, AdapterPong, Complete, Fail, LoopDecision, LoopInput,
+    AdapterFrame, AdapterHello, AdapterPong, Complete, Fail, InvokeEffect, LoopDecision, LoopInput,
     PortCallResponse, RequestApproval, Wait, adapter_frame::Body, loop_decision,
 };
 use prost::Message;
@@ -42,6 +42,7 @@ use serde_json::{Value, json};
 const PORT_ID: &str = "agent_loop";
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_OUTPUT_BYTES: usize = 24 * 1024;
+const MODEL_CHAT_OP: &str = "model.chat";
 
 /// The daemon's fixed bootstrap principal/actor identities — required
 /// fields on the `CreateApprovalRequest` draft.
@@ -56,15 +57,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-struct LlmConfig {
-    api_key: String,
-    model: String,
-    base_url: String,
-    site: Option<String>,
-    app_name: Option<String>,
-    timeout: Duration,
 }
 
 fn run() -> std::io::Result<()> {
@@ -95,35 +87,7 @@ fn run() -> std::io::Result<()> {
     )
     .map_err(err)?;
 
-    let base_url = env("OPENROUTER_BASE_URL")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned())
-        .trim_end_matches('/')
-        .to_owned();
-    if env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() != Ok("1") {
-        let host = base_url
-            .strip_prefix("https://")
-            .and_then(|rest| rest.split('/').next())
-            .and_then(|h| h.split(':').next())
-            .unwrap_or_default();
-        if !(host == "openrouter.ai" || host.ends_with(".openrouter.ai")) {
-            return Err(err_msg(
-                "OPENROUTER_BASE_URL must be https on openrouter.ai \
-                 (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)",
-            ));
-        }
-    }
-    let config = LlmConfig {
-        api_key: env("OPENROUTER_API_KEY").unwrap_or_default(),
-        model: env("OPENROUTER_MODEL").unwrap_or_else(|_| "openrouter/free".to_owned()),
-        base_url,
-        site: env("OPENROUTER_SITE").ok(),
-        app_name: env("OPENROUTER_APP_NAME").ok(),
-        timeout: env("OPENROUTER_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or_else(|| Duration::from_millis(55_000)),
-    };
+    let model = env("OPENROUTER_MODEL").unwrap_or_else(|_| "openrouter/free".to_owned());
 
     while let Some(frame) = read_frame(&mut stream).map_err(err)? {
         let Some(body) = frame.body else { continue };
@@ -142,7 +106,7 @@ fn run() -> std::io::Result<()> {
             Body::Shutdown(_) => return Ok(()),
             _ => continue,
         };
-        let response = decide(&request, &config);
+        let response = decide(&request, &model);
         write_frame(
             &mut stream,
             &AdapterFrame {
@@ -154,10 +118,7 @@ fn run() -> std::io::Result<()> {
     Ok(())
 }
 
-fn decide(
-    request: &domain::generated::contract::PortCallRequest,
-    config: &LlmConfig,
-) -> PortCallResponse {
+fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -> PortCallResponse {
     let reply = |decision: Option<loop_decision::Decision>, error_code: String| {
         let Ok(input) = LoopInput::decode(request.payload.as_slice()) else {
             return PortCallResponse {
@@ -183,15 +144,6 @@ fn decide(
         }
     };
 
-    if config.api_key.is_empty() {
-        return reply(
-            Some(loop_decision::Decision::Fail(Fail {
-                reason_code: "missing_openrouter_api_key".to_owned(),
-            })),
-            String::new(),
-        );
-    }
-
     let Ok(input) = LoopInput::decode(request.payload.as_slice()) else {
         return PortCallResponse {
             call_id: request.call_id.clone(),
@@ -199,31 +151,85 @@ fn decide(
             error_code: "invalid_argument".to_owned(),
         };
     };
-    let task = String::from_utf8_lossy(&input.state);
-    let events = String::from_utf8_lossy(&input.events);
 
-    let content = match call_model(config, &task, &events, input.step_sequence) {
-        Ok(c) => c,
-        Err(reason) => {
-            eprintln!("openrouter-loop: model call failed: {reason}");
-            return reply(
-                Some(loop_decision::Decision::Fail(Fail {
-                    reason_code: "llm_call_failed".to_owned(),
-                })),
-                String::new(),
-            );
+    // A settled model effect means the coordinator already executed the
+    // chat call; its result drives this run's next decision.
+    if let Some(effect) = latest_model_effect(&input.events) {
+        let state = effect
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match state {
+            "committed" => {
+                let result_ref = effect
+                    .get("result_ref")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let Some(content) = decode_data_uri(result_ref) else {
+                    return reply(
+                        Some(loop_decision::Decision::Fail(Fail {
+                            reason_code: "model_result_undecodable".to_owned(),
+                        })),
+                        String::new(),
+                    );
+                };
+                return reply(
+                    Some(parse_model_decision(&content, &input.run_id)),
+                    String::new(),
+                );
+            }
+            "failed" => {
+                return reply(
+                    Some(loop_decision::Decision::Fail(Fail {
+                        reason_code: effect
+                            .get("error_code")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("model_effect_failed")
+                            .to_owned(),
+                    })),
+                    String::new(),
+                );
+            }
+            _ => {
+                return reply(
+                    Some(loop_decision::Decision::Fail(Fail {
+                        reason_code: format!("model_effect_{state}"),
+                    })),
+                    String::new(),
+                );
+            }
         }
-    };
+    }
 
-    let decision = parse_model_decision(&content, &input.run_id);
-    reply(Some(decision), String::new())
+    // No model effect yet — request one through the Effect Coordinator.
+    let task = String::from_utf8_lossy(&input.state);
+    reply(
+        Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+            operation: MODEL_CHAT_OP.to_owned(),
+            payload: serde_json::to_vec(&chat_request(model, &task)).unwrap_or_default(),
+            effect_claim: Vec::new(),
+        })),
+        String::new(),
+    )
 }
 
-fn call_model(config: &LlmConfig, task: &str, events: &str, step: u64) -> Result<String, String> {
+/// The newest settled `model.chat` outcome in the events batch, if any.
+fn latest_model_effect(events: &[u8]) -> Option<Value> {
+    let parsed: Value = serde_json::from_slice(events).ok()?;
+    parsed
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|e| e.get("operation").and_then(Value::as_str) == Some(MODEL_CHAT_OP))
+        .cloned()
+}
+
+fn chat_request(model: &str, task: &str) -> Value {
     let system = "You are the decision loop of an agent operating system. \
-        On each turn you receive the task (what the user asked the agent to \
-        do) and the current step number. Reply with EXACTLY ONE JSON object \
-        and nothing else — no prose, no markdown fences. Choose one:\n\
+        You receive the task (what the user asked the agent to do). \
+        Reply with EXACTLY ONE JSON object and nothing else — no prose, \
+        no markdown fences. Choose one:\n\
         {\"complete\": {\"output\": \"<the final answer/result text>\"}}\n\
         {\"fail\": {\"reason_code\": \"<snake_case>\"}}\n\
         {\"wait\": {\"reason\": \"<what you are waiting for>\"}}\n\
@@ -231,41 +237,15 @@ fn call_model(config: &LlmConfig, task: &str, events: &str, step: u64) -> Result
         Prefer \"complete\" with the best answer you can produce in one \
         shot. Use \"request_approval\" only for genuinely risky/irreversible \
         intent. Use \"wait\" only if the task explicitly says to pause.";
-    let user = if events.is_empty() {
-        format!("step: {step}\ntask: {task}")
-    } else {
-        format!("step: {step}\ntask: {task}\nnew_events: {events}")
-    };
-    let body = json!({
-        "model": config.model,
+    json!({
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": format!("task: {task}")},
         ],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
-    });
-    let url = format!("{}/chat/completions", config.base_url);
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(config.timeout))
-        .build()
-        .into();
-    let mut req = agent
-        .post(&url)
-        .header("Authorization", &format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json");
-    if let Some(site) = &config.site {
-        req = req.header("HTTP-Referer", site);
-    }
-    if let Some(name) = &config.app_name {
-        req = req.header("X-Title", name);
-    }
-    let mut response = req.send_json(&body).map_err(|e| e.to_string())?;
-    let payload: Value = response.body_mut().read_json().map_err(|e| e.to_string())?;
-    let Some(choice) = payload["choices"][0]["message"]["content"].as_str() else {
-        return Err(format!("unexpected response shape: {payload}"));
-    };
-    Ok(choice.to_owned())
+    })
 }
 
 fn parse_model_decision(content: &str, run_id: &str) -> loop_decision::Decision {
@@ -339,6 +319,39 @@ fn parse_model_decision(content: &str, run_id: &str) -> loop_decision::Decision 
     loop_decision::Decision::Fail(Fail {
         reason_code: "unrecognized_model_decision".to_owned(),
     })
+}
+
+/// Decodes a `data:<mime>;base64,<body>` URI into text.
+fn decode_data_uri(uri: &str) -> Option<String> {
+    let (_, body) = uri.split_once(";base64,")?;
+    let bytes = base64_decode(body)?;
+    String::from_utf8(bytes).ok()
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let table = |c: u8| T.iter().position(|&t| t == c).map(|p| p as u8);
+    let bytes: Vec<u8> = input.bytes().filter(|b| *b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            return None;
+        }
+        let vals: Option<Vec<u8>> = chunk.iter().map(|&b| table(b)).collect();
+        let v = vals?;
+        let n = (u32::from(v[0]) << 18)
+            | (u32::from(*v.get(1)?) << 12)
+            | v.get(2).map_or(0, |c| u32::from(*c) << 6)
+            | v.get(3).map_or(0, |c| u32::from(*c));
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 fn data_uri(text: &str) -> String {

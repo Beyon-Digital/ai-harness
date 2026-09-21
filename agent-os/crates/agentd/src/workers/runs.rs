@@ -641,14 +641,34 @@ impl RunWorker {
             correlation_id: None,
         };
         // The opaque run-state snapshot carries the task payload so real
-        // loop adapters (LLM) can see what the run is doing.
-        let state = {
+        // loop adapters (LLM) can see what the run is doing; the
+        // new-events batch carries settled effect outcomes as JSON so
+        // invoke_effect results flow back to the loop on the next turn.
+        let (state, events) = {
             let mut txn = self.read_txn().await?;
-            txn.tasks()
+            let state = txn
+                .tasks()
                 .get(row.task_id)
                 .await?
                 .map(|task| task.payload)
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let settled: Vec<serde_json::Value> = txn
+                .effects()
+                .list_by_run(row.run_id)
+                .await?
+                .iter()
+                .filter(|e| effects::is_terminal(e.state))
+                .map(|e| {
+                    serde_json::json!({
+                        "effect_id": e.effect_id.to_string(),
+                        "operation": e.operation,
+                        "state": format!("{:?}", e.state).to_ascii_lowercase(),
+                        "result_ref": e.result_ref,
+                        "error_code": e.error_code,
+                    })
+                })
+                .collect();
+            (state, serde_json::to_vec(&settled).unwrap_or_default())
         };
         let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
         let outcome = loops::drive_turn(
@@ -660,7 +680,7 @@ impl RunWorker {
             &mut handle.phase,
             row.run_id,
             state,
-            Vec::new(),
+            events,
             LOOP_CALL_TIMEOUT,
             self.deps.clock.now_unix_ms(),
         )
@@ -1119,6 +1139,23 @@ impl RunWorker {
         }
         if let Ok(level) = std::env::var("RUST_LOG") {
             env.push(("RUST_LOG".to_owned(), level));
+        }
+        // Effect adapters that call out to providers (e.g. OpenRouter)
+        // read credentials/config from these daemon env vars; propagate
+        // only this allowlist.
+        for key in [
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_SITE",
+            "OPENROUTER_APP_NAME",
+            "OPENROUTER_TIMEOUT_MS",
+        ] {
+            if let Ok(value) = std::env::var(key)
+                && !value.is_empty()
+            {
+                env.push((key.to_owned(), value));
+            }
         }
         let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());
         let mut child = spawn::spawn(&SpawnSpec {

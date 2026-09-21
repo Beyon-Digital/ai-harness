@@ -99,6 +99,7 @@ dependencies = [
  "secrets",
  "serde_json",
  "sha2",
+ "sqlx",
  "tempfile",
  "testkit",
  "tokio",
@@ -1417,6 +1418,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "local-memory"
+version = "0.1.0"
+dependencies = [
+ "adapter-protocol",
+ "domain",
+ "errors",
+ "prost",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1580,7 +1593,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "openrouter-loop"
+name = "openrouter-effect"
 version = "0.1.0"
 dependencies = [
  "adapter-protocol",
@@ -1590,6 +1603,18 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "openrouter-loop"
+version = "0.1.0"
+dependencies = [
+ "adapter-protocol",
+ "domain",
+ "errors",
+ "prost",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

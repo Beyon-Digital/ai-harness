@@ -62,6 +62,16 @@ commands from `agent-os/`.
   body (e.g. add a label field) when re-testing.
 - Clicking a run row selects it and re-subscribes the SSE log to `run/<id>`; the detail
   panel auto-refreshes with the 3s index poll once selected.
+- The same 3s poll rebuilds the run-detail innerHTML, so any expanded `<details>`
+  (e.g. a decisions `payload`) collapses within ~3s while a run is selected — expand and
+  screenshot immediately, or clear the interval to inspect payloads.
+- This box's display is 1600x1200 but the computer tool's coordinate space is 1024x768;
+  clicks on small top-right targets (nav tabs) can land a few px off. Verify with
+  `getBoundingClientRect`/`elementFromPoint` in the console; as a last resort
+  `button.click()` works — the tab/summary handlers themselves are fine.
+- Decisions feature: `GET /api/runs/<id>/decisions` feeds a `decisions` block in run
+  detail; `invoke_effect` rows show the operation + expandable payload JSON, other kinds
+  render `key=value` pairs.
 - Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to
   badge-ok, anything else warns.
 - Read the kernel sqlite read-only with python (`sqlite3` CLI may be absent):

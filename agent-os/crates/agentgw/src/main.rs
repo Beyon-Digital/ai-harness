@@ -134,6 +134,7 @@ async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> s
         .route("/api/specs", post(api_put_spec))
         .route("/api/runs", post(api_create_run))
         .route("/api/runs/{run_id}", get(api_get_run))
+        .route("/api/runs/{run_id}/decisions", get(api_run_decisions))
         .route("/api/runs/{run_id}/cancel", post(api_cancel_run))
         .route("/api/tasks/{task_id}/graph", get(api_graph))
         .route("/api/effects/{effect_id}", get(api_get_effect))
@@ -642,6 +643,74 @@ async fn api_get_run(
         }
         Err(e) => gw_err(e),
     }
+}
+
+/// `GET /api/runs/{id}/decisions` — decodes the run stream's
+/// `LoopDecisionAccepted` payloads into readable JSON so the GUI can show
+/// what the loop decided each step (including `invoke_effect` requests).
+async fn api_run_decisions(
+    State(state): State<Arc<AppState>>,
+    AxPath(run_id): AxPath<String>,
+) -> Response {
+    let mut decisions = Vec::new();
+    let mut from = 0u64;
+    loop {
+        let request = contract::ReadEventStreamRequest {
+            stream_key: format!("run/{run_id}"),
+            from_sequence: from,
+            limit: 500,
+        };
+        let page = match state.daemon.events.clone().read_stream(request).await {
+            Ok(r) => r.into_inner(),
+            Err(e) => return gw_err(e),
+        };
+        let last = page.events.last().map(|e| e.sequence);
+        for e in &page.events {
+            if e.event_type != "LoopDecisionAccepted" {
+                continue;
+            }
+            let Ok(decision) = contract::LoopDecision::decode(e.payload.as_slice()) else {
+                continue;
+            };
+            let (kind, detail) = match decision.decision {
+                Some(contract::loop_decision::Decision::Complete(c)) => {
+                    ("complete", json!({"output_ref": c.output_ref}))
+                }
+                Some(contract::loop_decision::Decision::Fail(f)) => {
+                    ("fail", json!({"reason_code": f.reason_code}))
+                }
+                Some(contract::loop_decision::Decision::Wait(w)) => {
+                    ("wait", json!({"reason": w.reason}))
+                }
+                Some(contract::loop_decision::Decision::SpawnAgent(_)) => {
+                    ("spawn_agent", json!({}))
+                }
+                Some(contract::loop_decision::Decision::InvokeEffect(i)) => (
+                    "invoke_effect",
+                    json!({
+                        "operation": i.operation,
+                        "payload": String::from_utf8_lossy(&i.payload)
+                            .chars().take(2_000).collect::<String>(),
+                    }),
+                ),
+                Some(contract::loop_decision::Decision::RequestApproval(_)) => {
+                    ("request_approval", json!({}))
+                }
+                None => ("none", json!({})),
+            };
+            decisions.push(json!({
+                "sequence": e.sequence,
+                "step_sequence": decision.step_sequence,
+                "kind": kind,
+                "detail": detail,
+            }));
+        }
+        match last {
+            Some(seq) if page.events.len() == 500 => from = seq,
+            _ => break,
+        }
+    }
+    Json(json!({"decisions": decisions})).into_response()
 }
 
 async fn api_graph(

@@ -35,6 +35,8 @@ members = [
     "crates/workspace",
     "fixtures/agent-loop",
     "fixtures/effect-adapter",
+    "fixtures/local-memory",
+    "fixtures/openrouter-effect",
     "fixtures/openrouter-loop",
 ]
 

@@ -1,5 +1,5 @@
 [package]
-name = "openrouter-loop"
+name = "openrouter-effect"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,4 @@ errors.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "3", features = ["json", "rustls", "platform-verifier"] }

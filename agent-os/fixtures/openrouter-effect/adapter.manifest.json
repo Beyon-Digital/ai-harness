@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "id": "01905c5e-0000-7000-8000-11a7c3d90002",
+  "version": "0.1.0",
+  "kind": "adapter",
+  "runtime": {
+    "type": "process",
+    "entrypoint": "openrouter-effect",
+    "language": "rust"
+  },
+  "implements": [
+    "effect.execute@1"
+  ],
+  "requested_capabilities": {
+    "effect": [
+      "status_lookup",
+      "provider_idempotency"
+    ]
+  }
+}
