@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "prost",
+ "testkit",
 ]
 
 [[package]]
@@ -17,7 +19,16 @@ dependencies = [
  "adapter-protocol",
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
  "process-supervisor",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -553,6 +564,41 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "fixture-agent-loop"
+version = "0.1.0"
+dependencies = [
+ "adapter-protocol",
+ "adapter-registry",
+ "domain",
+ "errors",
+ "kernel-store",
+ "process-supervisor",
+ "prost",
+ "serde_json",
+ "tempfile",
+ "testkit",
+ "tokio",
+]
+
+[[package]]
+name = "fixture-effect-adapter"
+version = "0.1.0"
+dependencies = [
+ "adapter-protocol",
+ "adapter-registry",
+ "domain",
+ "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "process-supervisor",
+ "prost",
+ "serde_json",
+ "tempfile",
+ "testkit",
+ "tokio",
+]
 
 [[package]]
 name = "flume"
@@ -2361,11 +2407,15 @@ dependencies = [
 name = "testkit"
 version = "0.1.0"
 dependencies = [
+ "adapter-protocol",
  "async-trait",
  "domain",
  "errors",
  "kernel-store",
+ "process-supervisor",
  "proptest",
+ "prost",
+ "serde",
  "tempfile",
  "tokio",
  "uuid",
@@ -2942,7 +2992,12 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
  "sandbox",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]

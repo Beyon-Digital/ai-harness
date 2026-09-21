@@ -8,22 +8,22 @@
 //! discoverable socket, so an unrelated local process cannot connect.
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child as OsChild, ChildStderr, ChildStdout, Command, Stdio};
 
-use domain::generated::contract::{AdapterBootstrap, AdapterFrame, AdapterHello, AdapterShutdown};
+use adapter_protocol::ExpectedIdentity;
+use adapter_protocol::framing::{read_frame, write_frame};
+use adapter_protocol::handshake::{SessionPhase, accept_inbound};
+use domain::generated::contract::{
+    AdapterFrame, AdapterHello, AdapterShutdown, adapter_frame::Body,
+};
 use domain::ids::{AdapterId, AdapterInstanceId, DaemonInstanceId};
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
-use prost::Message;
 use rustix::process::{Pid, Signal, kill_process_group};
-
-/// Maximum adapter frame: `adapters.max_frame_bytes` (limits.yaml).
-const MAX_FRAME_BYTES: usize = 4_194_304;
 
 /// Everything needed to launch one supervised adapter process.
 #[derive(Debug)]
@@ -67,6 +67,10 @@ pub struct Child {
     pub daemon_epoch: u64,
     process: OsChild,
     ipc: UnixStream,
+    /// Registered adapter id the handshake pins.
+    adapter_id: AdapterId,
+    /// Registered adapter version the handshake pins.
+    adapter_version: String,
     /// Owning daemon instance.
     daemon_instance_id: DaemonInstanceId,
     /// Protocol version offered in bootstrap.
@@ -141,6 +145,8 @@ pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
         instance: spec.adapter_instance_id,
         bundle_digest: spec.expected_bundle_digest.clone(),
         daemon_epoch: spec.daemon_fencing_epoch,
+        adapter_id: spec.adapter_id,
+        adapter_version: spec.adapter_version.clone(),
         daemon_instance_id: spec.daemon_instance_id,
         protocol_version: spec.protocol_version,
         process,
@@ -160,45 +166,32 @@ pub fn handshake(
     bootstrap_nonce: &str,
     timeout_ms: u64,
 ) -> errors::Result<AdapterHello> {
-    let bootstrap = AdapterFrame {
-        body: Some(domain::generated::contract::adapter_frame::Body::Bootstrap(
-            AdapterBootstrap {
-                daemon_instance_id: child.daemon_instance_id.to_string(),
-                daemon_fencing_epoch: child.daemon_epoch,
-                adapter_instance_id: child.instance.to_string(),
-                expected_bundle_digest: child.bundle_digest.clone(),
-                bootstrap_nonce: bootstrap_nonce.to_owned(),
-                protocol_version: child.protocol_version,
-            },
-        )),
+    let expected = ExpectedIdentity {
+        daemon_instance_id: child.daemon_instance_id,
+        daemon_fencing_epoch: child.daemon_epoch,
+        adapter_instance_id: child.instance.to_string(),
+        adapter_id: child.adapter_id.to_string(),
+        adapter_version: child.adapter_version.clone(),
+        expected_bundle_digest: child.bundle_digest.clone(),
+        protocol_version: child.protocol_version,
     };
     child
         .ipc
         .set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)))
         .map_err(|e| io("set_read_timeout", e))?;
-    write_frame(&mut child.ipc, &bootstrap)?;
-    let reply = read_frame(&mut child.ipc)?;
-    let Some(domain::generated::contract::adapter_frame::Body::Hello(hello)) = reply.body else {
+    write_frame(&mut child.ipc, &expected.bootstrap_frame(bootstrap_nonce))?;
+    let Some(reply) = read_frame(&mut child.ipc)? else {
         return Err(KernelError::new(
             ErrorCode::FailedPrecondition,
             RetryClass::Never,
-            "adapter replied to bootstrap with a non-hello frame",
+            "adapter closed the channel instead of replying to bootstrap",
         ));
     };
-    if hello.adapter_instance_id != child.instance.to_string() {
-        return Err(KernelError::new(
-            ErrorCode::FailedPrecondition,
-            RetryClass::Never,
-            "adapter hello carries a different instance id",
-        ));
-    }
-    if hello.bundle_digest != child.bundle_digest {
-        return Err(KernelError::new(
-            ErrorCode::FailedPrecondition,
-            RetryClass::Never,
-            "adapter hello digest differs from the registered bundle",
-        ));
-    }
+    accept_inbound(SessionPhase::AwaitingHello, &reply)?;
+    let Some(Body::Hello(hello)) = reply.body else {
+        unreachable!("AwaitingHello only admits Hello");
+    };
+    expected.verify_hello(&hello, bootstrap_nonce)?;
     Ok(hello)
 }
 
@@ -210,11 +203,9 @@ pub async fn terminate(mut child: Child, grace: std::time::Duration) -> ExitReas
     let _ = write_frame(
         &mut child.ipc,
         &AdapterFrame {
-            body: Some(domain::generated::contract::adapter_frame::Body::Shutdown(
-                AdapterShutdown {
-                    reason: "daemon drain".to_owned(),
-                },
-            )),
+            body: Some(Body::Shutdown(AdapterShutdown {
+                reason: "daemon drain".to_owned(),
+            })),
         },
     );
     let deadline = std::time::Instant::now() + grace;
@@ -283,46 +274,6 @@ fn process_start_identity(pid: u32) -> String {
         return format!("{pid}:{ticks}");
     }
     format!("{pid}:{}", std::process::id())
-}
-
-/// u32-BE-length-prefixed `AdapterFrame` on the socketpair.
-fn write_frame(stream: &mut UnixStream, frame: &AdapterFrame) -> errors::Result<()> {
-    let body = frame.encode_to_vec();
-    let len: u32 = body
-        .len()
-        .try_into()
-        .map_err(|_| io("frame length", std::io::Error::other("frame too large")))?;
-    stream
-        .write_all(&len.to_be_bytes())
-        .and_then(|()| stream.write_all(&body))
-        .and_then(|()| stream.flush())
-        .map_err(|e| io("frame write", e))
-}
-
-fn read_frame(stream: &mut UnixStream) -> errors::Result<AdapterFrame> {
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| io("frame header", e))?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(KernelError::new(
-            ErrorCode::ResourceExhausted,
-            RetryClass::Never,
-            "adapter frame exceeds max_frame_bytes",
-        ));
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .map_err(|e| io("frame body", e))?;
-    AdapterFrame::decode(body.as_slice()).map_err(|_| {
-        KernelError::new(
-            ErrorCode::InvalidArgument,
-            RetryClass::Never,
-            "adapter frame is not a valid AdapterFrame message",
-        )
-    })
 }
 
 fn io(op: &'static str, e: std::io::Error) -> KernelError {

@@ -32,6 +32,8 @@ members = [
     "crates/secrets",
     "crates/testkit",
     "crates/workspace",
+    "fixtures/agent-loop",
+    "fixtures/effect-adapter",
 ]
 
 [workspace.package]

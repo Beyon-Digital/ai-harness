@@ -132,12 +132,14 @@ async fn handshake_verifies_identity_and_digest() {
     // A fixture that ignores the bootstrap and writes a canned Hello frame.
     let ids = DeterministicIds::new(SEED);
     let instance = AdapterInstanceId::new(&ids);
+    let mut s = spec("/bin/sh", "sleep 2");
+    s.adapter_instance_id = instance;
     let hello = AdapterFrame {
         body: Some(domain::generated::contract::adapter_frame::Body::Hello(
             AdapterHello {
                 adapter_instance_id: instance.to_string(),
-                adapter_id: "a".to_owned(),
-                adapter_version: "1.0.0".to_owned(),
+                adapter_id: s.adapter_id.to_string(),
+                adapter_version: s.adapter_version.clone(),
                 bundle_digest: DIGEST.to_owned(),
                 protocol_version: 1,
                 implemented_ports: vec![],
@@ -151,14 +153,13 @@ async fn handshake_verifies_identity_and_digest() {
     let mut blob = (hello.len() as u32).to_be_bytes().to_vec();
     blob.extend_from_slice(&hello);
     std::fs::write(&frame_path, &blob).expect("frame file");
-    let mut s = spec(
-        "/bin/sh",
-        &format!(
+    s.argv = vec![
+        "-c".to_owned(),
+        format!(
             "dd if={} bs=4096 >&0 2>/dev/null; sleep 2",
             frame_path.display()
         ),
-    );
-    s.adapter_instance_id = instance;
+    ];
     let mut child = spawn(&s).expect("spawn");
     let reply = handshake(&mut child, "nonce-1", 5_000).expect("handshake");
     assert_eq!(reply.adapter_instance_id, instance.to_string());
