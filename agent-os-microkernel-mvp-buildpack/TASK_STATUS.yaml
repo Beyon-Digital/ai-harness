@@ -358,17 +358,17 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-API-001.md
     notes: 'UDS 0600 under daemon lock; peer-cred principal mapping; handlers see coordinator only.'
   API-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '394c321'
+    tests: ['cargo test -p control-api --test queries']
+    evidence: [.spec/agentd-microkernel-mvp/reports/task-API-002.md]
+    notes: 'Queries via read txns only; mutations only via coordinator dispatch' 
   API-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'd75c7d8'
+    tests: ['cargo test -p control-api --test events_api']
+    evidence: [.spec/agentd-microkernel-mvp/reports/task-API-003.md]
+    notes: 'Subscribe attaches live before replay; lag yields journal-servable cursor' 
   API-004:
     status: pending
     commit: null
