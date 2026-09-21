@@ -22,6 +22,23 @@ profiles:
     agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@1
     effect_execute: 01905c5e-0000-7000-8000-11a7c3d90002@1
 
+  # LLM agent + custom wasm plugin: openrouter-loop drives the agent;
+  # `effect.execute` resolves to the WASI adapter (wasm.echo) instead of
+  # a model call — proves a custom agent can run a custom wasm plugin.
+  openrouter-wasm:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@1
+    effect_execute: 01905c5e-0000-7000-8000-00000000e001@1
+
+  local-wasm:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: fixture-loop
+    effect_execute: 01905c5e-0000-7000-8000-00000000e001@1
+
 policies:
   sandbox:
     minimum_untrusted_tier: T2_UNTRUSTED

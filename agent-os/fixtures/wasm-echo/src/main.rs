@@ -125,11 +125,24 @@ fn handle(req: &domain::generated::contract::PortCallRequest) -> (Vec<u8>, Strin
             return (resp.clone(), String::new());
         }
     }
-    let text = String::from_utf8_lossy(&exec.payload).to_uppercase();
+    let text = String::from_utf8_lossy(&exec.payload);
+    let result_ref = if is_chat_payload(&text) {
+        // `model.chat` effect (the port doesn't carry the operation
+        // name; a chat request payload is `{..."messages":[...]}`).
+        // Answer with a `complete` decision so an agent loop whose
+        // model effect resolves to this plugin can finish.
+        let output = "{\"complete\":{\"output\":\"hello from the wasm plugin\"}}";
+        format!("data:text/plain;base64,{}", b64(output.as_bytes()))
+    } else {
+        format!(
+            "data:text/plain;base64,{}",
+            b64(text.to_uppercase().as_bytes())
+        )
+    };
     let resp = EffectExecutionResponse {
         effect_id: exec.effect_id.clone(),
         status: "succeeded".to_owned(),
-        result_ref: format!("data:text/plain;base64,{}", b64(text.as_bytes())),
+        result_ref,
         provider_operation_ref: exec.operation_id.clone(),
         error_code: String::new(),
     }
@@ -141,6 +154,11 @@ fn handle(req: &domain::generated::contract::PortCallRequest) -> (Vec<u8>, Strin
             .insert(exec.operation_id.clone(), resp.clone());
     }
     (resp, String::new())
+}
+
+fn is_chat_payload(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with('{') && t.contains("\"messages\"")
 }
 
 fn b64(data: &[u8]) -> String {
