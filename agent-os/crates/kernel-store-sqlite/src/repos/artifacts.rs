@@ -1,7 +1,7 @@
 //! Artifact repository: immutable inserts with id- and URI-based reads.
 
 use async_trait::async_trait;
-use domain::ids::ArtifactId;
+use domain::ids::{ArtifactId, RunId};
 use domain::security::{RetentionClass, SensitivityClass};
 use kernel_store::models::{ArtifactRow, NewArtifact};
 use kernel_store::repositories::{ArtifactRead, ArtifactRepo};
@@ -80,6 +80,17 @@ impl ArtifactRead for SqliteArtifactRepo {
             .await
             .map_err(mapping::from_sqlx)?;
         row.as_ref().map(decode_artifact).transpose()
+    }
+
+    async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<ArtifactRow>> {
+        let mut guard = self.conn.lock().await;
+        let query = format!("{SELECT_ARTIFACT} WHERE origin_run_id = ?1 ORDER BY created_at_ms");
+        let rows = sqlx::query(&query)
+            .bind(run.to_string())
+            .fetch_all(guard.connection()?)
+            .await
+            .map_err(mapping::from_sqlx)?;
+        rows.iter().map(decode_artifact).collect()
     }
 }
 

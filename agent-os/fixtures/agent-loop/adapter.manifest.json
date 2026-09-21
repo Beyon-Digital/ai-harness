@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "id": "01905c5e-0000-7000-8000-a9e97100f1a1",
+  "version": "0.1.0",
+  "kind": "adapter",
+  "runtime": {
+    "type": "process",
+    "entrypoint": "fixture-agent-loop",
+    "language": "rust"
+  },
+  "implements": [
+    "agent_loop@1"
+  ],
+  "requested_capabilities": {}
+}

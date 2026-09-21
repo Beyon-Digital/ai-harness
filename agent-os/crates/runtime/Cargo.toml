@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+adapter-registry.workspace = true
+config-engine.workspace = true
 domain.workspace = true
 effects.workspace = true
 errors.workspace = true
@@ -13,10 +15,13 @@ identity.workspace = true
 kernel-store.workspace = true
 permissions.workspace = true
 run-graph.workspace = true
+scheduler.workspace = true
 command-coordinator.workspace = true
 events.workspace = true
 async-trait.workspace = true
 prost.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 kernel-store-sqlite.workspace = true

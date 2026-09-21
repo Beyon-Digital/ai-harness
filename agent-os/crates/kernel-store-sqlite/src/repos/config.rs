@@ -142,6 +142,32 @@ impl ConfigRepo for SqliteConfigRepo {
         Ok(())
     }
 
+    async fn set_generation_states(
+        &mut self,
+        id: ConfigGenerationId,
+        validation_state: Option<&str>,
+        test_state: Option<&str>,
+    ) -> errors::Result<()> {
+        let mut guard = self.conn.lock().await;
+        let result = sqlx::query(
+            "UPDATE config_generations SET                validation_state = COALESCE(?1, validation_state),                test_state = COALESCE(?2, test_state)              WHERE generation_id = ?3",
+        )
+        .bind(validation_state)
+        .bind(test_state)
+        .bind(id.to_string())
+        .execute(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(KernelError::new(
+                ErrorCode::NotFound,
+                RetryClass::Never,
+                "config generation not found",
+            ));
+        }
+        Ok(())
+    }
+
     async fn cas_active(
         &mut self,
         expected_revision: u64,

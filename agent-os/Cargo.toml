@@ -4,6 +4,7 @@ members = [
     "crates/adapter-protocol",
     "crates/adapter-registry",
     "crates/agentctl",
+    "crates/agentgw",
     "crates/agentd",
     "crates/approvals",
     "crates/artifacts",
@@ -31,7 +32,14 @@ members = [
     "crates/scheduler",
     "crates/secrets",
     "crates/testkit",
+    "crates/wasm-host",
     "crates/workspace",
+    "fixtures/agent-loop",
+    "fixtures/effect-adapter",
+    "fixtures/local-memory",
+    "fixtures/openrouter-effect",
+    "fixtures/openrouter-loop",
+    "fixtures/wasm-echo",
 ]
 
 [workspace.package]
@@ -44,6 +52,7 @@ publish = false
 anyhow = "1"
 async-trait = "0.1"
 prost = "0.14"
+rustix = { version = "1", default-features = false, features = ["process", "fs", "std"] }
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 proptest = "1"
@@ -51,12 +60,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 security-framework = "2"
+hyper-util = "0.1"
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tonic = "0.14"
+tonic = { version = "0.14", features = ["server", "transport", "codegen"] }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v7"] }
@@ -65,6 +78,7 @@ zeroize = "1"
 adapter-protocol = { path = "crates/adapter-protocol" }
 adapter-registry = { path = "crates/adapter-registry" }
 agentctl = { path = "crates/agentctl" }
+agentgw = { path = "crates/agentgw" }
 approvals = { path = "crates/approvals" }
 artifacts = { path = "crates/artifacts" }
 command-coordinator = { path = "crates/command-coordinator" }

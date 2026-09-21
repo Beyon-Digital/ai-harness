@@ -117,6 +117,11 @@ impl Harness {
                 input_event_cursor: cursor,
                 cancellation_epoch: 0,
                 resolved_environment_id: None,
+                agent_spec_id: None,
+                agent_spec_version: None,
+                agent_spec_digest: None,
+                requested_profile: String::new(),
+                workspace_uri: None,
                 created_at_ms: SEED_MS,
             })
             .await
@@ -702,6 +707,11 @@ async fn mock_store_satisfies_the_effect_repo_contract() {
             ),
             cancellation_epoch: 0,
             resolved_environment_id: None,
+            agent_spec_id: None,
+            agent_spec_version: None,
+            agent_spec_digest: None,
+            requested_profile: String::new(),
+            workspace_uri: None,
             created_at_ms: SEED_MS,
         })
         .await

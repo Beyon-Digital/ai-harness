@@ -37,6 +37,11 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build binaries
+        # e2e tests spawn adapter/daemon binaries out of target/debug;
+        # `cargo test` only emits them for packages that own integration
+        # tests (CARGO_BIN_EXE), so build the full workspace explicitly.
+        run: cargo build --workspace
       - name: Test
         run: cargo test --workspace
       - name: Check

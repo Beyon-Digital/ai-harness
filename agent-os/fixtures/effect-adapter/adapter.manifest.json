@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "id": "01905c5e-0000-7000-8000-e11ec7ad01ef",
+  "version": "0.1.0",
+  "kind": "adapter",
+  "runtime": {
+    "type": "process",
+    "entrypoint": "fixture-effect-adapter",
+    "language": "rust"
+  },
+  "implements": [
+    "effect.execute@1"
+  ],
+  "requested_capabilities": {
+    "effect": [
+      "status_lookup",
+      "provider_idempotency"
+    ]
+  }
+}

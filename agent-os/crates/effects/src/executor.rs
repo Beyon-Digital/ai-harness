@@ -177,6 +177,33 @@ pub async fn commit(
     .await
 }
 
+/// `Acknowledged -> Committed` without executor verification — the recovery
+/// matrix commits a durable acknowledgment left behind by a dead epoch; the
+/// acknowledgment itself is the authority, so no fencing token is required.
+pub async fn commit_durable(
+    txn: &mut dyn KernelTxn,
+    env: &EffectEnv<'_>,
+    effect_id: EffectId,
+    result_ref: Option<String>,
+) -> errors::Result<EffectRow> {
+    transition(
+        txn,
+        env,
+        effect_id,
+        None,
+        Transition {
+            to: EffectState::Committed,
+            event_type: "EffectCommitted",
+            patch: EffectPatch {
+                state: Some(EffectState::Committed),
+                result_ref,
+                ..EffectPatch::default()
+            },
+        },
+    )
+    .await
+}
+
 /// `Dispatched|Acknowledged -> Failed`: the executor reports a terminal
 /// adapter-side failure.
 pub async fn fail(

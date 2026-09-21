@@ -3,15 +3,20 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_spec;
+pub mod bind;
 pub mod cancel;
 pub mod claim;
 pub mod create_run;
+pub mod decision;
 pub mod effect_recovery;
+pub mod loop_turn;
 pub mod recovery;
+pub mod resolved_environment;
 pub mod run;
 pub mod session;
 pub mod state;
 pub mod task;
+pub mod timers;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -32,10 +37,16 @@ pub const CMD_CREATE_SESSION: &str = "agentos.spec.v1.CreateSession";
 pub const CMD_PUT_AGENT_SPEC_REVISION: &str = "agentos.spec.v1.PutAgentSpecRevision";
 /// Fully-qualified command type of `CreateTaskRun`.
 pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
+/// Fully-qualified command type of `BindRun`.
+pub const CMD_BIND_RUN: &str = bind::CMD_BIND_RUN;
 /// Fully-qualified command type of `ClaimReadyRun`.
 pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 /// Fully-qualified command type of `CancelRun`.
 pub const CMD_CANCEL_RUN: &str = "agentos.spec.v1.CancelRun";
+/// Fully-qualified command type of `ScheduleTimer`.
+pub const CMD_SCHEDULE_TIMER: &str = scheduler::CMD_SCHEDULE_TIMER;
+/// Fully-qualified command type of `CancelTimer`.
+pub const CMD_CANCEL_TIMER: &str = scheduler::CMD_CANCEL_TIMER;
 pub use effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT;
 
 /// Dependencies shared by the runtime command handlers.
@@ -69,12 +80,24 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
         Arc::new(create_run::CreateTaskRunHandler::new(deps.clone())),
     )?;
     registry.register(
+        bind::CMD_BIND_RUN,
+        Arc::new(bind::BindRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
         CMD_CLAIM_READY_RUN,
         Arc::new(claim::ClaimReadyRunHandler::new(deps.clone())),
     )?;
     registry.register(
         CMD_CANCEL_RUN,
         Arc::new(cancel::CancelRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        scheduler::CMD_SCHEDULE_TIMER,
+        Arc::new(timers::ScheduleTimerHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        scheduler::CMD_CANCEL_TIMER,
+        Arc::new(timers::CancelTimerHandler::new(deps.clone())),
     )?;
     registry.register(
         effect_recovery::CMD_RESOLVE_UNKNOWN_EFFECT,
@@ -89,7 +112,7 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
 /// cannot exist as a built envelope before staging; sensitivity and retention
 /// come from the embedded catalog policy, which enforces the classification
 /// floor for the catalogue entry.
-pub(crate) async fn stage_catalogued(
+pub async fn stage_catalogued(
     txn: &mut dyn KernelTxn,
     event_id: EventId,
     event_type: &str,
@@ -163,7 +186,7 @@ where
     required_id(field, text).map(Some)
 }
 
-fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
+pub(crate) fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
     KernelError::new(
         ErrorCode::InvalidArgument,
         RetryClass::Never,

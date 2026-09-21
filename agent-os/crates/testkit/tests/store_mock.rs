@@ -125,6 +125,11 @@ fn new_run(f: &Fixture) -> NewRun {
         input_event_cursor: cursor(f.run_id),
         cancellation_epoch: 0,
         resolved_environment_id: None,
+        agent_spec_id: None,
+        agent_spec_version: None,
+        agent_spec_digest: None,
+        requested_profile: String::new(),
+        workspace_uri: None,
         created_at_ms: SEED_MS,
     }
 }
