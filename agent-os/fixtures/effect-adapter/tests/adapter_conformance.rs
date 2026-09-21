@@ -147,7 +147,17 @@ async fn lying_capability_declaration_fails() {
         ),
     )
     .expect("manifest");
-    std::fs::copy("/bin/true", bundle.path().join("silent")).expect("binary");
+    // /bin/true is not a real binary on macOS — a shell stub is portable.
+    std::fs::write(bundle.path().join("silent"), "#!/bin/sh\nexit 0\n").expect("binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(bundle.path().join("silent"))
+            .expect("meta")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(bundle.path().join("silent"), perms).expect("chmod");
+    }
     write_lock(bundle.path()).expect("lock");
 
     let fx = FixtureBinary {
