@@ -449,11 +449,16 @@ tasks:
     notes: 7 barrier-synced races + 8 seeded proptest properties (512 cases);
       single-winner, acyclicity, budget, fencing, contiguity invariants verified
   INT-005:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: fdb22bb
+    tests:
+    - cargo test -p agentd --test security
+    - cargo test -p resource-uri
+    - cargo test -p secrets -p identity -p permissions
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-005.md
+    notes: 10 boundary checks; parser hardened so secret:// tokens reject
+      decoded separators (%2e%2e%2f traversal)
   REL-001:
     status: pending
     commit: null
