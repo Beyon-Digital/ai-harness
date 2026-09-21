@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "file_count": 159,
+  "name": "agent-os-microkernel-mvp-buildpack",
+  "file_count": 160,
   "files": [
     {
       "path": "AGENTS.md",
@@ -49,8 +50,8 @@
     },
     {
       "path": "TASK_STATUS.yaml",
-      "bytes": 13410,
-      "sha256": "00fddb57bc249e7059b91e6dc96c9d04c36c724f5479a8264cef31142a190161"
+      "bytes": 13879,
+      "sha256": "088e263b8734c5f2127e491b5e83548e1db0e0376774274d4c2c2f53c34cb0cc"
     },
     {
       "path": "architecture/README.md",
@@ -468,11 +469,6 @@
       "sha256": "39ce17a0db42f2f489ac5b9257511a6a192727cdfdfd4f1bcaae8cb952292e86"
     },
     {
-      "path": "tasks.csv",
-      "bytes": 5396,
-      "sha256": "d8e3bdd1d48d68ee80d74a550cdfcf5a4a627d0acf982b3b74c16acfe8b37b6e"
-    },
-    {
       "path": "tasks/ADP-001.md",
       "bytes": 1516,
       "sha256": "2049dc0f8da93bd4646ad138aa41f162c5ce7cad950e0bc3ab442ad796855966"
@@ -771,6 +767,11 @@
       "path": "tasks/WRK-003.md",
       "bytes": 1848,
       "sha256": "0cfa4f37e514f23e31384f146106960c159e5485665179c54bc1e99670d5c453"
+    },
+    {
+      "path": "tasks.csv",
+      "bytes": 5396,
+      "sha256": "d8e3bdd1d48d68ee80d74a550cdfcf5a4a627d0acf982b3b74c16acfe8b37b6e"
     },
     {
       "path": "templates/TASK_STATUS.yaml",
