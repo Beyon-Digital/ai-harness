@@ -439,11 +439,15 @@ tasks:
       BLOCKED_UNKNOWN_EFFECT until resolve-effect. Also restakes dead-epoch
       claims on waiting runs (WaitingTool/WaitingChild were unreclaimable).
   INT-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 6386d77
+    tests:
+    - cargo test -p agentd --test concurrency
+    - cargo test -p agentd --test property
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-004.md
+    notes: 7 barrier-synced races + 8 seeded proptest properties (512 cases);
+      single-winner, acyclicity, budget, fencing, contiguity invariants verified
   INT-005:
     status: pending
     commit: null
