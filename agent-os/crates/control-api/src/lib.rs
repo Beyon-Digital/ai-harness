@@ -8,6 +8,7 @@
 
 pub mod server;
 pub mod uds;
+pub mod views;
 
 pub use server::{
     ControlApiService, HealthInfo, LocalActor, PeerCreds, PeerPrincipalMap, UdsConn,

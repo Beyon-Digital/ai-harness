@@ -17,9 +17,13 @@ use std::task::{Context, Poll};
 
 use command_coordinator::CommandCoordinator;
 use command_coordinator::envelope::CommandEnvelope;
-use domain::ids::{DeviceId, IdempotencyKey, PrincipalId};
+use command_coordinator::envelope::RequestDigest;
+use domain::ids::{CommandId, DeviceId, EffectId, IdempotencyKey, PrincipalId, RunId, TaskId};
+use domain::provider::IdProvider;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
+use kernel_store::KernelStore;
+use prost::Message;
 use tokio::net::UnixStream;
 use tonic::transport::server::Connected;
 use tonic::{Code, Request, Response, Status};
@@ -161,22 +165,31 @@ pub struct HealthInfo {
     pub outbox_unpublished_count: u64,
 }
 
-/// The control service: coordinator for writes, no store handle in scope.
+/// The control service: coordinator for writes, read-only queries through
+/// the store's `begin_read` port — handlers never mutate repositories
+/// directly.
 pub struct ControlApiService {
     coordinator: Arc<CommandCoordinator>,
+    store: Arc<dyn KernelStore>,
+    ids: Arc<dyn IdProvider>,
     principals: Arc<dyn PeerPrincipalMap>,
     health: HealthInfo,
 }
 
 impl ControlApiService {
-    /// Binds the service to the coordinator (commands) and peer map (auth).
+    /// Binds the service to the coordinator (commands), the read port
+    /// (queries), and the peer map (auth).
     pub fn new(
         coordinator: Arc<CommandCoordinator>,
+        store: Arc<dyn KernelStore>,
+        ids: Arc<dyn IdProvider>,
         principals: Arc<dyn PeerPrincipalMap>,
         health: HealthInfo,
     ) -> Self {
         Self {
             coordinator,
+            store,
+            ids,
             principals,
             health,
         }
@@ -301,51 +314,208 @@ impl MvpControlApi for ControlApiService {
 
     async fn get_run(
         &self,
-        _request: Request<GetRunRequest>,
+        request: Request<GetRunRequest>,
     ) -> Result<Response<GetRunResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let run_id = parse_id::<RunId>("run_id", &request.get_ref().run_id)?;
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let run = txn
+            .runs()
+            .get(run_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        let environment = match run.resolved_environment_id {
+            Some(env_id) => {
+                let row = txn
+                    .environments()
+                    .get_environment(env_id)
+                    .await
+                    .map_err(unavailable)?;
+                match row {
+                    Some(row) => {
+                        let bindings = txn
+                            .environments()
+                            .get_bindings(env_id)
+                            .await
+                            .map_err(unavailable)?;
+                        Some(crate::views::environment_view(&row, &bindings))
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        Ok(Response::new(GetRunResponse {
+            run: Some(crate::views::run_view(&run)),
+            resolved_environment: environment,
+        }))
     }
 
     async fn get_task(
         &self,
-        _request: Request<GetTaskRequest>,
+        request: Request<GetTaskRequest>,
     ) -> Result<Response<GetTaskResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let task_id = parse_id::<TaskId>("task_id", &request.get_ref().task_id)?;
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let task = txn
+            .tasks()
+            .get(task_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("task not found"))?;
+        Ok(Response::new(GetTaskResponse {
+            task: Some(crate::views::task_view(&task)),
+        }))
     }
 
     async fn get_effect(
         &self,
-        _request: Request<GetEffectRequest>,
+        request: Request<GetEffectRequest>,
     ) -> Result<Response<GetEffectResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let effect_id = parse_id::<EffectId>("effect_id", &request.get_ref().effect_id)?;
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let effect = txn
+            .effects()
+            .get(effect_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("effect not found"))?;
+        Ok(Response::new(GetEffectResponse {
+            effect: Some(crate::views::effect_view(&effect)),
+        }))
     }
 
     async fn get_run_graph(
         &self,
-        _request: Request<GetRunGraphRequest>,
+        request: Request<GetRunGraphRequest>,
     ) -> Result<Response<GetRunGraphResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let task_id = parse_id::<TaskId>("task_id", &request.get_ref().task_id)?;
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let head = txn
+            .graph()
+            .get_head(task_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("task graph not found"))?;
+        let deps = txn
+            .graph()
+            .list_dependencies(task_id)
+            .await
+            .map_err(unavailable)?;
+        let runs = txn
+            .runs()
+            .list_by_task(task_id)
+            .await
+            .map_err(unavailable)?;
+        Ok(Response::new(GetRunGraphResponse {
+            graph: Some(domain::generated::contract::RunGraphView {
+                task_id: task_id.to_string(),
+                graph_revision: head.graph_revision,
+                runs: runs.iter().map(crate::views::run_view).collect(),
+                dependencies: deps.iter().map(crate::views::dependency_view).collect(),
+            }),
+        }))
     }
 
     async fn get_active_config(
         &self,
-        _request: Request<GetActiveConfigRequest>,
+        request: Request<GetActiveConfigRequest>,
     ) -> Result<Response<GetActiveConfigResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let active = txn
+            .config()
+            .get_active()
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("no active config generation"))?;
+        let generation = txn
+            .config()
+            .get_generation(active.generation_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("active generation row missing"))?;
+        Ok(Response::new(GetActiveConfigResponse {
+            generation: Some(crate::views::config_generation_view(&generation)),
+            active_revision: active.revision,
+        }))
     }
 
     async fn list_adapters(
         &self,
-        _request: Request<ListAdaptersRequest>,
+        request: Request<ListAdaptersRequest>,
     ) -> Result<Response<ListAdaptersResponse>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let _actor = self.actor_for(&request, "")?;
+        let port_filter = request.get_ref().port_id.clone();
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let mut rows = txn
+            .adapters()
+            .list_registrations()
+            .await
+            .map_err(unavailable)?;
+        if !port_filter.is_empty() {
+            rows.retain(|row| {
+                serde_json::from_slice::<Vec<serde_json::Value>>(&row.implemented_ports)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|p| {
+                        p.get("port_id").and_then(|v| v.as_str()) == Some(port_filter.as_str())
+                    })
+            });
+        }
+        Ok(Response::new(ListAdaptersResponse {
+            adapters: rows.iter().map(crate::views::adapter_view).collect(),
+        }))
     }
 
     async fn respond_approval(
         &self,
-        _request: Request<ApprovalResponseRequest>,
+        request: Request<ApprovalResponseRequest>,
     ) -> Result<Response<ApprovalResponseResult>, Status> {
-        Err(Status::unimplemented("API-002"))
+        let actor = self.actor_for(&request, "")?;
+        let req = request.into_inner();
+        let payload = domain::generated::contract::RespondApproval {
+            request_id: req.request_id.clone(),
+            request_digest: req.request_digest.clone(),
+            decision: req.decision.clone(),
+            device_id: req.device_id.clone(),
+            responder_principal_id: actor.principal_id.to_string(),
+        };
+        let request_id = parse_id::<domain::ids::ApprovalRequestId>("request_id", &req.request_id)?;
+        let digest_hex = req.request_digest.clone();
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new(self.ids.as_ref()),
+            idempotency_key: IdempotencyKey::new(format!(
+                "approval.respond.{request_id}.{digest_hex}"
+            ))
+            .map_err(|_| Status::invalid_argument("idempotency key invalid"))?,
+            principal_id: actor.principal_id,
+            actor_id: domain::ids::ActorId::new(self.ids.as_ref()),
+            device_id: if req.device_id.is_empty() {
+                None
+            } else {
+                Some(parse_id("device_id", &req.device_id)?)
+            },
+            delegation_chain_id: None,
+            request_digest: RequestDigest::from_str(&digest_hex)
+                .map_err(|_| Status::invalid_argument("request_digest is malformed"))?,
+            correlation_id: None,
+            causation_id: None,
+            deadline_unix_ms: None,
+            command_type: "agentos.spec.v1.RespondApproval".to_owned(),
+            payload: payload.encode_to_vec(),
+        };
+        self.coordinator
+            .execute(envelope)
+            .await
+            .map_err(unavailable)?;
+        Ok(Response::new(ApprovalResponseResult {
+            status: "recorded".to_owned(),
+        }))
     }
 }
 

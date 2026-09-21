@@ -313,10 +313,12 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 name = "control-api"
 version = "0.1.0"
 dependencies = [
+ "approvals",
  "async-trait",
  "command-coordinator",
  "domain",
  "errors",
+ "event-journal-sqlite",
  "events",
  "hyper-util",
  "kernel-store",
@@ -325,6 +327,7 @@ dependencies = [
  "prost-build",
  "protoc-bin-vendored",
  "rustix",
+ "serde_json",
  "sha2",
  "tempfile",
  "testkit",

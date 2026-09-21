@@ -38,6 +38,8 @@ impl CommandHandler for EchoHandler {
 struct Rig {
     _dir: tempfile::TempDir,
     runtime_dir: std::path::PathBuf,
+    store: Arc<SqliteKernelStore>,
+    ids: Arc<dyn domain::provider::IdProvider>,
     coordinator: Arc<CommandCoordinator>,
     principal: PrincipalId,
     actor: ActorId,
@@ -66,7 +68,7 @@ impl Rig {
             .register("agentos.test.Echo", Arc::new(EchoHandler))
             .expect("register");
         let coordinator = Arc::new(CommandCoordinator::new(
-            store,
+            store.clone(),
             Arc::new(registry),
             Arc::new(FixedFence(fence.epoch.0)),
             Arc::new(SystemClock),
@@ -74,6 +76,8 @@ impl Rig {
         ));
         Self {
             runtime_dir: dir.path().join("run"),
+            store,
+            ids: Arc::new(DeterministicIds::new(SEED + 1)),
             _dir: dir,
             coordinator,
             principal: PrincipalId::new(&ids),
@@ -87,6 +91,8 @@ impl Rig {
             Arc::new(UidPrincipalMap::new([(mapped_uid, self.principal)]).expect("map"));
         ControlApiService::new(
             self.coordinator.clone(),
+            self.store.clone(),
+            self.ids.clone(),
             principals,
             HealthInfo {
                 status: "running".to_owned(),

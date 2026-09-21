@@ -12,7 +12,9 @@ use std::sync::Arc;
 use command_coordinator::CommandCoordinator;
 use control_api::{ControlApiService, ControlSocket, HealthInfo, PeerPrincipalMap, serve};
 use domain::ids::DaemonInstanceId;
+use domain::provider::IdProvider;
 use errors::Result;
+use kernel_store::KernelStore;
 
 use crate::lock::DaemonLock;
 
@@ -25,6 +27,8 @@ pub async fn serve_control_api(
     runtime_dir: &Path,
     lock: &DaemonLock,
     coordinator: Arc<CommandCoordinator>,
+    store: Arc<dyn KernelStore>,
+    ids: Arc<dyn IdProvider>,
     principals: Arc<dyn PeerPrincipalMap>,
     daemon_instance: DaemonInstanceId,
     daemon_epoch: u64,
@@ -35,6 +39,8 @@ pub async fn serve_control_api(
         socket,
         ControlApiService::new(
             coordinator,
+            store,
+            ids,
             principals,
             HealthInfo {
                 status: "running".to_owned(),
