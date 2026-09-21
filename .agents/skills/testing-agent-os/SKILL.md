@@ -65,9 +65,10 @@ commands from `agent-os/`.
 - The same 3s poll rebuilds the run-detail innerHTML, so any expanded `<details>`
   (e.g. a decisions `payload`) collapses within ~3s while a run is selected — expand and
   screenshot immediately, or clear the interval to inspect payloads. (Newer builds skip
-  the rebuild when the run fingerprint is unchanged, so payloads now survive the poll;
-  but the `environment` block can wedge at `loading…` after a live state transition —
-  re-click the run row to populate it.)
+  the rebuild when the run fingerprint is unchanged, so payloads now survive the poll.
+  An env-block "loading…" wedge after live transitions was found and fixed — env
+  populates across waiting_tool→completed without re-clicking; if it regresses,
+  re-clicking the run row repopulates it.)
 - This box's display is 1600x1200 but the computer tool's coordinate space is 1024x768;
   clicks on small top-right targets (nav tabs) can land a few px off. Verify with
   `getBoundingClientRect`/`elementFromPoint` in the console; as a last resort
