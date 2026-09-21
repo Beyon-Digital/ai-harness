@@ -124,6 +124,16 @@ impl AdapterRead for SqliteAdapterRepo {
         row.as_ref().map(decode_registration).transpose()
     }
 
+    async fn list_registrations(&mut self) -> errors::Result<Vec<AdapterRegistrationRow>> {
+        let mut guard = self.conn.lock().await;
+        let query = format!("{SELECT_REGISTRATION} ORDER BY adapter_id, version, bundle_digest");
+        let rows = sqlx::query(&query)
+            .fetch_all(guard.connection()?)
+            .await
+            .map_err(mapping::from_sqlx)?;
+        rows.iter().map(decode_registration).collect()
+    }
+
     async fn get_conformance_report(
         &mut self,
         adapter_id: AdapterId,

@@ -1,7 +1,10 @@
 //! Config parsing, generations, profile resolution, and activation.
 #![forbid(unsafe_code)]
 
+pub mod activate;
+pub mod generations;
 pub mod model;
+pub mod profile;
 
 pub mod schema;
 

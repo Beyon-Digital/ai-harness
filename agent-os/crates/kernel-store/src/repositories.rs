@@ -243,6 +243,15 @@ pub trait ConfigRead: Send + Sync {
 #[async_trait]
 pub trait ConfigRepo: ConfigRead {
     async fn insert_generation(&mut self, generation: NewConfigGeneration) -> Result<()>;
+    /// Advances the generation pipeline markers; each column moves
+    /// forward only (`proposed -> validated|rejected`, `untested ->
+    /// passed|failed`). A backwards transition is rejected by the store.
+    async fn set_generation_states(
+        &mut self,
+        id: ConfigGenerationId,
+        validation_state: Option<&str>,
+        test_state: Option<&str>,
+    ) -> Result<()>;
     async fn cas_active(
         &mut self,
         expected_revision: u64,
@@ -287,6 +296,9 @@ pub trait AdapterRead: Send + Sync {
         &mut self,
         adapter_instance_id: AdapterInstanceId,
     ) -> Result<Option<AdapterInstanceRow>>;
+    /// Every registered adapter row — port resolution enumerates
+    /// candidates; the hot path stays per-identity `get_registration`.
+    async fn list_registrations(&mut self) -> Result<Vec<AdapterRegistrationRow>>;
 }
 
 #[async_trait]
@@ -315,6 +327,7 @@ pub trait AdapterRepo: AdapterRead {
 pub trait ArtifactRead: Send + Sync {
     async fn get_by_id(&mut self, id: ArtifactId) -> Result<Option<ArtifactRow>>;
     async fn get_by_uri(&mut self, uri: &str) -> Result<Option<ArtifactRow>>;
+    async fn list_by_run(&mut self, run: RunId) -> Result<Vec<ArtifactRow>>;
 }
 
 #[async_trait]

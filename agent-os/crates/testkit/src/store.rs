@@ -1609,6 +1609,35 @@ impl ConfigRepo for MockConfigRepo {
         )
     }
 
+    async fn set_generation_states(
+        &mut self,
+        id: ConfigGenerationId,
+        validation_state: Option<&str>,
+        test_state: Option<&str>,
+    ) -> errors::Result<()> {
+        let mut state = lock(&self.state)?;
+        let Some(row) = state.config_generations.get_mut(&id) else {
+            return Err(not_found("config generation not found"));
+        };
+        if let Some(value) = validation_state {
+            check_literal(
+                "config_generations.validation_state",
+                value,
+                &["proposed", "validated", "rejected"],
+            )?;
+            row.validation_state = value.to_owned();
+        }
+        if let Some(value) = test_state {
+            check_literal(
+                "config_generations.test_state",
+                value,
+                &["untested", "passed", "failed"],
+            )?;
+            row.test_state = value.to_owned();
+        }
+        Ok(())
+    }
+
     async fn cas_active(
         &mut self,
         expected_revision: u64,
@@ -1734,6 +1763,9 @@ impl WorkspaceRepo for MockWorkspaceRepo {
         if let Some(value) = patch.delegated_from {
             lease.delegated_from = value;
         }
+        if let Some(epoch) = patch.lease_epoch {
+            lease.lease_epoch = epoch;
+        }
         Ok(true)
     }
 }
@@ -1750,6 +1782,18 @@ impl AdapterRead for MockAdapterRepo {
             .registrations
             .get(&(adapter_id, version.to_owned(), bundle_digest.to_owned()))
             .cloned())
+    }
+
+    async fn list_registrations(&mut self) -> errors::Result<Vec<AdapterRegistrationRow>> {
+        let mut rows: Vec<_> = lock(&self.state)?.registrations.values().cloned().collect();
+        rows.sort_by(|a, b| {
+            (&a.adapter_id, &a.version, &a.bundle_digest).cmp(&(
+                &b.adapter_id,
+                &b.version,
+                &b.bundle_digest,
+            ))
+        });
+        Ok(rows)
     }
 
     async fn get_conformance_report(
@@ -1955,6 +1999,17 @@ impl ArtifactRead for MockArtifactRepo {
             .get(uri)
             .and_then(|id| state.artifacts_by_id.get(id))
             .cloned())
+    }
+
+    async fn list_by_run(&mut self, run: RunId) -> errors::Result<Vec<ArtifactRow>> {
+        let mut rows: Vec<_> = lock(&self.state)?
+            .artifacts_by_id
+            .values()
+            .filter(|row| row.origin_run_id == run)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| row.created_at_ms);
+        Ok(rows)
     }
 }
 
