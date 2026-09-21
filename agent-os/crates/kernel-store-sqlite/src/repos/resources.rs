@@ -86,8 +86,9 @@ impl ResourceRead for SqliteResourceRepo {
         parent: ReservationId,
     ) -> errors::Result<Vec<ReservationRow>> {
         let mut guard = self.conn.lock().await;
-        let query =
-            format!("{SELECT_RESERVATION} WHERE parent_reservation_id = ?1 ORDER BY reservation_id");
+        let query = format!(
+            "{SELECT_RESERVATION} WHERE parent_reservation_id = ?1 ORDER BY reservation_id"
+        );
         let rows = sqlx::query(&query)
             .bind(parent.to_string())
             .fetch_all(guard.connection()?)

@@ -1805,6 +1805,22 @@ impl AdapterRepo for MockAdapterRepo {
         )
     }
 
+    async fn set_conformance_state(
+        &mut self,
+        adapter_id: AdapterId,
+        version: &str,
+        bundle_digest: &str,
+        state: domain::security::ConformanceState,
+    ) -> errors::Result<()> {
+        let mut s = lock(&self.state)?;
+        let key = (adapter_id, version.to_owned(), bundle_digest.to_owned());
+        let Some(row) = s.registrations.get_mut(&key) else {
+            return Err(not_found("adapter registration"));
+        };
+        row.conformance_state = state;
+        Ok(())
+    }
+
     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()> {
         let mut state = lock(&self.state)?;
         check_literal(

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod conformance;
 pub mod faults;
 pub mod ids;
 pub mod process;

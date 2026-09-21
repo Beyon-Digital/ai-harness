@@ -224,6 +224,28 @@ impl AdapterRepo for SqliteAdapterRepo {
         Ok(())
     }
 
+    async fn set_conformance_state(
+        &mut self,
+        adapter_id: AdapterId,
+        version: &str,
+        bundle_digest: &str,
+        state: domain::security::ConformanceState,
+    ) -> errors::Result<()> {
+        let mut guard = self.conn.lock().await;
+        sqlx::query(
+            "UPDATE adapter_registrations SET conformance_state = ?4 \
+             WHERE adapter_id = ?1 AND version = ?2 AND bundle_digest = ?3",
+        )
+        .bind(adapter_id.to_string())
+        .bind(version)
+        .bind(bundle_digest)
+        .bind(state.as_str())
+        .execute(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        Ok(())
+    }
+
     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> errors::Result<()> {
         let mut guard = self.conn.lock().await;
         sqlx::query(
