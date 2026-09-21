@@ -1,0 +1,63 @@
+schema_version: 1
+
+kernel:
+  store: sqlite-kernel
+  daemon_identity: local-mac
+
+services:
+  event_journal: sqlite-events
+  message_queue: memory-queue
+  secret_store: macos-keychain
+  transport: local-uds
+
+profiles:
+  local-trusted:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: fixture-loop
+
+policies:
+  sandbox:
+    minimum_untrusted_tier: T2_UNTRUSTED
+  effects:
+    unknown_default: require_human_decision
+
+limits:
+  queue:
+    capacity_messages: 1024
+  adapters:
+    max_frame_bytes: 4194304
+    handshake_timeout_ms: 5000
+    request_deadline_ms: 60000
+    health_ping_ms: 10000
+    health_missed_allowed: 3
+    supervisor_max_restarts: 5
+    supervisor_backoff_initial_ms: 100
+    supervisor_backoff_max_ms: 10000
+  effects:
+    lease_ms: 30000
+    lease_renew_ms: 10000
+  runs:
+    claim_ttl_ms: 30000
+  daemon:
+    fence_lease_ms: 15000
+    fence_renew_ms: 5000
+  approvals:
+    ttl_ms: 900000
+  shutdown:
+    drain_deadline_ms: 30000
+  events:
+    live_buffer_events: 256
+    dispatcher_poll_ms: 500
+    scheduler_poll_ms: 1000
+  streams:
+    read_default_limit: 100
+    read_max_limit: 1000
+  fs:
+    db_file_mode: "0600"
+    runtime_dir_mode: "0700"
+    control_socket_mode: "0600"
+
+observability:
+  log_level: info
