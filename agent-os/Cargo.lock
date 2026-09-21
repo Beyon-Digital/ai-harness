@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "acp-loop"
+version = "0.1.0"
+dependencies = [
+ "adapter-protocol",
+ "domain",
+ "ndjson-rpc",
+ "prost",
+ "serde_json",
+]
+
+[[package]]
 name = "adapter-protocol"
 version = "0.1.0"
 dependencies = [
@@ -992,6 +1003,24 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "echo-acp"
+version = "0.1.0"
+dependencies = [
+ "ndjson-rpc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "echo-mcp"
+version = "0.1.0"
+dependencies = [
+ "ndjson-rpc",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "effects"
@@ -2170,6 +2199,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
+name = "ndjson-rpc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2262,6 +2299,7 @@ dependencies = [
  "adapter-protocol",
  "domain",
  "errors",
+ "ndjson-rpc",
  "prost",
  "serde",
  "serde_json",

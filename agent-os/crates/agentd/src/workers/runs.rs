@@ -535,13 +535,19 @@ impl RunWorker {
                 })
             })
             .collect();
+        // Honor the profile's `agent_loop` binding: pin resolution to
+        // that adapter id so a run bound to `acp-local` actually spawns
+        // the acp-loop adapter instead of the first registered loop.
+        // Builtin names (`fixture-loop`) have no adapter id — leave the
+        // pin unset and keep the generic resolution.
+        let loop_pin = self.profile_loop_pin(txn, &row.requested_profile).await?;
         let agent_loop = resolve(
             &PortRequirement {
                 port_id: LOOP_PORT_ID.to_owned(),
                 port_version: 1,
                 required_capabilities: Vec::new(),
                 sandbox_tier: SandboxTier::T0,
-                pin_adapter_id: None,
+                pin_adapter_id: loop_pin,
                 require_conformance_passed: false,
             },
             &candidates,
@@ -564,6 +570,18 @@ impl RunWorker {
                 ));
             }
         };
+        let local_bundles: Vec<(String, String, String)> = self
+            .deps
+            .bundles
+            .iter()
+            .map(|b| {
+                (
+                    b.adapter_id.clone(),
+                    b.version.clone(),
+                    b.bundle_digest.clone(),
+                )
+            })
+            .collect();
         runtime::resolved_environment::plan_environment(
             txn,
             self.deps.ids.as_ref(),
@@ -571,6 +589,7 @@ impl RunWorker {
             &row.requested_profile,
             &spec,
             &agent_loop,
+            &local_bundles,
             row.workspace_uri.clone(),
             None,
             domain::resource::WorkspaceAccessMode::ReadOnly,
@@ -1237,6 +1256,9 @@ impl RunWorker {
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
             "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // MCP tool servers configured for `mcp.*` effect payloads.
+            "MCP_SERVERS",
+            "MCP_TIMEOUT_MS",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1321,6 +1343,41 @@ impl RunWorker {
             return Err(error);
         }
         Ok((child, phase))
+    }
+
+    /// Read the requested profile's `agent_loop` binding under the
+    /// active generation and turn it into an adapter pin for `resolve`.
+    /// `Ok(None)` for builtin names (e.g. `fixture-loop`) which carry no
+    /// adapter id; errors surface before any execution side effect.
+    async fn profile_loop_pin(
+        &self,
+        txn: &mut dyn KernelTxn,
+        profile_name: &str,
+    ) -> errors::Result<Option<AdapterId>> {
+        let Some(active) = txn.config().get_active().await? else {
+            return Ok(None);
+        };
+        let Some(generation) = txn.config().get_generation(active.generation_id).await? else {
+            return Ok(None);
+        };
+        let doc = config_engine::model::parse_document(
+            std::str::from_utf8(&generation.document)
+                .map_err(|_| worker_error(ErrorCode::Internal, "generation doc not utf-8"))?,
+        )?;
+        let profile = config_engine::profile::resolve_profile(&doc, profile_name)?;
+        let Some(binding) = profile.bindings.get(LOOP_PORT_ID) else {
+            return Ok(None);
+        };
+        let name = binding.split('@').next().unwrap_or(binding);
+        if config_engine::generations::BUILTIN_ADAPTERS.contains(&name) {
+            return Ok(None);
+        }
+        name.parse::<AdapterId>().map(Some).map_err(|_| {
+            worker_error(
+                ErrorCode::InvalidArgument,
+                "profile agent_loop binding is not an adapter id",
+            )
+        })
     }
 
     /// The executor identity this worker claims effects under.
@@ -1495,6 +1552,12 @@ impl RunWorker {
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
             "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // ACP loop adapter: which agent CLI to spawn and how.
+            "ACP_COMMAND",
+            "ACP_ARGS",
+            "ACP_CWD",
+            "ACP_TIMEOUT_MS",
+            "ACP_ALLOW_TOOLS",
             // Test/debug knob: the fixture loop records each LoopInput.
             "FIXTURE_LOOP_RECORD_DIR",
         ] {

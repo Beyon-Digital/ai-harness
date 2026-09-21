@@ -21,7 +21,12 @@
 //!   only sent to OpenRouter. `OPENROUTER_ALLOW_ANY_BASE_URL=1` opts out.
 //! - `OPENROUTER_SITE`, `OPENROUTER_APP_NAME` — optional referer headers.
 //! - `OPENROUTER_TIMEOUT_MS` — HTTP timeout (default 55000).
+//! - `MCP_SERVERS` — JSON map of MCP server name → stdio/HTTP spec;
+//!   enables `mcp.list_tools`/`mcp.call_tool`/`mcp.read_resource`
+//!   payloads (`{"op": "mcp.*", "server": <name>, ...}`).
 //! - `FIXTURE_STORE` — durable store path (default `openrouter-effect-store.json`).
+
+mod mcp;
 
 use std::collections::BTreeMap;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -231,12 +236,42 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
             String::new(),
         );
     }
-    if config.api_key.is_empty() {
-        return fail("missing_openrouter_api_key");
-    }
     let Ok(payload) = serde_json::from_slice::<Value>(&req.payload) else {
         return fail("invalid_argument");
     };
+    // `mcp.*` payloads dispatch to the MCP client — they don't touch
+    // the model provider and don't need its API key.
+    if mcp::is_mcp_payload(&payload) {
+        return match mcp::call(&payload, config.timeout) {
+            Ok(text) => {
+                let result_ref = data_uri(&text);
+                store.insert(
+                    req.operation_id.clone(),
+                    OpRecord {
+                        status: "succeeded".to_owned(),
+                        result_ref: result_ref.clone(),
+                        error_code: String::new(),
+                    },
+                );
+                save_store(store_path, &store);
+                (
+                    EffectExecutionResponse {
+                        effect_id: req.effect_id,
+                        status: "succeeded".to_owned(),
+                        result_ref,
+                        provider_operation_ref: req.operation_id,
+                        error_code: String::new(),
+                    }
+                    .encode_to_vec(),
+                    String::new(),
+                )
+            }
+            Err(code) => fail(&code),
+        };
+    }
+    if config.api_key.is_empty() {
+        return fail("missing_openrouter_api_key");
+    }
     // Per-request endpoint override: the GUI sends `base_url` when a
     // custom OpenAI-compatible provider is selected. Same guard as the
     // env default — https on openrouter.ai unless the operator opted out
@@ -350,10 +385,25 @@ fn call_chat(config: &LlmConfig, base_url: &str, body: &Value) -> Result<String,
         .body_mut()
         .read_json()
         .map_err(|_| "provider_bad_response".to_owned())?;
-    payload["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "provider_bad_response".to_owned())
+    let message = &payload["choices"][0]["message"];
+    if let Some(text) = message["content"].as_str() {
+        return Ok(text.to_owned());
+    }
+    // Some providers return segmented content or reasoning-only replies.
+    if let Some(parts) = message["content"].as_array() {
+        let text = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    if let Some(text) = message["reasoning"].as_str().filter(|s| !s.is_empty()) {
+        return Ok(text.to_owned());
+    }
+    Err("provider_bad_response".to_owned())
 }
 
 fn data_uri(text: &str) -> String {
@@ -403,4 +453,47 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
 
 fn err_msg(msg: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The MCP dispatch path drives a real `echo-mcp` subprocess through
+    /// `MCP_SERVERS` — covers the stdio transport + result flattening the
+    /// daemon relies on for `mcp.*` effects.
+    #[test]
+    fn mcp_call_tool_against_echo_server() {
+        let echo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/echo-mcp");
+        assert!(
+            std::path::Path::new(echo).exists(),
+            "echo-mcp binary missing — run `cargo build -p echo-mcp` first"
+        );
+        // SAFETY: single-threaded access in this test binary; no other
+        // test reads MCP_SERVERS.
+        unsafe {
+            std::env::set_var(
+                "MCP_SERVERS",
+                format!(r#"{{"echo": {{"command": "{echo}"}}}}"#),
+            );
+        }
+        let out = mcp::call(
+            &serde_json::json!({
+                "op": "mcp.call_tool",
+                "server": "echo",
+                "tool": "echo",
+                "arguments": {"text": "mcp-ok"},
+            }),
+            Duration::from_secs(15),
+        )
+        .expect("mcp.call_tool");
+        assert_eq!(out, "mcp-ok");
+
+        let err = mcp::call(
+            &serde_json::json!({"op": "mcp.list_tools", "server": "ghost"}),
+            Duration::from_secs(5),
+        )
+        .expect_err("ghost server must fail");
+        assert!(err.contains("not in MCP_SERVERS"), "{err}");
+    }
 }

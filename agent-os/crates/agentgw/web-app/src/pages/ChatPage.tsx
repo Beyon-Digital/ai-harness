@@ -33,6 +33,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createRun,
@@ -80,6 +81,9 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
   const [busy, setBusy] = useState(false);
   const [providers] = useState<Provider[]>(loadProviders);
   const [providerId, setProviderId] = useState("default");
+  // When on, the run envelope carries `tools: true` — the agent loop may
+  // then issue `mcp.call_tool` effects against the daemon's MCP_SERVERS.
+  const [toolsOn, setToolsOn] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agentProfile, setAgentProfile] = useState("");
@@ -171,14 +175,18 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
       const sid = await ensureSession();
       const provider = providers.find((p) => p.id === providerId);
       // Payload envelope understood by openrouter-loop: plain text is a
-      // bare task; an object can pin model / base_url per request.
-      const payload = provider
-        ? JSON.stringify({
-            task,
-            model: provider.model,
-            base_url: provider.baseUrl,
-          })
-        : task;
+      // bare task; an object can pin model / base_url per request and
+      // opt in to MCP tool calls.
+      const payload =
+        provider || toolsOn
+          ? JSON.stringify({
+              task,
+              ...(provider
+                ? { model: provider.model, base_url: provider.baseUrl }
+                : {}),
+              ...(toolsOn ? { tools: true } : {}),
+            })
+          : task;
       const { run_id } = await createRun({
         sessionId: sid,
         specId: id,
@@ -412,6 +420,19 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
                 ))}
               </SelectContent>
             </Select>
+            <div className="flex items-center gap-2 self-center">
+              <Switch
+                id="mcp-tools"
+                checked={toolsOn}
+                onCheckedChange={(v) => setToolsOn(v === true)}
+              />
+              <Label
+                htmlFor="mcp-tools"
+                className="whitespace-nowrap text-xs text-muted-foreground"
+              >
+                MCP tools
+              </Label>
+            </div>
             <Textarea
               className="min-h-11 flex-1 resize-none"
               placeholder={

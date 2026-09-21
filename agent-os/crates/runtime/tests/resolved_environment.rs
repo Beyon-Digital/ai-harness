@@ -32,6 +32,16 @@ fn loop_adapter() -> ResolvedAdapter {
     }
 }
 
+/// The seeded effect adapter as an on-disk bundle triple —
+/// `plan_environment` drops registrations without a local bundle.
+fn effect_bundle() -> Vec<(String, String, String)> {
+    vec![(
+        "01905c5e-0000-7000-8000-e11ec7ad01ef".into(),
+        "0.1.0".into(),
+        "sha256:effect-fixture".into(),
+    )]
+}
+
 fn spec_ref(ids: &DeterministicIds) -> AgentSpecRef {
     AgentSpecRef {
         agent_spec_id: AgentSpecId::new(ids),
@@ -187,6 +197,7 @@ async fn run_keeps_g1_bindings_after_g2_activates() {
         "local-trusted",
         &spec_ref(&ids),
         &loop_adapter(),
+        &effect_bundle(),
         Some("ws://local/a".into()),
         Some("rev1".into()),
         WorkspaceAccessMode::ExclusiveWrite,
@@ -248,6 +259,7 @@ async fn environment_rows_are_immutable() {
         "local-trusted",
         &spec_ref(&ids),
         &loop_adapter(),
+        &effect_bundle(),
         None,
         None,
         WorkspaceAccessMode::ReadOnly,
@@ -336,6 +348,7 @@ async fn registered_adapter_produces_frozen_binding_row() {
         "ext",
         &spec_ref(&ids),
         &loop_adapter(),
+        &[(mem_adapter.to_string(), "1.0.0".into(), "sha256:mem".into())],
         None,
         None,
         WorkspaceAccessMode::ReadOnly,
@@ -383,6 +396,7 @@ async fn missing_registry_adapter_fails_run_start() {
         "ghost",
         &spec_ref(&ids),
         &loop_adapter(),
+        &effect_bundle(),
         None,
         None,
         WorkspaceAccessMode::ReadOnly,

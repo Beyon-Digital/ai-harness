@@ -239,3 +239,57 @@ agentd --runtime-dir /tmp/run --config config/wasm.yaml \
 E2E proof: `agent-os/crates/agentd/tests/e2e_wasm.rs` runs a full
 create→invoke_effect→commit cycle through a real WASI module (skipped on
 toolchains without `wasm32-wasip1`).
+
+## MCP tool servers (`mcp.*` effects)
+
+The `openrouter-effect` adapter bridges MCP servers into the effect
+plane. Configure servers via `MCP_SERVERS` (JSON map, allowlisted into
+the adapter env at spawn):
+
+```bash
+export MCP_SERVERS='{"echo": {"command": "/path/to/echo-mcp"},
+                    "docs": {"url": "http://127.0.0.1:8090/mcp"}}'
+agentd --runtime-dir /tmp/run --config config/openrouter.yaml ...
+```
+
+Loop adapters request tools by emitting
+`invoke_effect` with a self-describing payload:
+`{"op": "mcp.list_tools"|"mcp.call_tool"|"mcp.read_resource", "server",
+"tool"|"uri", "arguments"}` — plain `tools/call` stdio and SSE/POST HTTP
+servers are both supported. In the web GUI, enable "MCP tools" in the
+chat composer to make the `openrouter-loop` adapter expose the tool
+contract to the model (it emits `mcp.call_tool` when the model asks for
+a tool). Fixture `fixtures/echo-mcp` is a reference MCP server.
+
+## ACP agents (`agent_loop` adapter kind)
+
+`fixtures/acp-loop` is an `agent_loop` adapter that drives an
+ACP-compatible agent over NDJSON JSON-RPC instead of calling a chat
+completion directly. Point it at any ACP binary:
+
+```bash
+export ACP_COMMAND=/path/to/your-acp-agent   # e.g. fixtures/echo-acp
+export ACP_TIMEOUT_MS=120000               # optional
+export ACP_ALLOW_TOOLS=1                   # auto-allow permission requests
+agentd --runtime-dir /tmp/run --config config/openrouter.yaml \
+      --adapter-bundle /path/to/acp-loop-bundle
+```
+
+Profile `acp-local` in `config/openrouter.yaml` binds it; the reference
+agent `fixtures/echo-acp` echoes `acp-echo:<task>` and demonstrates
+`session/request_permission` handling.
+
+## Desktop shell (Tauri)
+
+`apps/desktop` is a Tauri v2 shell around the gateway SPA — build
+installable macOS/Windows/Linux bundles:
+
+```bash
+cd apps/desktop
+npm install
+AGENTOS_GATEWAY=http://127.0.0.1:7740 npx tauri build
+```
+
+At runtime the shell opens an external window on `AGENTOS_GATEWAY`
+(default `http://127.0.0.1:7740`), so the daemon + gateway must be
+running on the target machine or a reachable host.
