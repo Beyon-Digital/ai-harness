@@ -8,6 +8,7 @@ pub mod claim;
 pub mod create_run;
 pub mod effect_recovery;
 pub mod recovery;
+pub mod resolved_environment;
 pub mod run;
 pub mod session;
 pub mod state;
