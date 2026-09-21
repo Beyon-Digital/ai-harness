@@ -110,6 +110,18 @@ commands from `agent-os/`.
 - System page metrics: map-valued metrics (`runs_by_state`, `effects_by_state`, …)
   render `state: count` pairs ("9: 4  10: 1"); an earlier build rendered literal
   `[object Object]` — if that regresses, flattenMetrics is not formatting maps.
+- Custom providers (System → Add provider) persist in localStorage `agentos.providers`
+  and the Chat dropdown shows the provider name after the label fix (it previously
+  showed the raw UUID — if that regresses, the select is binding the id as label).
+  The effect adapter enforces `base_url must be https on openrouter.ai` unless the
+  daemon allows non-default base URLs — a custom-provider run failing with that
+  reason is the payload flowing correctly, not a bug.
+- Staged config proposals are listed by `GET /api/config/proposals` (proposal_id,
+  path, valid, error) AND on Config → "Advanced (raw files)" tab's staged-proposals
+  table (earlier builds had no proposals listing).
+- Theme select sits in the sidebar footer; options open UPWARD in a scrollable list —
+  items past ~4 visible are offscreen; scroll inside the list or click the visible
+  rows. Choice persists via localStorage; collapsed label shows the theme name.
 - `provider_unreachable` from openrouter-effect can be transient free-tier routing —
   retry before calling it a failure (key auth was 200 while the model call failed).
 - Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to

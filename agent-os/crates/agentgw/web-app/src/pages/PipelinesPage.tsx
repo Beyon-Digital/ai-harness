@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Background,
+  BackgroundVariant,
   Controls,
   Handle,
+  MiniMap,
   Position,
   ReactFlow,
   addEdge,
@@ -15,7 +17,15 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { toast } from "sonner";
-import { Boxes, GitBranch, Plus, Save, Upload } from "lucide-react";
+import {
+  Boxes,
+  GitBranch,
+  GripVertical,
+  Plus,
+  Save,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,6 +53,7 @@ import {
   type Adapter,
   type Profile,
 } from "@/lib/api";
+import { useTheme } from "@/lib/themes";
 
 /* Profile binding slots the kernel resolves (config yaml keys). */
 const SLOTS = [
@@ -59,67 +70,85 @@ const BUILTIN_SLOTS = [
 type AdapterData = { adapter: Adapter };
 type ProfileData = { name: string };
 
-function AdapterNode({ data }: NodeProps<Node<AdapterData>>) {
+function AdapterNode({ data, selected }: NodeProps<Node<AdapterData>>) {
   const a = data.adapter;
   return (
-    <div className="w-64 rounded-lg border bg-card p-3 shadow-sm">
-      <div className="flex items-center gap-2">
-        <Boxes className="size-4 text-muted-foreground" />
-        <div className="truncate font-mono text-xs">
-          {a.adapter?.id.slice(0, 18)}…
+    <div
+      className={`w-64 overflow-hidden rounded-lg border bg-card shadow-sm transition-shadow ${
+        selected ? "ring-2 ring-primary" : "hover:shadow-md"
+      }`}
+    >
+      <div className="flex items-center gap-2 border-b bg-muted/60 px-3 py-2">
+        <GripVertical className="size-3.5 shrink-0 text-muted-foreground/60" />
+        <Boxes className="size-4 shrink-0 text-primary" />
+        <div className="truncate font-mono text-xs font-medium">
+          {a.adapter?.id ?? "adapter"}
         </div>
-        <Badge variant="outline" className="ml-auto">
+        <Badge variant="outline" className="ml-auto shrink-0">
           {a.runtime_type}
         </Badge>
       </div>
-      <div className="mt-1 text-xs text-muted-foreground">
+      <div className="px-3 pt-1.5 text-xs text-muted-foreground">
         v{a.adapter?.version} · {a.trust_state}
       </div>
-      {(a.ports || []).map((p) => (
-        <div
-          key={p}
-          className="relative mt-1.5 rounded bg-muted px-2 py-1 font-mono text-[11px]"
-        >
-          {p}
-          <Handle
-            type="source"
-            position={Position.Right}
-            id={p}
-            className="!size-2.5 !bg-primary"
-            style={{ top: "auto" }}
-          />
-        </div>
-      ))}
+      <div className="space-y-1 px-3 py-2">
+        {(a.ports || []).map((p) => (
+          <div
+            key={p}
+            className="relative rounded border border-dashed border-primary/40 bg-primary/5 px-2 py-1 font-mono text-[11px]"
+          >
+            {p}
+            <Handle
+              type="source"
+              position={Position.Right}
+              id={p}
+              className="!size-2.5 !border-2 !border-card !bg-primary"
+            />
+          </div>
+        ))}
+        {!a.ports?.length && (
+          <div className="text-[11px] text-muted-foreground">no ports</div>
+        )}
+      </div>
     </div>
   );
 }
 
-function ProfileNode({ data }: NodeProps<Node<ProfileData>>) {
+function ProfileNode({ data, selected }: NodeProps<Node<ProfileData>>) {
   return (
-    <div className="w-64 rounded-lg border-2 border-primary/40 bg-card p-3 shadow-sm">
-      <div className="flex items-center gap-2">
-        <GitBranch className="size-4 text-primary" />
-        <div className="font-medium">{data.name || "new-profile"}</div>
-      </div>
-      <div className="mt-1 text-xs text-muted-foreground">
-        runtime profile — connect adapter ports
-      </div>
-      {SLOTS.map((s) => (
-        <div
-          key={s.key}
-          className="relative mt-1.5 rounded bg-primary/10 px-2 py-1 font-mono text-[11px]"
-        >
-          {s.label}
-          <Handle
-            type="target"
-            position={Position.Left}
-            id={s.key}
-            className="!size-2.5 !bg-primary"
-            style={{ top: "auto" }}
-          />
+    <div
+      className={`w-64 overflow-hidden rounded-lg border-2 bg-card shadow-sm transition-shadow ${
+        selected
+          ? "border-primary ring-2 ring-primary/40"
+          : "border-primary/50 hover:shadow-md"
+      }`}
+    >
+      <div className="flex items-center gap-2 border-b bg-primary/10 px-3 py-2">
+        <GitBranch className="size-4 shrink-0 text-primary" />
+        <div className="truncate text-sm font-semibold">
+          {data.name || "new-profile"}
         </div>
-      ))}
-      <div className="mt-2 border-t pt-1.5 text-[10px] text-muted-foreground">
+      </div>
+      <div className="px-3 pt-1.5 text-xs text-muted-foreground">
+        runtime profile — wire adapter ports into the slots below
+      </div>
+      <div className="space-y-1 px-3 py-2">
+        {SLOTS.map((s) => (
+          <div
+            key={s.key}
+            className="relative rounded border border-primary/30 bg-primary/10 px-2 py-1 font-mono text-[11px]"
+          >
+            <Handle
+              type="target"
+              position={Position.Left}
+              id={s.key}
+              className="!size-2.5 !border-2 !border-card !bg-primary"
+            />
+            {s.label}
+          </div>
+        ))}
+      </div>
+      <div className="border-t px-3 py-1.5 text-[10px] text-muted-foreground">
         {BUILTIN_SLOTS.join(" · ")} → builtin names
       </div>
     </div>
@@ -131,6 +160,7 @@ const nodeTypes = { adapter: AdapterNode, profile: ProfileNode };
 let nodeSeq = 0;
 
 export function PipelinesPage() {
+  const theme = useTheme();
   const [adapters, setAdapters] = useState<Adapter[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [configDoc, setConfigDoc] = useState("");
@@ -164,7 +194,7 @@ export function PipelinesPage() {
             {
               id: "profile",
               type: "profile",
-              position: { x: 420, y: 80 },
+              position: { x: 460, y: 120 },
               data: { name: profileName },
             },
           ],
@@ -178,7 +208,7 @@ export function PipelinesPage() {
       {
         id,
         type: "adapter",
-        position: { x: 40 + (nodeSeq % 3) * 60, y: 40 + nodeSeq * 90 },
+        position: { x: 40 + (nodeSeq % 2) * 40, y: 60 + nodeSeq * 100 },
         data: { adapter: a },
       },
     ]);
@@ -189,7 +219,14 @@ export function PipelinesPage() {
       setEdges((es) => {
         // One binding per profile slot — replace any existing edge into it.
         const next = es.filter((e) => e.targetHandle !== conn.targetHandle);
-        return addEdge(conn, next);
+        return addEdge(
+          {
+            ...conn,
+            type: "smoothstep",
+            label: conn.targetHandle ?? undefined,
+          },
+          next,
+        );
       }),
     [setEdges],
   );
@@ -251,19 +288,23 @@ export function PipelinesPage() {
     const newNodes: Node[] = [];
     let i = 0;
     for (const [slot, ref] of Object.entries(p.bindings)) {
-      const adapterId = ref.split("@")[0];
+      // Bindings are `adapter@version` strings; coerce anything else for safety.
+      const refStr = typeof ref === "string" ? ref : JSON.stringify(ref);
+      const adapterId = refStr.split("@")[0];
       const a = adapters.find((x) => x.adapter?.id === adapterId);
       if (!a) continue;
       const nid = `a${++nodeSeq}`;
       newNodes.push({
         id: nid,
         type: "adapter",
-        position: { x: 40, y: 40 + i * 140 },
+        position: { x: 40, y: 60 + i * 150 },
         data: { adapter: a },
       });
       if (SLOTS.some((s) => s.key === slot))
         newEdges.push({
           id: `e-${nid}-${slot}`,
+          type: "smoothstep",
+          label: slot,
           source: nid,
           sourceHandle: SLOTS.find((s) => s.key === slot)!.adapterPort,
           target: "profile",
@@ -271,12 +312,16 @@ export function PipelinesPage() {
         });
       i++;
     }
-    setNodes((ns) => [
-      ...ns.filter((n) => n.type === "profile"),
-      ...newNodes,
-    ]);
+    setNodes((ns) => [...ns.filter((n) => n.type === "profile"), ...newNodes]);
     setEdges(newEdges);
   };
+
+  const clearCanvas = () => {
+    setNodes((ns) => ns.filter((n) => n.type === "profile"));
+    setEdges([]);
+  };
+
+  const edgeCount = edges.length;
 
   return (
     <div className="flex h-full">
@@ -288,7 +333,7 @@ export function PipelinesPage() {
             value={profileName}
             onChange={(e) => setProfileName(e.target.value)}
           />
-          <div className="mt-2">
+          <div className="mt-3">
             <Label className="text-xs">Start from existing</Label>
             <Select
               value={loadProfile}
@@ -307,7 +352,7 @@ export function PipelinesPage() {
             </Select>
           </div>
         </div>
-        <div className="flex-1 space-y-1 overflow-y-auto p-2">
+        <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
           <div className="px-1 pb-1 text-xs font-medium text-muted-foreground">
             Adapters — click to add
           </div>
@@ -315,13 +360,13 @@ export function PipelinesPage() {
             <button
               key={a.adapter?.id}
               onClick={() => addAdapter(a)}
-              className="w-full rounded-md border px-2 py-1.5 text-left hover:bg-accent/50"
+              className="w-full rounded-md border bg-card px-2 py-1.5 text-left transition-colors hover:border-primary/50 hover:bg-accent/50"
             >
               <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                <Plus className="size-3" />
-                {a.adapter?.id.slice(0, 18)}…
+                <Plus className="size-3 shrink-0" />
+                <span className="truncate">{a.adapter?.id}</span>
               </div>
-              <div className="mt-0.5 flex gap-1">
+              <div className="mt-1 flex flex-wrap gap-1">
                 <Badge variant="secondary" className="text-[10px]">
                   {a.runtime_type}
                 </Badge>
@@ -335,9 +380,24 @@ export function PipelinesPage() {
           ))}
         </div>
         <div className="space-y-2 border-t p-3">
-          <Button className="w-full" size="sm" onClick={openYaml}>
-            <Save className="mr-1.5 size-3.5" /> Generate config
-          </Button>
+          <div className="text-xs text-muted-foreground">
+            {edgeCount} slot{edgeCount === 1 ? "" : "s"} bound — drag from an
+            adapter port to a profile slot. Delete removes the selected node
+            or edge.
+          </div>
+          <div className="flex gap-2">
+            <Button className="flex-1" size="sm" onClick={openYaml}>
+              <Save className="mr-1.5 size-3.5" /> Generate config
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearCanvas}
+              title="Clear adapters from canvas"
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -349,11 +409,23 @@ export function PipelinesPage() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          colorMode={theme.mode}
           fitView
+          snapToGrid
+          snapGrid={[16, 16]}
+          deleteKeyCode={["Backspace", "Delete"]}
+          defaultEdgeOptions={{ type: "smoothstep" }}
           proOptions={{ hideAttribution: true }}
         >
-          <Background gap={20} />
-          <Controls />
+          <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
+          <MiniMap
+            pannable
+            zoomable
+            className="!bg-card"
+            nodeColor="var(--primary)"
+            maskColor="color-mix(in srgb, var(--background) 70%, transparent)"
+          />
+          <Controls showInteractive={false} />
         </ReactFlow>
       </div>
 

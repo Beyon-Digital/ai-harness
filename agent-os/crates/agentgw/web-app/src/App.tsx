@@ -10,7 +10,15 @@ import {
   Workflow,
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { getHealth, type Health } from "@/lib/api";
+import { THEMES, applyTheme, themeById, useTheme } from "@/lib/themes";
 import { cn } from "@/lib/utils";
 import { ChatPage } from "@/pages/ChatPage";
 import { RunsPage } from "@/pages/RunsPage";
@@ -43,6 +51,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [health, setHealth] = useState<Health | null>(null);
   const [chatRunId, setChatRunId] = useState<string | null>(null);
+  const theme = useTheme();
 
   useEffect(() => {
     const tick = () => getHealth().then(setHealth).catch(() => setHealth(null));
@@ -80,6 +89,23 @@ export default function App() {
           ))}
         </nav>
         <div className="border-t p-3 text-xs text-muted-foreground">
+          <Select
+            value={theme.id}
+            onValueChange={(v) => v && applyTheme(v)}
+          >
+            <SelectTrigger className="mb-3 h-7 w-full text-xs">
+              <SelectValue>
+                {(v: unknown) => themeById(String(v)).label}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {THEMES.map((t) => (
+                <SelectItem key={t.id} value={t.id}>
+                  {t.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="flex items-center gap-1.5">
             <span
               className={cn(
@@ -108,7 +134,7 @@ export default function App() {
         {page === "approvals" && <ApprovalsPage />}
         {page === "system" && <SystemPage />}
       </main>
-      <Toaster richColors position="bottom-right" />
+      <Toaster richColors position="bottom-right" theme={theme.mode} />
     </div>
   );
 }

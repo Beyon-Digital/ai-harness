@@ -61,6 +61,15 @@ interface ChatMsg {
   error?: boolean;
 }
 
+/** Short human label for a decision's detail blob — never raw objects. */
+function describeDecision(d: Decision): string | undefined {
+  const det = (d.detail ?? {}) as Record<string, unknown>;
+  const v = det.operation ?? det.output_ref ?? Object.values(det)[0];
+  if (v == null) return undefined;
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+}
+
 export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) {
   const [specs, setSpecs] = useState<Spec[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -358,11 +367,7 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
                           <ChainOfThoughtStep
                             key={d.sequence}
                             label={`step ${d.step_sequence} · ${d.kind}`}
-                            description={
-                              d.detail?.operation ||
-                              d.detail?.output_ref?.slice(0, 60) ||
-                              Object.values(d.detail || {})[0]?.slice(0, 80)
-                            }
+                            description={describeDecision(d)}
                             status={
                               d.kind === "complete"
                                 ? "complete"
@@ -389,7 +394,14 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
               onValueChange={(v) => v && setProviderId(v)}
             >
               <SelectTrigger className="w-48">
-                <SelectValue placeholder="provider" />
+                <SelectValue placeholder="provider">
+                  {(v: unknown) =>
+                    v === "default"
+                      ? "default provider"
+                      : providers.find((p) => p.id === v)?.name ??
+                        String(v ?? "provider")
+                  }
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="default">default provider</SelectItem>

@@ -117,6 +117,172 @@
     --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* Theme palettes — `[data-theme]` on <html> switches the token set;
+   `.dark` additionally enables `dark:` utilities for the dark variants. */
+
+[data-theme="github"] {
+    --background: #ffffff;
+    --foreground: #1f2328;
+    --card: #f6f8fa;
+    --card-foreground: #1f2328;
+    --popover: #ffffff;
+    --popover-foreground: #1f2328;
+    --primary: #0969da;
+    --primary-foreground: #ffffff;
+    --secondary: #eff1f3;
+    --secondary-foreground: #1f2328;
+    --muted: #f6f8fa;
+    --muted-foreground: #59636e;
+    --accent: #eff1f3;
+    --accent-foreground: #1f2328;
+    --destructive: #d1242f;
+    --border: #d1d9e0;
+    --input: #d1d9e0;
+    --ring: #0969da;
+    --sidebar: #f6f8fa;
+    --sidebar-foreground: #1f2328;
+    --sidebar-primary: #0969da;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #eff1f3;
+    --sidebar-accent-foreground: #1f2328;
+    --sidebar-border: #d1d9e0;
+    --sidebar-ring: #0969da;
+}
+
+[data-theme="github-dark"] {
+    --background: #0d1117;
+    --foreground: #e6edf3;
+    --card: #161b22;
+    --card-foreground: #e6edf3;
+    --popover: #161b22;
+    --popover-foreground: #e6edf3;
+    --primary: #4493f8;
+    --primary-foreground: #0d1117;
+    --secondary: #21262d;
+    --secondary-foreground: #e6edf3;
+    --muted: #21262d;
+    --muted-foreground: #9198a1;
+    --accent: #21262d;
+    --accent-foreground: #e6edf3;
+    --destructive: #f85149;
+    --border: #3d444d;
+    --input: #3d444d;
+    --ring: #4493f8;
+    --sidebar: #010409;
+    --sidebar-foreground: #e6edf3;
+    --sidebar-primary: #4493f8;
+    --sidebar-primary-foreground: #0d1117;
+    --sidebar-accent: #21262d;
+    --sidebar-accent-foreground: #e6edf3;
+    --sidebar-border: #3d444d;
+    --sidebar-ring: #4493f8;
+}
+
+[data-theme="dracula"] {
+    --background: #282a36;
+    --foreground: #f8f8f2;
+    --card: #21222c;
+    --card-foreground: #f8f8f2;
+    --popover: #343746;
+    --popover-foreground: #f8f8f2;
+    --primary: #bd93f9;
+    --primary-foreground: #282a36;
+    --secondary: #44475a;
+    --secondary-foreground: #f8f8f2;
+    --muted: #44475a;
+    --muted-foreground: #a5aad6;
+    --accent: #44475a;
+    --accent-foreground: #f8f8f2;
+    --destructive: #ff5555;
+    --border: #44475a;
+    --input: #44475a;
+    --ring: #bd93f9;
+    --sidebar: #21222c;
+    --sidebar-foreground: #f8f8f2;
+    --sidebar-primary: #bd93f9;
+    --sidebar-primary-foreground: #282a36;
+    --sidebar-accent: #44475a;
+    --sidebar-accent-foreground: #f8f8f2;
+    --sidebar-border: #44475a;
+    --sidebar-ring: #bd93f9;
+}
+
+[data-theme="vscode"] {
+    --background: #ffffff;
+    --foreground: #1e1e1e;
+    --card: #f3f3f3;
+    --card-foreground: #1e1e1e;
+    --popover: #ffffff;
+    --popover-foreground: #1e1e1e;
+    --primary: #005fb8;
+    --primary-foreground: #ffffff;
+    --secondary: #e8e8e8;
+    --secondary-foreground: #1e1e1e;
+    --muted: #f3f3f3;
+    --muted-foreground: #6e6e6e;
+    --accent: #e8e8e8;
+    --accent-foreground: #1e1e1e;
+    --destructive: #e51400;
+    --border: #e0e0e0;
+    --input: #cecece;
+    --ring: #005fb8;
+    --sidebar: #f3f3f3;
+    --sidebar-foreground: #1e1e1e;
+    --sidebar-primary: #005fb8;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #e8e8e8;
+    --sidebar-accent-foreground: #1e1e1e;
+    --sidebar-border: #e0e0e0;
+    --sidebar-ring: #005fb8;
+}
+
+[data-theme="vscode-dark"] {
+    --background: #1e1e1e;
+    --foreground: #d4d4d4;
+    --card: #252526;
+    --card-foreground: #d4d4d4;
+    --popover: #252526;
+    --popover-foreground: #d4d4d4;
+    --primary: #3794ff;
+    --primary-foreground: #1e1e1e;
+    --secondary: #2d2d30;
+    --secondary-foreground: #d4d4d4;
+    --muted: #2d2d30;
+    --muted-foreground: #9d9d9d;
+    --accent: #37373d;
+    --accent-foreground: #d4d4d4;
+    --destructive: #f14c4c;
+    --border: #3c3c3c;
+    --input: #3c3c3c;
+    --ring: #3794ff;
+    --sidebar: #252526;
+    --sidebar-foreground: #d4d4d4;
+    --sidebar-primary: #3794ff;
+    --sidebar-primary-foreground: #1e1e1e;
+    --sidebar-accent: #37373d;
+    --sidebar-accent-foreground: #d4d4d4;
+    --sidebar-border: #3c3c3c;
+    --sidebar-ring: #3794ff;
+}
+
+/* React Flow chrome follows the active theme tokens. */
+.react-flow__edge-path {
+    stroke: var(--muted-foreground);
+    stroke-width: 1.5;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+    stroke: var(--primary);
+}
+.react-flow__handle {
+    cursor: crosshair;
+}
+.react-flow__minimap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
