@@ -185,7 +185,10 @@ A bundle manifest may request kernel-level isolation:
 `user-ns-no-net` (also isolates the net namespace — no sockets). Spawn
 runs through `unshare --user --map-root-user --ipc [--net]`; if userns
 creation is unavailable the daemon logs a warning and runs unsandboxed.
-`agentd adapter check` exercises the same isolation at smoke time.
+`agentd adapter check` exercises the same isolation at smoke time. The
+spawn **fails closed**: if the host can't create the namespaces (`unshare`
+missing, or the kernel denies `CLONE_NEWUSER`), the adapter is refused —
+a T1 bundle never silently runs with T0 access.
 
 ## Device registry (per-device gateway auth)
 
@@ -207,3 +210,32 @@ into the durable `device_id` field.
 `agentctl replay RUN_ID` pages the `run/<id>` event stream and decodes
 every `LoopDecisionAccepted` payload into `{kind, decision_id, turn_id,
 step_sequence}` — reconstruct what the loop decided without it running.
+## Wasm adapter bundles (`runtime.type = "wasm"`)
+
+An adapter can ship a WASI module instead of a native binary:
+
+```json
+"runtime": {"type": "wasm", "entrypoint": "my-plugin.wasm"}
+```
+
+At spawn the daemon execs `agentos-wasm-host <module.wasm>` (resolved via
+`AGENTOS_WASM_HOST` or next to the `agentd` binary) and maps the private
+adapter socketpair onto the host's stdin **and** stdout — WASI p1 stdio
+inside the module is the framed `AdapterFrame` channel. The module is the
+sandbox: no filesystem preopens, no sockets, no clock — only stdio and
+the curated env allowlist. `runtime.isolation` is meaningful only for
+`type: "process"`.
+
+Sample plugin: `fixtures/wasm-echo` (`wasm.echo` — uppercases the effect
+payload); bind it with `config/wasm.yaml`'s `local-wasm` profile:
+
+```bash
+cargo build -p wasm-echo --target wasm32-wasip1   # requires that rustup target
+cargo build -p wasm-host                         # target/debug/agentos-wasm-host
+agentd --runtime-dir /tmp/run --config config/wasm.yaml \
+      --adapter-bundle <wasm-bundle-dir> ...
+```
+
+E2E proof: `agent-os/crates/agentd/tests/e2e_wasm.rs` runs a full
+create→invoke_effect→commit cycle through a real WASI module (skipped on
+toolchains without `wasm32-wasip1`).

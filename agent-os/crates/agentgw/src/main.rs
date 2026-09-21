@@ -110,7 +110,8 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    match serve(socket, listen, auth_token, devices_file) {
+    let loopback = is_loopback_addr(&listen);
+    match serve(socket, listen, auth_token, devices_file, loopback) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("agentgw: {e}");
@@ -137,6 +138,7 @@ async fn serve(
     listen: String,
     auth_token: Option<String>,
     devices_file: Option<PathBuf>,
+    loopback: bool,
 ) -> std::io::Result<()> {
     let daemon = agentctl::connect(&socket)
         .await
@@ -151,6 +153,7 @@ async fn serve(
         auth_token,
         devices_file,
         runtime_dir,
+        loopback,
     });
 
     let app = Router::new()
@@ -199,6 +202,9 @@ struct AppState {
     /// Daemon runtime dir (socket parent) — kernel.db + events.db are
     /// opened read-only here for the metrics/environment surface.
     runtime_dir: PathBuf,
+    /// Whether the listen address is loopback-only — credential-free
+    /// requests are only trusted as "local" on loopback binds.
+    loopback: bool,
 }
 
 /// Inserted into request extensions by `require_auth`: `"admin"` for the
@@ -277,28 +283,45 @@ async fn require_auth(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned));
+    // A registry read error is an outage, not a bad credential — answer
+    // 503 so operators can distinguish it from a 401.
+    #[allow(clippy::result_large_err)]
+    let device_caller = |t: &str| -> Result<Option<AuthedCaller>, Response> {
+        match state.devices_file.as_deref() {
+            Some(f) => match devices::authenticate(f, t) {
+                Ok(Some(id)) => Ok(Some(AuthedCaller(id))),
+                Ok(None) => Ok(None),
+                Err(e) => Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": format!("device registry unavailable: {e}") })),
+                )
+                    .into_response()),
+            },
+            None => Ok(None),
+        }
+    };
     let caller = if let Some(expected) = &state.auth_token {
         match bearer.as_deref() {
             Some(t) if t == expected => AuthedCaller("admin".to_owned()),
-            Some(t) => match state
-                .devices_file
-                .as_deref()
-                .and_then(|f| devices::authenticate(f, t))
-            {
-                Some(id) => AuthedCaller(id),
-                None => return unauthorized(),
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
             },
             None => return unauthorized(),
         }
-    } else if let Some(file) = &state.devices_file {
+    } else if state.devices_file.is_some() {
         // Devices configured without a master token: a valid device token
-        // identifies the caller; no header falls back to loopback trust.
+        // identifies the caller. Credential-free requests are only "local"
+        // on a loopback bind — on a remote listener they're unauthorized.
         match bearer.as_deref() {
-            Some(t) => match devices::authenticate(file, t) {
-                Some(id) => AuthedCaller(id),
-                None => return unauthorized(),
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
             },
-            None => AuthedCaller("local".to_owned()),
+            None if state.loopback => AuthedCaller("local".to_owned()),
+            None => return unauthorized(),
         }
     } else {
         AuthedCaller("local".to_owned())

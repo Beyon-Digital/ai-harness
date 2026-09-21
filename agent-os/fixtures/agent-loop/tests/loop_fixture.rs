@@ -59,6 +59,7 @@ fn rig(script: &str, extra_env: &[(&str, &str)]) -> Rig {
             env,
             cwd: None,
             isolation: process_supervisor::spawn::Isolation::None,
+            stdout_ipc: false,
         },
         _dir: dir,
     }

@@ -15,6 +15,6 @@ pub use manifest::{
 };
 pub use registry::{
     LockEntry, VerifiedBundle, compute_bundle_digest, parse_lock, register, verify_for_spawn,
-    write_lock,
+    wasm_host_binary, write_lock,
 };
 pub use resolver::{Candidate, PortRequirement, ResolvedAdapter, resolve};

@@ -48,17 +48,51 @@ pub fn load(path: &Path) -> io::Result<DeviceRegistry> {
 }
 
 fn save(path: &Path, reg: &DeviceRegistry) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let bytes = serde_json::to_vec_pretty(reg)
         .map_err(|e| io::Error::other(format!("encode devices file: {e}")))?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &bytes).map_err(|e| io_err("write devices file", e))?;
+    // Unique tmp (no shared-name clobbering), 0600 — this file holds
+    // credential hashes, so it never inherits an ambient umask.
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        uuid::Uuid::now_v7().simple()
+    ));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| io_err("create devices tmp", e))?;
+        f.write_all(&bytes)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| io_err("write devices tmp", e))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| io_err("rename devices file", e))
+}
+
+/// Serializes a read-modify-write across processes: `flock` on a sidecar
+/// `<file>.lock` wraps `load` → `f` → `save`, so concurrent
+/// `device add`/`revoke` invocations can't lose each other's writes.
+fn update<R>(path: &Path, f: impl FnOnce(&mut DeviceRegistry) -> io::Result<R>) -> io::Result<R> {
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::File::create(&lock_path).map_err(|e| io_err("open devices lock", e))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|e| io_err("lock devices file", std::io::Error::from(e)))?;
+    let out = load(path).and_then(|mut reg| {
+        let result = f(&mut reg)?;
+        save(path, &reg)?;
+        Ok(result)
+    });
+    let _ = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
+    out
 }
 
 /// Registers a device and returns `(device_id, token)` — the token is
 /// shown once at creation and only its hash is persisted.
 pub fn add(path: &Path, label: &str) -> io::Result<(String, String)> {
-    let mut reg = load(path)?;
     let device_id = uuid::Uuid::now_v7().to_string();
     // Two v7 UUIDs give ~148 random bits — ample for a bearer token.
     let token = format!(
@@ -70,46 +104,49 @@ pub fn add(path: &Path, label: &str) -> io::Result<(String, String)> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default();
-    reg.devices.insert(
-        device_id.clone(),
-        DeviceEntry {
-            token_hash: token_hash(&token),
-            label: label.to_owned(),
-            enabled: true,
-            created_at_ms: now,
-        },
-    );
-    save(path, &reg)?;
-    Ok((device_id, token))
+    let id = device_id.clone();
+    update(path, |reg| {
+        reg.devices.insert(
+            device_id,
+            DeviceEntry {
+                token_hash: token_hash(&token),
+                label: label.to_owned(),
+                enabled: true,
+                created_at_ms: now,
+            },
+        );
+        Ok(())
+    })?;
+    Ok((id, token))
 }
 
 /// Disables a device by id (prefix-resolved like adapter ids).
 pub fn revoke(path: &Path, id_prefix: &str) -> io::Result<String> {
-    let mut reg = load(path)?;
-    let matches: Vec<String> = reg
-        .devices
-        .keys()
-        .filter(|k| k.starts_with(id_prefix))
-        .cloned()
-        .collect();
-    let id = match matches.as_slice() {
-        [id] => id.clone(),
-        [] => {
-            return Err(io::Error::other(format!(
-                "no device matching '{id_prefix}'"
-            )));
+    update(path, |reg| {
+        let matches: Vec<String> = reg
+            .devices
+            .keys()
+            .filter(|k| k.starts_with(id_prefix))
+            .cloned()
+            .collect();
+        let id = match matches.as_slice() {
+            [id] => id.clone(),
+            [] => {
+                return Err(io::Error::other(format!(
+                    "no device matching '{id_prefix}'"
+                )));
+            }
+            _ => {
+                return Err(io::Error::other(format!(
+                    "device prefix '{id_prefix}' is ambiguous"
+                )));
+            }
+        };
+        if let Some(entry) = reg.devices.get_mut(&id) {
+            entry.enabled = false;
         }
-        _ => {
-            return Err(io::Error::other(format!(
-                "device prefix '{id_prefix}' is ambiguous"
-            )));
-        }
-    };
-    if let Some(entry) = reg.devices.get_mut(&id) {
-        entry.enabled = false;
-    }
-    save(path, &reg)?;
-    Ok(id)
+        Ok(id)
+    })
 }
 
 /// Hashes a bearer token for storage/lookup.
@@ -127,12 +164,15 @@ fn token_hash(token: &str) -> String {
 
 /// Authenticates a bearer token against the current file contents —
 /// returns the enabled device id on match.
-pub fn authenticate(path: &Path, token: &str) -> Option<String> {
-    let reg = load(path).ok()?;
+/// `Err` = the registry couldn't be read/parsed (an outage — callers map
+/// it to 503); `Ok(None)` = the token simply isn't a known live device.
+pub fn authenticate(path: &Path, token: &str) -> io::Result<Option<String>> {
+    let reg = load(path)?;
     let hash = token_hash(token);
-    reg.devices
+    Ok(reg
+        .devices
         .iter()
-        .find_map(|(id, e)| (e.enabled && e.token_hash == hash).then(|| id.clone()))
+        .find_map(|(id, e)| (e.enabled && e.token_hash == hash).then(|| id.clone())))
 }
 
 /// `agentgw device <add|revoke|list>` — standalone CLI entry.

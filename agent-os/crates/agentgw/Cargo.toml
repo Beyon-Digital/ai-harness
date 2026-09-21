@@ -12,6 +12,7 @@ control-api.workspace = true
 domain.workspace = true
 errors.workspace = true
 prost.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -137,9 +137,9 @@ pub fn parse_manifest(bytes: &[u8]) -> errors::Result<ExtensionManifest> {
             )));
         }
     }
-    if manifest.runtime.runtime_type != "process" {
+    if manifest.runtime.runtime_type != "process" && manifest.runtime.runtime_type != "wasm" {
         return Err(invalid(format!(
-            "runtime type '{}' is not 'process' (only process bundles are spawnable)",
+            "runtime type '{}' is not 'process' or 'wasm' (the spawnable kinds)",
             manifest.runtime.runtime_type
         )));
     }

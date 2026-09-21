@@ -100,6 +100,7 @@ fn spec(fx: &FixtureBinary, extra_env: &[(&str, String)], seed: i64) -> SpawnSpe
         env,
         cwd: None,
         isolation: process_supervisor::spawn::Isolation::None,
+        stdout_ipc: false,
     }
 }
 

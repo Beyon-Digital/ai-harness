@@ -584,26 +584,32 @@ async fn replay_cmd(daemon: &mut Daemon, flags: &Flags) -> Result<Value, CliErro
             .into_inner();
         let n = r.events.len();
         for e in &r.events {
-            let decoded = contract::LoopDecision::decode(e.payload.as_slice())
-                .ok()
-                .map(|d| {
-                    use contract::loop_decision::Decision;
-                    let kind = match d.decision {
-                        Some(Decision::Complete(_)) => "complete",
-                        Some(Decision::Fail(_)) => "fail",
-                        Some(Decision::Wait(_)) => "wait",
-                        Some(Decision::SpawnAgent(_)) => "spawn_agent",
-                        Some(Decision::InvokeEffect(ref ie)) => ie.operation.as_str(),
-                        Some(Decision::RequestApproval(_)) => "request_approval",
-                        None => "empty",
-                    };
-                    json!({
-                        "kind": kind,
-                        "decision_id": d.decision_id,
-                        "turn_id": d.turn_id,
-                        "step_sequence": d.step_sequence,
+            // Only accepted decisions carry a LoopDecision payload —
+            // other event types can decode to a misleading shape.
+            let decoded = if e.event_type == "LoopDecisionAccepted" {
+                contract::LoopDecision::decode(e.payload.as_slice())
+                    .ok()
+                    .map(|d| {
+                        use contract::loop_decision::Decision;
+                        let kind = match d.decision {
+                            Some(Decision::Complete(_)) => "complete",
+                            Some(Decision::Fail(_)) => "fail",
+                            Some(Decision::Wait(_)) => "wait",
+                            Some(Decision::SpawnAgent(_)) => "spawn_agent",
+                            Some(Decision::InvokeEffect(ref ie)) => ie.operation.as_str(),
+                            Some(Decision::RequestApproval(_)) => "request_approval",
+                            None => "empty",
+                        };
+                        json!({
+                            "kind": kind,
+                            "decision_id": d.decision_id,
+                            "turn_id": d.turn_id,
+                            "step_sequence": d.step_sequence,
+                        })
                     })
-                });
+            } else {
+                None
+            };
             let mut j = event_json(e);
             if let Some(d) = decoded {
                 j["decision"] = d;
@@ -613,10 +619,11 @@ async fn replay_cmd(daemon: &mut Daemon, flags: &Flags) -> Result<Value, CliErro
         if (n as u32) < page {
             break;
         }
+        // `from_sequence` is exclusive: resume AT the last row read.
         from = r
             .events
             .last()
-            .map(|e| e.sequence + 1)
+            .map(|e| e.sequence)
             .unwrap_or(from + page as u64);
     }
     Ok(json!({

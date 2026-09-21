@@ -95,6 +95,30 @@ pub struct AdapterBundle {
     pub bundle_digest: String,
     /// Kernel isolation the bundle's manifest requests at spawn.
     pub isolation: spawn::Isolation,
+    /// Manifest `runtime.type` — `process` (entrypoint is an executable)
+    /// or `wasm` (entrypoint is a `.wasm` module run by the wasm host).
+    pub runtime_type: String,
+}
+
+/// Resolves what actually spawns for a bundle: a `wasm` bundle's module
+/// runs inside `agentos-wasm-host` with WASI stdio mapped onto the IPC
+/// socketpair (`stdout_ipc`); a `process` bundle execs its entrypoint.
+fn spawn_target(
+    bundle: &AdapterBundle,
+    entrypoint: std::path::PathBuf,
+) -> errors::Result<(std::path::PathBuf, Vec<String>, bool)> {
+    if bundle.runtime_type == "wasm" {
+        let host = adapter_registry::wasm_host_binary().ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::FailedPrecondition,
+                RetryClass::Never,
+                "wasm bundle requires the agentos-wasm-host binary (set AGENTOS_WASM_HOST)",
+            )
+        })?;
+        Ok((host, vec![entrypoint.to_string_lossy().into_owned()], true))
+    } else {
+        Ok((entrypoint, Vec::new(), false))
+    }
 }
 
 /// Shared dependencies of the run driver.
@@ -721,6 +745,11 @@ impl RunWorker {
                 settled.remove(0);
                 events = serde_json::to_vec(&settled).unwrap_or_default();
             }
+            // A cap below 2 bytes can't even hold `[]` — emit the empty
+            // payload (0 bytes) so the configured bound always holds.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                events = Vec::new();
+            }
             (state, events)
         };
         let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
@@ -1216,6 +1245,7 @@ impl RunWorker {
             }
         }
         let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());
+        let (executable, argv, ipc) = spawn_target(&bundle, verified.entrypoint)?;
         let mut child = spawn::spawn(&SpawnSpec {
             adapter_id: adapter_uuid,
             adapter_version: version.clone(),
@@ -1224,11 +1254,12 @@ impl RunWorker {
             daemon_instance_id: self.deps.daemon_instance,
             daemon_fencing_epoch: self.deps.epoch.epoch(),
             protocol_version: 1,
-            executable: verified.entrypoint,
-            argv: Vec::new(),
+            executable,
+            argv,
             env,
             cwd: None,
             isolation: bundle.isolation,
+            stdout_ipc: ipc,
         })?;
         child.drain_output();
         if let Err(error) = self
@@ -1342,29 +1373,35 @@ impl RunWorker {
         if let Some(limits) = self.context_limits.get(&env_id) {
             return Ok(limits.clone());
         }
+        // The environment is frozen state: a missing env/generation row
+        // or an unparseable document is durable corruption — stop the run
+        // rather than silently widening the context budget to defaults.
         let limits = {
             let mut txn = self.read_txn().await?;
-            let env = txn.environments().get_environment(env_id).await?;
-            match env {
-                Some(env) => {
-                    match txn
-                        .config()
-                        .get_generation(env.config_generation_id)
-                        .await?
-                    {
-                        Some(generation) => std::str::from_utf8(&generation.document)
-                            .ok()
-                            .and_then(|s| {
-                                config_engine::model::parse_document(s)
-                                    .ok()
-                                    .map(|d| d.limits.context)
-                            })
-                            .unwrap_or_default(),
-                        None => config_engine::schema::ContextLimits::default(),
-                    }
-                }
-                None => config_engine::schema::ContextLimits::default(),
-            }
+            let env = txn
+                .environments()
+                .get_environment(env_id)
+                .await?
+                .ok_or_else(|| {
+                    worker_error(ErrorCode::Internal, "frozen environment row is missing")
+                })?;
+            let generation = txn
+                .config()
+                .get_generation(env.config_generation_id)
+                .await?
+                .ok_or_else(|| {
+                    worker_error(
+                        ErrorCode::Internal,
+                        "frozen config generation row is missing",
+                    )
+                })?;
+            std::str::from_utf8(&generation.document)
+                .ok()
+                .and_then(|s| config_engine::model::parse_document(s).ok())
+                .map(|d| d.limits.context)
+                .ok_or_else(|| {
+                    worker_error(ErrorCode::Internal, "frozen config document is unreadable")
+                })?
         };
         self.context_limits.insert(env_id, limits.clone());
         Ok(limits)
@@ -1467,6 +1504,7 @@ impl RunWorker {
                 env.push((key.to_owned(), value));
             }
         }
+        let (executable, argv, ipc) = spawn_target(&bundle, verified.entrypoint)?;
         let mut child = spawn::spawn(&SpawnSpec {
             adapter_id: adapter_uuid,
             adapter_version: version.clone(),
@@ -1475,11 +1513,12 @@ impl RunWorker {
             daemon_instance_id: self.deps.daemon_instance,
             daemon_fencing_epoch: self.deps.epoch.epoch(),
             protocol_version: 1,
-            executable: verified.entrypoint,
-            argv: Vec::new(),
+            executable,
+            argv,
             env,
             cwd: None,
             isolation: bundle.isolation,
+            stdout_ipc: ipc,
         })?;
         child.drain_output();
         if let Err(error) = self

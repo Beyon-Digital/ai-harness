@@ -509,6 +509,7 @@ async fn register_bundle(
             }
             _ => process_supervisor::spawn::Isolation::None,
         },
+        runtime_type: manifest.runtime.runtime_type.clone(),
     })
 }
 

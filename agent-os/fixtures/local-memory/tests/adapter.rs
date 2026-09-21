@@ -51,6 +51,7 @@ fn rig() -> Rig {
             ],
             cwd: None,
             isolation: process_supervisor::spawn::Isolation::None,
+            stdout_ipc: false,
         },
         _dir: dir,
     }
