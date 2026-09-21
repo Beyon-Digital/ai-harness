@@ -137,10 +137,25 @@ document.querySelector("#runs-table tbody").addEventListener("click", async (ev)
   if (link) selectRun(link.textContent.trim());
 });
 
+function decodeDataUri(ref) {
+  try {
+    const bytes = Uint8Array.from(
+      atob(ref.slice("data:text/plain;base64,".length)),
+      (c) => c.charCodeAt(0),
+    );
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 function renderRunDetail(r) {
   const box = $("#run-detail");
-  const out = r.output_ref?.startsWith("data:text/plain;base64,")
-      ? `<div class="kv"><b>output</b><div class="answer">${esc(atob(r.output_ref.slice("data:text/plain;base64,".length)))}</div></div>`
+  const decoded = r.output_ref?.startsWith("data:text/plain;base64,")
+    ? decodeDataUri(r.output_ref)
+    : null;
+  const out = decoded !== null
+      ? `<div class="kv"><b>output</b><div class="answer">${esc(decoded)}</div></div>`
       : `<div class="kv"><b>output</b><code>${esc(r.output_ref || "—")}</code></div>`;
   box.innerHTML = `
     <div class="kv"><b>run</b><code>${esc(r.run_id)}</code></div>

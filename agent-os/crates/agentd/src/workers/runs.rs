@@ -74,6 +74,11 @@ pub const CMD_RUN_CANCEL_COMPLETE: &str = "agentos.internal.RunCancelComplete";
 
 const CLAIM_TTL_MS: u64 = 30_000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Loop `next` calls may wait on a model round-trip; keep the deadline
+/// comfortably above the adapters' HTTP timeout (default 55s).
+const LOOP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Model-loop approvals expire this long after the daemon stamps them.
+const APPROVAL_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Adapter bundle a run's frozen environment can spawn from.
 #[derive(Clone, Debug)]
@@ -204,7 +209,8 @@ impl RunWorker {
                         .poll
                         .saturating_mul(1u32 << fails.saturating_sub(1).min(7))
                         .min(Duration::from_secs(5));
-                    self.retry_after.insert(row.run_id, (fails, now + backoff));
+                    self.retry_after
+                        .insert(row.run_id, (fails, Instant::now() + backoff));
                     tracing::warn!(run = %row.run_id, %fails, error = %error, "run step failed");
                 }
             }
@@ -655,7 +661,7 @@ impl RunWorker {
             row.run_id,
             state,
             Vec::new(),
-            CALL_TIMEOUT,
+            LOOP_CALL_TIMEOUT,
             self.deps.clock.now_unix_ms(),
         )
         .await;
@@ -716,9 +722,19 @@ impl RunWorker {
                 .await
             }
             DecisionInstruction::RequestApproval { approval_draft } => {
+                let mut draft = contract::CreateApprovalRequest::decode(approval_draft.as_slice())
+                    .map_err(|_| {
+                        worker_error(
+                            ErrorCode::InvalidArgument,
+                            "approval draft is not a CreateApprovalRequest",
+                        )
+                    })?;
+                if draft.expires_at_ms == 0 {
+                    draft.expires_at_ms = self.deps.clock.now_unix_ms() + APPROVAL_TTL_MS;
+                }
                 self.submit(
                     approvals::CMD_CREATE_APPROVAL_REQUEST,
-                    approval_draft,
+                    draft.encode_to_vec(),
                     format!("approval.{}.{}", row.run_id, row.step_sequence),
                 )
                 .await
@@ -1297,6 +1313,7 @@ impl RunWorker {
             "OPENROUTER_BASE_URL",
             "OPENROUTER_SITE",
             "OPENROUTER_APP_NAME",
+            "OPENROUTER_TIMEOUT_MS",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()

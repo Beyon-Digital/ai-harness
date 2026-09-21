@@ -17,7 +17,9 @@
 //! Env:
 //! - `OPENROUTER_API_KEY` (required) — passed through from the daemon env.
 //! - `OPENROUTER_MODEL` — chat model id (default `openrouter/free`).
-//! - `OPENROUTER_BASE_URL` — default `https://openrouter.ai/api/v1`.
+//! - `OPENROUTER_BASE_URL` — default `https://openrouter.ai/api/v1`; must be
+//!   an `https://` URL on `openrouter.ai` (or a subdomain) so the API key is
+//!   only sent to OpenRouter. `OPENROUTER_ALLOW_ANY_BASE_URL=1` opts out.
 //! - `OPENROUTER_SITE`, `OPENROUTER_APP_NAME` — optional referer headers.
 //! - `OPENROUTER_TIMEOUT_MS` — HTTP timeout (default 55000).
 //!
@@ -93,13 +95,27 @@ fn run() -> std::io::Result<()> {
     )
     .map_err(err)?;
 
+    let base_url = env("OPENROUTER_BASE_URL")
+        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned())
+        .trim_end_matches('/')
+        .to_owned();
+    if env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() != Ok("1") {
+        let host = base_url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|h| h.split(':').next())
+            .unwrap_or_default();
+        if !(host == "openrouter.ai" || host.ends_with(".openrouter.ai")) {
+            return Err(err_msg(
+                "OPENROUTER_BASE_URL must be https on openrouter.ai \
+                 (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)",
+            ));
+        }
+    }
     let config = LlmConfig {
         api_key: env("OPENROUTER_API_KEY").unwrap_or_default(),
         model: env("OPENROUTER_MODEL").unwrap_or_else(|_| "openrouter/free".to_owned()),
-        base_url: env("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned())
-            .trim_end_matches('/')
-            .to_owned(),
+        base_url,
         site: env("OPENROUTER_SITE").ok(),
         app_name: env("OPENROUTER_APP_NAME").ok(),
         timeout: env("OPENROUTER_TIMEOUT_MS")
@@ -326,10 +342,13 @@ fn parse_model_decision(content: &str, run_id: &str) -> loop_decision::Decision 
 }
 
 fn data_uri(text: &str) -> String {
-    let capped: String = text.chars().take(MAX_OUTPUT_BYTES).collect();
+    let mut end = MAX_OUTPUT_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
     format!(
         "data:text/plain;base64,{}",
-        base64_encode(capped.as_bytes())
+        base64_encode(&text.as_bytes()[..end])
     )
 }
 

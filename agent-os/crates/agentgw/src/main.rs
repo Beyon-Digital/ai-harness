@@ -17,8 +17,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, RwLock};
 
 use axum::Router;
-use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{DefaultBodyLimit, Path as AxPath, Query, State};
+use axum::http::{Request, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         .init();
     let mut socket = PathBuf::from("/tmp/agentd/control.sock");
     let mut listen = "127.0.0.1:7740".to_owned();
+    let mut auth_token = std::env::var("AGENTGW_TOKEN").ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -62,8 +64,19 @@ fn main() -> ExitCode {
                 listen = arg[9..].to_owned();
                 i += 1;
             }
+            "--auth-token" if i + 1 < args.len() => {
+                auth_token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            arg if arg.starts_with("--auth-token=") => {
+                auth_token = Some(arg[13..].to_owned());
+                i += 1;
+            }
             "-h" | "--help" => {
-                println!("agentgw --socket <control.sock> [--listen 127.0.0.1:7740]");
+                println!(
+                    "agentgw --socket <control.sock> [--listen 127.0.0.1:7740] \
+                     [--auth-token T]\n  non-loopback --listen requires AGENTGW_TOKEN or --auth-token"
+                );
                 return ExitCode::SUCCESS;
             }
             other => {
@@ -72,7 +85,11 @@ fn main() -> ExitCode {
             }
         }
     }
-    match serve(socket, listen) {
+    if !is_loopback_addr(&listen) && auth_token.is_none() {
+        eprintln!("agentgw: refusing non-loopback --listen without AGENTGW_TOKEN/--auth-token");
+        return ExitCode::FAILURE;
+    }
+    match serve(socket, listen, auth_token) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("agentgw: {e}");
@@ -81,8 +98,20 @@ fn main() -> ExitCode {
     }
 }
 
+fn is_loopback_addr(listen: &str) -> bool {
+    let host = listen.rsplit(':').next_back().unwrap_or(listen);
+    let host = listen
+        .rsplit_once(':')
+        .map(|(h, _)| h.trim_matches(['[', ']']))
+        .unwrap_or(host);
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn serve(socket: PathBuf, listen: String) -> std::io::Result<()> {
+async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> std::io::Result<()> {
     let daemon = agentctl::connect(&socket)
         .await
         .map_err(|e| std::io::Error::other(format!("{e}")))?;
@@ -92,6 +121,7 @@ async fn serve(socket: PathBuf, listen: String) -> std::io::Result<()> {
         daemon,
         index,
         index_path,
+        auth_token,
     });
 
     let app = Router::new()
@@ -114,6 +144,10 @@ async fn serve(socket: PathBuf, listen: String) -> std::io::Result<()> {
         .route("/api/approvals/respond", post(api_respond_approval))
         .route("/api/events/read", get(api_events_read))
         .route("/api/events/subscribe", get(api_events_subscribe))
+        // 1 MiB JSON bodies are ample for specs/run payloads here.
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
@@ -125,6 +159,7 @@ struct AppState {
     daemon: Daemon,
     index: RwLock<Index>,
     index_path: PathBuf,
+    auth_token: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -164,20 +199,69 @@ fn load_index(path: &Path) -> RwLock<Index> {
     RwLock::new(index)
 }
 
-fn persist_index(state: &AppState) {
-    if let Ok(index) = state.index.read()
-        && let Ok(bytes) = serde_json::to_vec_pretty(&*index)
-    {
-        let _ = std::fs::write(&state.index_path, bytes);
-    }
-}
-
+/// Persist happens while the write lock is held so on-disk order
+/// matches the mutation order — a racing writer can't overwrite a
+/// newer index with an older snapshot.
 fn remember<F: FnOnce(&mut Index)>(state: &AppState, f: F) {
     if let Ok(mut index) = state.index.write() {
         f(&mut index);
-        drop(index);
-        persist_index(state);
+        if let Ok(bytes) = serde_json::to_vec_pretty(&*index) {
+            let _ = std::fs::write(&state.index_path, bytes);
+        }
     }
+}
+
+const MAX_INDEX_ENTRIES: usize = 10_000;
+
+fn index_push<T>(v: &mut Vec<T>, item: T) {
+    if v.len() < MAX_INDEX_ENTRIES {
+        v.push(item);
+    }
+}
+
+/// Bearer-token check; enforced only when a token was configured.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &state.auth_token {
+        let ok = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v: &str| v == format!("Bearer {expected}"));
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Minimal browser-isolation headers for the privileged dashboard.
+async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        "nosniff".parse().expect("static"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, "DENY".parse().expect("static"));
+    h.insert(
+        header::REFERRER_POLICY,
+        "no-referrer".parse().expect("static"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; style-src 'self'; connect-src 'self'"
+            .parse()
+            .expect("static"),
+    );
+    res
 }
 
 fn gw_err(e: impl std::fmt::Display) -> Response {
@@ -214,7 +298,7 @@ fn envelope(command_type: &str, payload: Vec<u8>, key: &str) -> contract::Comman
         principal_id: String::new(),
         actor_id: ActorId::new(&ids).to_string(),
         device_id: String::new(),
-        request_digest: sha256_hex(format!("{command_type}\n{key}").as_bytes()),
+        request_digest: sha256_hex(&[command_type.as_bytes(), b"\n", &payload].concat()),
         correlation_id: String::new(),
         causation_id: String::new(),
         deadline_unix_ms: 0,
@@ -334,7 +418,7 @@ async fn api_create_session(
         .map(|b| b.to_vec())
         .unwrap_or_default();
     let session_id = id_or_fresh(&body, "session_id");
-    let key = format!("session.{}", sha256_hex(&metadata));
+    let key = format!("session.{}", session_id);
     match submit(
         &state.daemon,
         "agentos.spec.v1.CreateSession",
@@ -349,7 +433,7 @@ async fn api_create_session(
         Ok(v) => {
             remember(&state, |i| {
                 if !i.sessions.contains(&session_id) {
-                    i.sessions.push(session_id.clone());
+                    index_push(&mut i.sessions, session_id.clone());
                 }
             });
             let mut v = v;
@@ -388,7 +472,7 @@ async fn api_put_spec(State(state): State<Arc<AppState>>, Json(body): Json<Value
             body_bytes: spec_body.clone(),
             body_digest: sha256_hex(&spec_body),
         },
-        &format!("spec.{id}.{version}"),
+        &format!("spec.{id}.{version}.{}", sha256_hex(&spec_body)),
     )
     .await
     {
@@ -404,11 +488,14 @@ async fn api_put_spec(State(state): State<Arc<AppState>>, Json(body): Json<Value
                     .iter()
                     .any(|s| s.agent_spec_id == id && s.version == version)
                 {
-                    i.specs.push(SpecRef {
-                        agent_spec_id: id.clone(),
-                        version: version.clone(),
-                        digest,
-                    });
+                    index_push(
+                        &mut i.specs,
+                        SpecRef {
+                            agent_spec_id: id.clone(),
+                            version: version.clone(),
+                            digest,
+                        },
+                    );
                 }
             });
             Json(v).into_response()
@@ -451,11 +538,7 @@ async fn api_create_run(State(state): State<Arc<AppState>>, Json(body): Json<Val
                 .collect()
         })
         .unwrap_or_default();
-    let key = format!(
-        "run.{}.{}",
-        session_id,
-        sha256_hex(body.to_string().as_bytes())
-    );
+    let key = format!("run.{run_id}.{task_id}");
     match submit(
         &state.daemon,
         "agentos.spec.v1.CreateTaskRun",
@@ -484,17 +567,23 @@ async fn api_create_run(State(state): State<Arc<AppState>>, Json(body): Json<Val
         Ok(v) => {
             remember(&state, |i| {
                 if !i.tasks.iter().any(|t| t.task_id == task_id) {
-                    i.tasks.push(TaskRef {
-                        task_id: task_id.clone(),
-                        session_id: session_id.clone(),
-                    });
+                    index_push(
+                        &mut i.tasks,
+                        TaskRef {
+                            task_id: task_id.clone(),
+                            session_id: session_id.clone(),
+                        },
+                    );
                 }
                 if !i.runs.iter().any(|r| r.run_id == run_id) {
-                    i.runs.push(RunRef {
-                        run_id: run_id.clone(),
-                        task_id: task_id.clone(),
-                        session_id: session_id.clone(),
-                    });
+                    index_push(
+                        &mut i.runs,
+                        RunRef {
+                            run_id: run_id.clone(),
+                            task_id: task_id.clone(),
+                            session_id: session_id.clone(),
+                        },
+                    );
                 }
             });
             let mut v = v;
@@ -525,14 +614,14 @@ fn run_json(run: &contract::AgentRun) -> Value {
 fn run_state_name(state: i32) -> &'static str {
     match state {
         0 => "unspecified",
-        1 => "queued",
-        2 => "leased",
-        3 => "starting",
-        4 => "running",
-        5 => "waiting_effect",
+        1 => "created",
+        2 => "ready",
+        3 => "running",
+        4 => "waiting_tool",
+        5 => "waiting_child",
         6 => "waiting_human",
-        7 => "waiting_dependency",
-        8 => "waiting_timer",
+        7 => "suspended",
+        8 => "cancelling",
         9 => "completed",
         10 => "failed",
         11 => "cancelled",
@@ -821,8 +910,9 @@ async fn api_events_read(
             .unwrap_or(0),
         limit: params
             .get("limit")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(200),
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(200)
+            .min(2_000),
     };
     match state.daemon.events.clone().read_stream(request).await {
         Ok(r) => {
@@ -923,7 +1013,19 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
         }
         t
     };
-    let bytes: Vec<u8> = s.bytes().filter(|b| *b != b'=').collect();
+    // Strict validation: '=' only allowed as 1-2 trailing pad chars.
+    let padding = s.bytes().rev().take_while(|b| *b == b'=').count();
+    if padding > 2 {
+        return None;
+    }
+    let body_len = s.len() - padding;
+    if s.as_bytes()[..body_len].contains(&b'=') {
+        return None;
+    }
+    if !(body_len + padding).is_multiple_of(4) {
+        return None;
+    }
+    let bytes = &s.as_bytes()[..body_len];
     if bytes.is_empty() {
         return Some(Vec::new());
     }

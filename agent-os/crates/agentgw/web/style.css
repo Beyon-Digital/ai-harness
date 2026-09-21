@@ -65,12 +65,12 @@ code.link { cursor: pointer; text-decoration: underline dotted; }
 
 .state { padding: 2px 8px; border-radius: 8px; font-size: 11px; background: #2c3340; }
 .state-completed { background: #1e4d33; color: #7be0a4; }
-.state-running, .state-leased, .state-starting { background: #1e3a5f; color: #7cc7ff; }
-.state-failed, .state-cancelled { background: #4d1e1e; color: #e07b7b; }
-.state-waiting_human, .state-waiting_effect, .state-waiting_timer, .state-waiting_dependency {
+.state-running, .state-ready { background: #1e3a5f; color: #7cc7ff; }
+.state-failed, .state-cancelled, .state-cancelling { background: #4d1e1e; color: #e07b7b; }
+.state-waiting_human, .state-waiting_tool, .state-waiting_child, .state-suspended {
   background: #4d3a1e; color: #e0c47b;
 }
-.state-queued { background: #2c3340; color: #b8c0cc; }
+.state-created { background: #2c3340; color: #b8c0cc; }
 
 .log {
   background: #0b0d11; border: 1px solid #262c38; border-radius: 6px;
