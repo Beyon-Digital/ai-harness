@@ -286,41 +286,53 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-WRK-002.md
     notes: 'Local adapter + git worktree fork pinned to parent recorded base_revision; copy-fork labeled; traversal denied.'
   WRK-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'f279d15'
+    tests: 
+      - cargo test -p workspace
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-WRK-003.md
+    notes: 'Epoch CAS lease transfer, isolated forks, git merge surfacing conflicts, capability-gated shared write.'
   SBOX-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '7c35f89'
+    tests: 
+      - cargo test -p sandbox
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-SBOX-001.md
+    notes: 'T0 local exec with env allowlist/deadline/cancel; T1+ fail closed; coordinator-gated workspace access.'
   ART-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '372e50a'
+    tests: 
+      - cargo test -p artifacts
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ART-001.md
+    notes: 'Content-addressed artifact store: atomic writes, digest verification, retention-gated delete.'
   CFG-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '3ae98b8'
+    tests: 
+      - cargo test -p config-engine
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-CFG-001.md
+    notes: 'v1 schema with deny-unknown sensitive sections, profile cycle validation, bootstrap/runtime separation.'
   CFG-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '1afca96'
+    tests: 
+      - cargo test -p config-engine
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-CFG-002.md
+    notes: 'Generation propose/validate/smoke pipeline; CAS activation; DAEMON_RESTART_REQUIRED on service rebinding; rollback.'
   CFG-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '9ed5c82'
+    tests: 
+      - cargo test -p runtime --test resolved_environment
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-CFG-003.md
+    notes: 'Environment resolution freezes exact adapter bindings per run; immutable after creation.'
   LOOP-001:
     status: done
     commit: 'c273829'
@@ -330,11 +342,13 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-LOOP-001.md
     notes: 'Scripted deterministic loop fixture echoing fenced step fields; no spawn/privileged capability.'
   LOOP-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '0eb0497'
+    tests: 
+      - cargo test -p runtime --test loop_decision
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-LOOP-002.md
+    notes: 'Durable fenced turns; idempotent decision accept; stale rejection; loop_epoch restart bump.'
   API-001:
     status: done
     commit: '8022973'
