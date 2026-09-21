@@ -19,7 +19,8 @@ use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 
 use crate::framing::{read_frame, write_frame};
-use crate::handshake::{SessionPhase, accept_inbound};
+pub use crate::handshake::SessionPhase;
+use crate::handshake::accept_inbound;
 
 /// Failure modes of `dispatch_call` that are distinct from `KernelError`:
 /// a call that was cancelled delivers a `Cancelled` marker so the caller

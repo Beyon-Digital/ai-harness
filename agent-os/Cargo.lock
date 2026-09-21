@@ -45,6 +45,7 @@ dependencies = [
 name = "agentd"
 version = "0.1.0"
 dependencies = [
+ "adapter-protocol",
  "command-coordinator",
  "control-api",
  "domain",
@@ -52,6 +53,8 @@ dependencies = [
  "events",
  "kernel-store",
  "observability",
+ "process-supervisor",
+ "prost",
  "runtime",
  "scheduler",
  "sha2",
@@ -105,6 +108,12 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -280,8 +289,18 @@ dependencies = [
 name = "config-engine"
 version = "0.1.0"
 dependencies = [
+ "adapter-registry",
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -1855,8 +1874,10 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "adapter-registry",
  "async-trait",
  "command-coordinator",
+ "config-engine",
  "domain",
  "effects",
  "errors",
@@ -1869,6 +1890,8 @@ dependencies = [
  "prost",
  "run-graph",
  "scheduler",
+ "serde_json",
+ "sha2",
  "tempfile",
  "testkit",
  "tokio",
@@ -1915,8 +1938,18 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "sandbox"
 version = "0.1.0"
 dependencies = [
+ "adapter-registry",
  "domain",
  "errors",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "testkit",
+ "tokio",
+ "workspace",
 ]
 
 [[package]]
@@ -2085,6 +2118,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "signature"
@@ -2485,6 +2528,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -2994,7 +3038,6 @@ dependencies = [
  "errors",
  "kernel-store",
  "kernel-store-sqlite",
- "sandbox",
  "tempfile",
  "testkit",
  "tokio",
