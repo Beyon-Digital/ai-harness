@@ -65,6 +65,10 @@ pub const LOOP_PORT_ID: &str = "agent_loop";
 /// Internal command type a loop `Wait` timer fires into.
 pub const CMD_RUN_WAIT_EXPIRED: &str = "agentos.internal.RunWaitExpired";
 
+/// Internal command that terminalizes a `Cancelling` run once its in-flight
+/// adapter work has been stopped (worker-owned; not in the public catalog).
+pub const CMD_RUN_CANCEL_COMPLETE: &str = "agentos.internal.RunCancelComplete";
+
 const CLAIM_TTL_MS: u64 = 30_000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -189,8 +193,28 @@ impl RunWorker {
                     Ok(())
                 }
             }
+            // The in-flight work for this run is the loop child this epoch
+            // owns — terminate it, then terminalize through the internal
+            // command so the event + revision stay auditable.
+            RunState::Cancelling => self.finalize_cancel(row).await,
             _ => Ok(()),
         }
+    }
+
+    /// `Cancelling -> Cancelled`: terminate this epoch's loop child, then
+    /// finalize through the coordinator so the terminal transition + events
+    /// commit under the fencing epoch.
+    async fn finalize_cancel(&mut self, row: &kernel_store::models::RunRow) -> errors::Result<()> {
+        if let Some(handle) = self.loops.remove(&row.run_id) {
+            let _ = terminate(handle.child, Duration::from_millis(500)).await;
+        }
+        self.submit(
+            CMD_RUN_CANCEL_COMPLETE,
+            row.run_id.to_string().into_bytes(),
+            format!("cancel-complete.{}", row.run_id),
+        )
+        .await?;
+        Ok(())
     }
 
     /// `Created -> Ready` via the `BindRun` internal command.
@@ -670,6 +694,101 @@ impl CommandHandler for RunWaitExpiredHandler {
                     },
                 )
                 .await?;
+        }
+        Ok(CommandOutcome {
+            code: OutcomeCode::Ok,
+            payload: Vec::new(),
+        })
+    }
+}
+
+/// Handler for `agentos.internal.RunCancelComplete` — the worker that owns
+/// a `Cancelling` run's in-flight adapter work has stopped it, so the run
+/// terminalizes to `Cancelled` in one CAS + event commit.
+pub struct RunCancelCompleteHandler {
+    ids: Arc<dyn IdProvider>,
+}
+
+impl RunCancelCompleteHandler {
+    /// Builds the handler with the daemon's id provider for event minting.
+    pub fn new(ids: Arc<dyn IdProvider>) -> Self {
+        Self { ids }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandHandler for RunCancelCompleteHandler {
+    async fn handle(
+        &self,
+        ctx: &CommandContext,
+        txn: &mut dyn KernelTxn,
+        payload: Vec<u8>,
+    ) -> errors::Result<CommandOutcome> {
+        let text = String::from_utf8(payload).map_err(|_| {
+            worker_error(
+                ErrorCode::InvalidArgument,
+                "cancel-complete payload is not utf-8",
+            )
+        })?;
+        let run_id = RunId::from_str(&text).map_err(|_| {
+            worker_error(
+                ErrorCode::InvalidArgument,
+                "cancel-complete payload is not a run id",
+            )
+        })?;
+        let _ = ctx;
+        let run = txn
+            .runs()
+            .get(run_id)
+            .await?
+            .ok_or_else(|| worker_error(ErrorCode::NotFound, "run not found"))?;
+        if run.state.is_terminal() {
+            // Idempotent replay: a previously finalized cancel is a no-op.
+            return Ok(CommandOutcome {
+                code: OutcomeCode::Ok,
+                payload: Vec::new(),
+            });
+        }
+        if run.state != RunState::Cancelling {
+            return Err(worker_error(
+                ErrorCode::FailedPrecondition,
+                "run is not cancelling",
+            ));
+        }
+        let moved = txn
+            .runs()
+            .cas_update(
+                run_id,
+                RunCas {
+                    run_revision: run.run_revision,
+                    state: Some(RunState::Cancelling),
+                    cancellation_epoch: None,
+                },
+                RunPatch {
+                    state: Some(RunState::Cancelled),
+                    terminal_reason: Some(runtime::state::REASON_CANCELLED.to_owned()),
+                    bump_revision: true,
+                    ..RunPatch::default()
+                },
+            )
+            .await?;
+        if !moved {
+            return Err(worker_error(
+                ErrorCode::Conflict,
+                "run moved during cancel finalization",
+            ));
+        }
+        for event_type in ["RunCancelled", "RunStateChanged"] {
+            runtime::stage_catalogued(
+                txn,
+                domain::ids::EventId::new(self.ids.as_ref()),
+                event_type,
+                events::StreamKey::run(run_id),
+                run_id.to_string().into_bytes(),
+                ctx.correlation_id.clone(),
+                None,
+            )
+            .await?;
         }
         Ok(CommandOutcome {
             code: OutcomeCode::Ok,

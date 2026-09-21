@@ -145,7 +145,7 @@ async fn wait_ready(path: &std::path::Path) {
         if try_client(path).await.is_ok() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
     panic!("server never became ready at {}", path.display());
 }

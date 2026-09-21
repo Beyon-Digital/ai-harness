@@ -277,11 +277,26 @@ async fn dispatch(daemon: &mut Daemon, command: &str, flags: &Flags) -> Result<V
                         .unwrap_or_default(),
                     requested_budget: Vec::new(),
                 },
-                &format!(
-                    "run.{}.{}",
-                    flags.req("session-id")?,
-                    sha256_hex(&serde_json::to_vec(&flags.positional).unwrap_or_default())
-                ),
+                // Keyed on every supplied flag, so two distinct invocations
+                // never collide while a verbatim retry replays.
+                &format!("run.{}.{}", flags.req("session-id")?, {
+                    let mut bytes = serde_json::to_vec(&flags.positional).unwrap_or_default();
+                    bytes.extend_from_slice(flags.req("session-id")?.as_bytes());
+                    for k in [
+                        "run-id",
+                        "task-id",
+                        "parent-run-id",
+                        "agent-spec-id",
+                        "spec-version",
+                        "spec-digest",
+                    ] {
+                        if let Some(v) = flags.opt(k) {
+                            bytes.extend_from_slice(k.as_bytes());
+                            bytes.extend_from_slice(v.as_bytes());
+                        }
+                    }
+                    sha256_hex(&bytes)
+                }),
             )
             .await
         }
@@ -344,7 +359,7 @@ async fn dispatch(daemon: &mut Daemon, command: &str, flags: &Flags) -> Result<V
                     expected_run_revision: flags
                         .opt("expected-revision")
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(u64::MAX),
+                        .unwrap_or(0),
                     reason: flags.opt("reason").unwrap_or_default().to_owned(),
                 },
                 &format!("cancel.{}", flags.at(1)?),

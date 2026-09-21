@@ -40,7 +40,9 @@ use tokio::task::JoinHandle;
 use crate::lock::DaemonLock;
 use crate::recovery::run_startup_recovery;
 use crate::workers::outbox::{EpochSource, OutboxWorker};
-use crate::workers::runs::{AdapterBundle, RunWaitExpiredHandler, RunWorker, RunWorkerDeps};
+use crate::workers::runs::{
+    AdapterBundle, RunCancelCompleteHandler, RunWaitExpiredHandler, RunWorker, RunWorkerDeps,
+};
 use crate::workers::scheduler::{SchedulerWorker, SchedulerWorkerDeps};
 
 /// Boot configuration for the daemon.
@@ -78,6 +80,9 @@ pub struct Daemon {
     shutdown_tx: watch::Sender<bool>,
     workers: Vec<JoinHandle<()>>,
     server: JoinHandle<errors::Result<()>>,
+    store: Arc<SqliteKernelStore>,
+    epoch: u64,
+    ids: Arc<dyn IdProvider>,
     // Held for the daemon's lifetime: releasing it would drop the OS lock
     // that proves this process is the store's single writer.
     _lock: DaemonLock,
@@ -87,6 +92,22 @@ impl Daemon {
     /// The control socket path clients connect to.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// The composed kernel store — used by integration tests to drive
+    /// services that have no control-API verb (workspace coordinator).
+    pub fn store(&self) -> &Arc<SqliteKernelStore> {
+        &self.store
+    }
+
+    /// The fencing epoch this daemon instance holds.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The daemon's id provider.
+    pub fn ids(&self) -> Arc<dyn IdProvider> {
+        self.ids.clone()
     }
 
     /// Signals drain-first shutdown.
@@ -180,6 +201,10 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
     registry.register(
         crate::workers::runs::CMD_RUN_WAIT_EXPIRED,
         Arc::new(RunWaitExpiredHandler),
+    )?;
+    registry.register(
+        crate::workers::runs::CMD_RUN_CANCEL_COMPLETE,
+        Arc::new(RunCancelCompleteHandler::new(ids.clone())),
     )?;
 
     let coordinator = Arc::new(CommandCoordinator::new(
@@ -343,6 +368,9 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
         shutdown_tx,
         workers,
         server,
+        store,
+        epoch,
+        ids,
         _lock: lock,
     })
 }

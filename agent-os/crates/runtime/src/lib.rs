@@ -112,7 +112,7 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
 /// cannot exist as a built envelope before staging; sensitivity and retention
 /// come from the embedded catalog policy, which enforces the classification
 /// floor for the catalogue entry.
-pub(crate) async fn stage_catalogued(
+pub async fn stage_catalogued(
     txn: &mut dyn KernelTxn,
     event_id: EventId,
     event_type: &str,

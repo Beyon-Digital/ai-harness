@@ -90,6 +90,7 @@ dependencies = [
  "testkit",
  "tokio",
  "tracing",
+ "workspace",
 ]
 
 [[package]]

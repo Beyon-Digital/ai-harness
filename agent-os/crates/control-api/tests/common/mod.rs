@@ -4,7 +4,6 @@
 use sha2::Digest;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use command_coordinator::handler::{CommandHandler, CommandOutcome, CommandRegistry, OutcomeCode};
 use command_coordinator::{CommandCoordinator, FixedFence};
@@ -167,7 +166,7 @@ pub async fn wait_ready(path: &std::path::Path) {
         if path.exists() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
     panic!("socket did not appear");
 }
