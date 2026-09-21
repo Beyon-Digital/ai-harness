@@ -23,6 +23,7 @@ use crate::lock::DaemonLock;
 /// `lock` must be the live daemon singleton lock for `runtime_dir` — the
 /// socket refuses to unlink a file owned by a live endpoint, and the lock
 /// guards against a second daemon racing to steal it.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_control_api(
     runtime_dir: &Path,
     lock: &DaemonLock,
