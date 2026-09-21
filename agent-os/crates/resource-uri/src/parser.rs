@@ -85,8 +85,8 @@ impl ResourceUri {
                     return Err(invalid("secret namespace/name malformed"));
                 }
                 Ok(Self::Secret {
-                    namespace: decode_segment(ns)?.to_owned(),
-                    name: decode_segment(name)?.to_owned(),
+                    namespace: decode_token(ns)?,
+                    name: decode_token(name)?,
                 })
             }
             "sandbox" => Ok(Self::Sandbox(
@@ -205,6 +205,21 @@ fn normalize_path(raw: &str) -> errors::Result<String> {
         }
     }
     Ok(segments.join("/"))
+}
+
+/// Percent-decodes a single URI token and rejects empty / `.` / `..` /
+/// decoded separators — the same post-decode rule `normalize_path` enforces
+/// per workspace segment, applied to non-path tokens like secret names so a
+/// `%2f` or `%2e%2e` cannot smuggle structure past the grammar.
+fn decode_token(segment: &str) -> errors::Result<String> {
+    let decoded = decode_segment(segment)?;
+    match decoded.as_str() {
+        "" | "." | ".." => Err(invalid("token escapes or is empty")),
+        value if value.contains('/') || value.contains('\\') || value.contains('\0') => {
+            Err(invalid("decoded token reintroduces a separator"))
+        }
+        _ => Ok(decoded),
+    }
 }
 
 /// Strict percent-decoding: `%` must be followed by two hex digits; bytes

@@ -41,6 +41,10 @@ kernel-store-sqlite.workspace = true
 prost.workspace = true
 proptest.workspace = true
 resources.workspace = true
+secrets.workspace = true
+permissions.workspace = true
+identity.workspace = true
+resource-uri.workspace = true
 tempfile.workspace = true
 testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
