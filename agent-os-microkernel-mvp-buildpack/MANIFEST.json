@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "name": "agent-os-microkernel-mvp-buildpack",
   "file_count": 159,
   "files": [
     {
@@ -50,8 +49,8 @@
     },
     {
       "path": "TASK_STATUS.yaml",
-      "bytes": 13307,
-      "sha256": "586aa55081b06aface8b26b6fc60561a64739fcc74640c27ec9739b10823be98"
+      "bytes": 13410,
+      "sha256": "00fddb57bc249e7059b91e6dc96c9d04c36c724f5479a8264cef31142a190161"
     },
     {
       "path": "architecture/README.md",
