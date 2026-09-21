@@ -118,17 +118,31 @@ pub async fn boot_daemon_full(
     let bundle_root = runtime_dir.join("bundles");
     std::fs::create_dir_all(&bundle_root).unwrap();
     bundles.push(make_effect_bundle(&bundle_root));
-    boot(DaemonConfig {
-        runtime_dir: runtime_dir.to_path_buf(),
-        config_doc: Some(PathBuf::from(CONFIG_YAML)),
-        adapter_bundles: bundles,
-        loop_scripts,
-        effect_env,
-        poll: std::time::Duration::from_millis(10),
-        json_logs: false,
-    })
-    .await
-    .expect("daemon boot")
+    // Restart tests boot a second daemon over the same runtime dir; sqlite
+    // can still report `database is locked` while the prior daemon's file
+    // handles drain (mostly visible on macOS CI). Retry only that case.
+    let mut attempt = 0u32;
+    loop {
+        match boot(DaemonConfig {
+            runtime_dir: runtime_dir.to_path_buf(),
+            config_doc: Some(PathBuf::from(CONFIG_YAML)),
+            adapter_bundles: bundles.clone(),
+            loop_scripts: loop_scripts.clone(),
+            loop_env: HashMap::new(),
+            effect_env: effect_env.clone(),
+            poll: std::time::Duration::from_millis(10),
+            json_logs: false,
+        })
+        .await
+        {
+            Ok(daemon) => return daemon,
+            Err(e) if attempt < 40 && format!("{e:?}").contains("database is locked") => {
+                attempt += 1;
+                std::thread::park_timeout(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("daemon boot: {e:?}"),
+        }
+    }
 }
 
 /// `get-run` without panicking on not-found.

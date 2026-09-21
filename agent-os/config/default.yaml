@@ -59,6 +59,10 @@ limits:
     db_file_mode: "0600"
     runtime_dir_mode: "0700"
     control_socket_mode: "0600"
+  context:
+    max_state_bytes: 65536
+    max_fed_events: 64
+    max_fed_event_bytes: 65536
 
 observability:
   log_level: info

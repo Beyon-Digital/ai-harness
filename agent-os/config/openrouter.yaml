@@ -15,10 +15,29 @@ profiles:
     sandbox: local-process-t0
     workspace: local-workspace
     artifact_store: local-artifacts
-    # Real-LLM loop adapter (fixtures/openrouter-loop). Requires
+    # Real-LLM loop adapter (fixtures/openrouter-loop) + real-LLM effect
+    # adapter (fixtures/openrouter-effect): model calls flow through the
+    # Effect Coordinator as durable `model.chat` effects. Requires
     # OPENROUTER_API_KEY in the agentd environment.
-    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@0.1.0
-    effect_execute: 01905c5e-0000-7000-8000-e11ec7ad01ef@0.1.0
+    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@1
+    effect_execute: 01905c5e-0000-7000-8000-11a7c3d90002@1
+
+  # LLM agent + custom wasm plugin: openrouter-loop drives the agent;
+  # `effect.execute` resolves to the WASI adapter (wasm.echo) instead of
+  # a model call — proves a custom agent can run a custom wasm plugin.
+  openrouter-wasm:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@1
+    effect_execute: 01905c5e-0000-7000-8000-00000000e001@1
+
+  local-wasm:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: fixture-loop
+    effect_execute: 01905c5e-0000-7000-8000-00000000e001@1
 
 policies:
   sandbox:
@@ -61,6 +80,10 @@ limits:
     db_file_mode: "0600"
     runtime_dir_mode: "0700"
     control_socket_mode: "0600"
+  context:
+    max_state_bytes: 65536
+    max_fed_events: 64
+    max_fed_event_bytes: 65536
 
 observability:
   log_level: info

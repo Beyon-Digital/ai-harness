@@ -18,8 +18,15 @@ chmod +x "$out/$(basename "$bin")"
 
 cd "$out"
 : > bundle.lock
-find . -type f ! -name bundle.lock ! -name adapter.manifest.json -printf '%P\n' \
+# Portable across GNU/macOS: no `find -printf`, no `sha256sum` on BSD.
+if command -v sha256sum >/dev/null 2>&1; then
+  digest() { sha256sum "$1" | cut -d' ' -f1; }
+else
+  digest() { shasum -a 256 "$1" | cut -d' ' -f1; }
+fi
+find . -type f ! -name bundle.lock ! -name adapter.manifest.json \
   | LC_ALL=C sort \
   | while IFS= read -r f; do
-      printf 'sha256:%s %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
+      f="${f#./}"
+      printf 'sha256:%s %s\n' "$(digest "$f")" "$f"
     done >> bundle.lock

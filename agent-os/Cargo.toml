@@ -32,10 +32,14 @@ members = [
     "crates/scheduler",
     "crates/secrets",
     "crates/testkit",
+    "crates/wasm-host",
     "crates/workspace",
     "fixtures/agent-loop",
     "fixtures/effect-adapter",
+    "fixtures/local-memory",
+    "fixtures/openrouter-effect",
     "fixtures/openrouter-loop",
+    "fixtures/wasm-echo",
 ]
 
 [workspace.package]

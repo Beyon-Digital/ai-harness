@@ -49,7 +49,8 @@ function refreshTab(tab) {
   if (tab === "sessions") loadIndex();
   if (tab === "approvals") loadApprovals();
   if (tab === "adapters") loadAdapters();
-  if (tab === "config") loadConfig();
+  if (tab === "config") { loadConfig(); loadGenerations(); }
+  if (tab === "system") loadSystem();
 }
 
 /* ---- health ---- */
@@ -150,6 +151,21 @@ function decodeDataUri(ref) {
 }
 
 function renderRunDetail(r) {
+  // Skip the rebuild when nothing changed — re-rendering collapses
+  // expanded decision payloads on every poll. Decisions are refreshed
+  // regardless: the journal trails the run row, so the decision list can
+  // arrive a poll tick after the run reaches its terminal state.
+  const fp = [r.state, r.run_revision, r.step_sequence, r.output_ref].join("|");
+  if (state._runFp === fp) {
+    loadDecisions(r.run_id);
+    return;
+  }
+  state._runFp = fp;
+  state._decFp = null;
+  // The rebuild drops the populated env node — invalidate the cache so
+  // loadEnvironment refetches into the fresh `loading…` node instead of
+  // early-returning on the stale `runId` match.
+  state._envRun = null;
   const box = $("#run-detail");
   const decoded = r.output_ref?.startsWith("data:text/plain;base64,")
     ? decodeDataUri(r.output_ref)
@@ -163,11 +179,77 @@ function renderRunDetail(r) {
     <div class="kv"><b>session</b><code>${esc(r.session_id)}</code></div>
     <div class="kv"><b>state</b><span class="state state-${esc(r.state_name)}">${esc(r.state_name)} (${r.state})</span></div>
     <div class="kv"><b>revision</b>${r.run_revision} · <b>epoch</b> ${r.loop_epoch} · <b>step</b> ${r.step_sequence}</div>
-    ${out}`;
+    ${out}
+    <div class="kv"><b>decisions</b><div id="run-decisions"><em>loading…</em></div></div>
+    <div class="kv"><b>environment</b><div id="run-env"><em>loading…</em></div></div>`;
+  loadDecisions(r.run_id);
+  loadEnvironment(r.run_id);
+}
+
+/* Resolved run environment is frozen at run start — load once per run. */
+async function loadEnvironment(runId) {
+  if (state._envRun === runId) return;
+  try {
+    const { environment: env, bindings } = await api(
+      "/api/runs/" + encodeURIComponent(runId) + "/environment");
+    // Re-query after the await: a renderRunDetail rebuild between request
+    // and response would otherwise write to a detached node and leave the
+    // fresh `loading…` node stuck.
+    const el = $("#run-env");
+    if (!el || state.selectedRun !== runId) return;
+    state._envRun = runId;
+    const rows = [
+      ["profile env", env.environment_id],
+      ["loop adapter", `${env.agent_loop_id}@${env.agent_loop_version}`],
+      ["generation", env.config_generation_id],
+      ["model", [env.model_provider, env.model_id].filter(Boolean).join(" / ") || "—"],
+      ["workspace", env.workspace_uri || "—"],
+      ["kernel", `${env.kernel_version} · proto ${JSON.stringify(env.protocol_versions)}`],
+    ].map(([k, v]) => `<div class="env-row"><b>${esc(k)}</b><code>${esc(v)}</code></div>`).join("");
+    const binds = (bindings || []).map((b) =>
+      `<div class="env-row"><b>${esc(b.port_id)}</b><code>${esc(b.adapter_id)}@${esc(b.adapter_version)}</code></div>`).join("");
+    el.innerHTML = `<div class="env-box">${rows}${binds ? `<h4>bindings</h4>${binds}` : ""}</div>`;
+  } catch (e) {
+    const el = $("#run-env");
+    if (!el) return;
+    // A 404 means the run has no frozen environment — cache it so we stop
+    // repolling; any other failure retries on the next render.
+    if (/no resolved environment/i.test(e.message)) state._envRun = runId;
+    el.innerHTML = `<em>${esc(e.message)}</em>`;
+  }
+}
+
+async function loadDecisions(runId) {
+  const el = $("#run-decisions");
+  if (!el) return;
+  try {
+    const { decisions } = await api(
+      "/api/runs/" + encodeURIComponent(runId) + "/decisions");
+    if (state.selectedRun !== runId) return;
+    // Rewrite only on change so expanded payloads survive the poll.
+    const decFp = JSON.stringify(decisions || []);
+    if (state._decFp === decFp) return;
+    state._decFp = decFp;
+    el.innerHTML = (decisions || []).map((d) => {
+      const det = d.kind === "invoke_effect"
+        ? `<code>${esc(d.detail.operation)}</code>` +
+          (d.detail.payload
+            ? ` <details><summary>payload</summary><pre class="dec-payload">${esc(d.detail.payload)}</pre></details>`
+            : "")
+        : Object.entries(d.detail || {})
+            .map(([k, v]) => `${esc(k)}=${esc(v)}`).join(" ");
+      return `<div class="dec">step ${d.step_sequence} · <span class="badge">${esc(d.kind)}</span> ${det}</div>`;
+    }).join("") || "<em>none yet</em>";
+  } catch (e) {
+    el.innerHTML = `<em>${esc(e.message)}</em>`;
+  }
 }
 
 async function selectRun(runId) {
   state.selectedRun = runId;
+  state._runFp = null;
+  state._decFp = null;
+  state._envRun = null;
   try {
     renderRunDetail(await api("/api/runs/" + encodeURIComponent(runId)));
     $("#stream-key").value = "run/" + runId;
@@ -261,7 +343,7 @@ $("#form-create-run").addEventListener("submit", async (ev) => {
         requested_capabilities: caps,
       }),
     });
-    toast("run submitted: " + (r.command_id || "ok"));
+    toast("run submitted: " + (r.run_id || r.command_id || "ok"));
     loadIndex();
     if (r.run_id) selectRun(r.run_id);
   } catch (e) { toast(e.message, true); }
@@ -327,9 +409,10 @@ async function loadAdapters() {
     $("#adapters-table tbody").innerHTML = adapters.map((a) => `<tr>
       <td><code>${esc(a.adapter?.id || "?")}</code></td>
       <td>${esc(a.adapter?.version || "")}</td>
+      <td>${esc(a.runtime_type || "process")}</td>
       <td>${esc(a.trust_state)} · ${esc(a.conformance_state)}</td>
       <td>${(a.ports || []).map((p) => `<code>${esc(p)}</code>`).join(" ")}</td>
-    </tr>`).join("") || '<tr><td colspan="4"><em>none registered</em></td></tr>';
+    </tr>`).join("") || '<tr><td colspan="5"><em>none registered</em></td></tr>';
   } catch (e) { toast(e.message, true); }
 }
 
@@ -341,13 +424,91 @@ async function loadConfig() {
   } catch (e) { $("#config-view").textContent = e.message; }
 }
 
+async function loadGenerations() {
+  try {
+    const { generations } = await api("/api/config/generations");
+    $("#generations-table tbody").innerHTML = (generations || []).map((g) => `<tr>
+      <td><code title="${esc(g.digest)}">${esc(g.generation_id)}</code></td>
+      <td>${esc(g.validation_state)}</td>
+      <td>${esc(g.test_state)}</td>
+      <td>${fmtMs(g.created_at_ms)}</td>
+      <td>${g.active ? '<span class="badge badge-ok">active</span>' : ""}</td>
+    </tr>`).join("") || '<tr><td colspan="5"><em>no generations</em></td></tr>';
+  } catch (e) {
+    $("#generations-table tbody").innerHTML =
+      `<tr><td colspan="5"><em>${esc(e.message)}</em></td></tr>`;
+  }
+}
+
+/* ---- system / metrics ---- */
+
+const RUN_STATE_NAMES = {
+  1: "created", 2: "ready", 3: "running", 4: "waiting_tool",
+  5: "waiting_child", 6: "waiting_human", 7: "suspended", 8: "cancelling",
+  9: "completed", 10: "failed", 11: "cancelled",
+};
+const EFFECT_STATE_NAMES = {
+  1: "prepared", 2: "claimed", 3: "dispatched", 4: "acknowledged",
+  5: "committed", 6: "failed", 7: "cancelled", 8: "unknown",
+};
+
+function metricRows(list, names) {
+  return (list || []).map((r) => {
+    const s = r.state ?? r.kind ?? "—";
+    const label = names?.[s] || s;
+    return `<tr><td>${esc(label)}</td><td class="num">${r.count}</td></tr>`;
+  }).join("");
+}
+
+async function loadSystem() {
+  const el = $("#metrics-view");
+  try {
+    const m = await api("/api/metrics");
+    const counter = (k) => `<div class="kv"><b>${esc(k)}</b>${m[k] ?? "—"}</div>`;
+    el.innerHTML = `
+      <div class="columns">
+        <div class="col">
+          <h3>Runs</h3>
+          <table class="mini-table"><tbody>${metricRows(m.runs_by_state, RUN_STATE_NAMES)}</tbody></table>
+          <h3>Effects</h3>
+          <table class="mini-table"><tbody>${metricRows(m.effects_by_state, EFFECT_STATE_NAMES)}</tbody></table>
+          <h3>Approvals</h3>
+          <table class="mini-table"><tbody>${metricRows(m.approvals_by_state)}</tbody></table>
+          <h3>Timers</h3>
+          <table class="mini-table"><tbody>${metricRows(m.timers_by_state)}</tbody></table>
+        </div>
+        <div class="col">
+          <h3>Totals</h3>
+          ${counter("decisions_total")}
+          ${counter("loop_turns_total")}
+          ${counter("adapters_registered")}
+          ${counter("adapter_instances_total")}
+          ${counter("conformance_reports_total")}
+          ${counter("reservations_total")}
+          ${counter("outbox_pending")}
+          ${counter("journal_events_total")}
+          ${counter("journal_max_sequence")}
+          <div class="kv"><b>active generation</b><code>${esc(m.active_generation || "—")}</code></div>
+          <h3>Generations</h3>
+          <table class="mini-table"><tbody>${metricRows(m.generations_by_state)}</tbody></table>
+        </div>
+      </div>` +
+      (m.kernel_db_error || m.events_db_error
+        ? `<p class="err">${esc(m.kernel_db_error || m.events_db_error)}</p>`
+        : "");
+  } catch (e) {
+    el.innerHTML = `<em>${esc(e.message)}</em>`;
+  }
+}
+
 /* ---- misc wiring ---- */
 
 $("#btn-stream").addEventListener("click", startStream);
 $("#btn-stream-stop").addEventListener("click", stopStream);
 $("#btn-approvals").addEventListener("click", () => loadApprovals());
 $("#btn-adapters").addEventListener("click", loadAdapters);
-$("#btn-config").addEventListener("click", loadConfig);
+$("#btn-config").addEventListener("click", () => { loadConfig(); loadGenerations(); });
+$("#btn-metrics").addEventListener("click", loadSystem);
 $("#btn-graph").addEventListener("click", async () => {
   const id = $("#graph-task-id").value.trim();
   if (!id) return;

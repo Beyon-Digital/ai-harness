@@ -40,8 +40,8 @@ use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcom
 use domain::effect::EffectState;
 use domain::generated::contract;
 use domain::ids::{
-    ActorId, AdapterId, AdapterInstanceId, CommandId, DaemonInstanceId, IdempotencyKey,
-    PrincipalId, RunId,
+    ActorId, AdapterId, AdapterInstanceId, CommandId, DaemonInstanceId, EnvironmentId,
+    IdempotencyKey, PrincipalId, RunId,
 };
 use domain::provider::IdProvider;
 use domain::run::{RecoveryDisposition, RunState};
@@ -89,6 +89,36 @@ pub struct AdapterBundle {
     pub version: String,
     /// Bundle root on disk (manifest + lock + entrypoint).
     pub dir: PathBuf,
+    /// `sha256:` bundle digest — spawn lookup matches the full
+    /// `(id, version, digest)` identity so same-version bundles from
+    /// different dirs never collide.
+    pub bundle_digest: String,
+    /// Kernel isolation the bundle's manifest requests at spawn.
+    pub isolation: spawn::Isolation,
+    /// Manifest `runtime.type` — `process` (entrypoint is an executable)
+    /// or `wasm` (entrypoint is a `.wasm` module run by the wasm host).
+    pub runtime_type: String,
+}
+
+/// Resolves what actually spawns for a bundle: a `wasm` bundle's module
+/// runs inside `agentos-wasm-host` with WASI stdio mapped onto the IPC
+/// socketpair (`stdout_ipc`); a `process` bundle execs its entrypoint.
+fn spawn_target(
+    bundle: &AdapterBundle,
+    entrypoint: std::path::PathBuf,
+) -> errors::Result<(std::path::PathBuf, Vec<String>, bool)> {
+    if bundle.runtime_type == "wasm" {
+        let host = adapter_registry::wasm_host_binary().ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::FailedPrecondition,
+                RetryClass::Never,
+                "wasm bundle requires the agentos-wasm-host binary (set AGENTOS_WASM_HOST)",
+            )
+        })?;
+        Ok((host, vec![entrypoint.to_string_lossy().into_owned()], true))
+    } else {
+        Ok((entrypoint, Vec::new(), false))
+    }
 }
 
 /// Shared dependencies of the run driver.
@@ -113,6 +143,9 @@ pub struct RunWorkerDeps {
     pub bundles: Vec<AdapterBundle>,
     /// Per-run loop script environment (`FIXTURE_LOOP_SCRIPT`).
     pub loop_scripts: Arc<HashMap<RunId, String>>,
+    /// Extra environment injected into spawned loop-adapter processes
+    /// (e.g. `FIXTURE_LOOP_RECORD_DIR` in tests).
+    pub loop_env: HashMap<String, String>,
     /// Daemon runtime dir — hosts the fixture adapter's durable store so
     /// provider state survives a daemon restart.
     pub runtime_dir: PathBuf,
@@ -135,6 +168,9 @@ pub struct RunWorker {
     /// whose step keeps failing (e.g. a queued run missing its spec
     /// binding) backs off instead of spinning every poll.
     retry_after: HashMap<RunId, (u32, Instant)>,
+    /// `limits.context` per resolved environment — the generation doc is
+    /// immutable once activated, so one parse per env is enough.
+    context_limits: HashMap<EnvironmentId, config_engine::schema::ContextLimits>,
 }
 
 impl RunWorker {
@@ -145,6 +181,7 @@ impl RunWorker {
             poll,
             loops: HashMap::new(),
             retry_after: HashMap::new(),
+            context_limits: HashMap::new(),
         }
     }
 
@@ -478,13 +515,26 @@ impl RunWorker {
         txn: &mut dyn KernelTxn,
         row: &kernel_store::models::RunRow,
     ) -> errors::Result<EnvironmentPlan> {
+        // Resolution may only pick adapters whose exact `(id, version,
+        // digest)` identity has an on-disk bundle this daemon can spawn —
+        // a disabled/removed installed adapter's durable registration
+        // stays for audit but can never satisfy a new run's binding.
         let candidates: Vec<Candidate> = txn
             .adapters()
             .list_registrations()
             .await?
             .into_iter()
             .map(Candidate::decode)
-            .collect::<errors::Result<Vec<_>>>()?;
+            .collect::<errors::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|c| {
+                self.deps.bundles.iter().any(|b| {
+                    b.adapter_id == c.row.adapter_id.to_string()
+                        && b.version == c.row.version
+                        && b.bundle_digest == c.row.bundle_digest
+                })
+            })
+            .collect();
         let agent_loop = resolve(
             &PortRequirement {
                 port_id: LOOP_PORT_ID.to_owned(),
@@ -641,14 +691,66 @@ impl RunWorker {
             correlation_id: None,
         };
         // The opaque run-state snapshot carries the task payload so real
-        // loop adapters (LLM) can see what the run is doing.
-        let state = {
+        // loop adapters (LLM) can see what the run is doing; the
+        // new-events batch carries effect outcomes settled by the last
+        // accepted decision's step — a settled effect is eligible for
+        // exactly the turn issued right after the decision that created
+        // it, so a wait/approval resume cannot replay an old result.
+        let limits = self.context_limits_for(row).await?;
+        let (state, events) = {
             let mut txn = self.read_txn().await?;
-            txn.tasks()
+            let mut state = txn
+                .tasks()
                 .get(row.task_id)
                 .await?
                 .map(|task| task.payload)
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // Context strategy (Phase 10): the profile's generation caps
+            // how much a single turn's LoopInput may carry. State is
+            // prompt text — truncate on a UTF-8 boundary; the events batch
+            // keeps the most recent entries that fit the byte cap.
+            let cap = limits.max_state_bytes as usize;
+            if state.len() > cap {
+                let mut end = cap.min(state.len());
+                // Walk back past UTF-8 continuation bytes (0b10xxxxxx).
+                while end > 0 && state[end] & 0xC0 == 0x80 {
+                    end -= 1;
+                }
+                state.truncate(end);
+                tracing::info!(run = %run_id_str(row.run_id), cap, "loop state truncated");
+            }
+            let mut settled: Vec<serde_json::Value> = txn
+                .effects()
+                .list_by_run(row.run_id)
+                .await?
+                .iter()
+                .filter(|e| effects::is_terminal(e.state) && e.step_sequence == row.step_sequence)
+                .map(|e| {
+                    serde_json::json!({
+                        "effect_id": e.effect_id.to_string(),
+                        "operation": e.operation,
+                        "state": format!("{:?}", e.state).to_ascii_lowercase(),
+                        "result_ref": e.result_ref,
+                        "error_code": e.error_code,
+                    })
+                })
+                .collect();
+            let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
+            if drop_n > 0 {
+                tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
+                settled.drain(..drop_n);
+            }
+            let mut events = serde_json::to_vec(&settled).unwrap_or_default();
+            while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
+                settled.remove(0);
+                events = serde_json::to_vec(&settled).unwrap_or_default();
+            }
+            // A cap below 2 bytes can't even hold `[]` — emit the empty
+            // payload (0 bytes) so the configured bound always holds.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                events = Vec::new();
+            }
+            (state, events)
         };
         let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
         let outcome = loops::drive_turn(
@@ -660,7 +762,7 @@ impl RunWorker {
             &mut handle.phase,
             row.run_id,
             state,
-            Vec::new(),
+            events,
             LOOP_CALL_TIMEOUT,
             self.deps.clock.now_unix_ms(),
         )
@@ -1075,7 +1177,11 @@ impl RunWorker {
             .deps
             .bundles
             .iter()
-            .find(|bundle| bundle.adapter_id == adapter_id && bundle.version == version)
+            .find(|bundle| {
+                bundle.adapter_id == adapter_id
+                    && bundle.version == version
+                    && bundle.bundle_digest == effect.adapter_digest
+            })
             .cloned()
             .ok_or_else(|| {
                 worker_error(
@@ -1120,7 +1226,26 @@ impl RunWorker {
         if let Ok(level) = std::env::var("RUST_LOG") {
             env.push(("RUST_LOG".to_owned(), level));
         }
+        // Effect adapters that call out to providers (e.g. OpenRouter)
+        // read credentials/config from these daemon env vars; propagate
+        // only this allowlist.
+        for key in [
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_SITE",
+            "OPENROUTER_APP_NAME",
+            "OPENROUTER_TIMEOUT_MS",
+            "OPENROUTER_ALLOW_ANY_BASE_URL",
+        ] {
+            if let Ok(value) = std::env::var(key)
+                && !value.is_empty()
+            {
+                env.push((key.to_owned(), value));
+            }
+        }
         let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());
+        let (executable, argv, ipc) = spawn_target(&bundle, verified.entrypoint)?;
         let mut child = spawn::spawn(&SpawnSpec {
             adapter_id: adapter_uuid,
             adapter_version: version.clone(),
@@ -1129,10 +1254,12 @@ impl RunWorker {
             daemon_instance_id: self.deps.daemon_instance,
             daemon_fencing_epoch: self.deps.epoch.epoch(),
             protocol_version: 1,
-            executable: verified.entrypoint,
-            argv: Vec::new(),
+            executable,
+            argv,
             env,
             cwd: None,
+            isolation: bundle.isolation,
+            stdout_ipc: ipc,
         })?;
         child.drain_output();
         if let Err(error) = self
@@ -1234,6 +1361,52 @@ impl RunWorker {
         Ok(has_children && children_done)
     }
 
+    /// `limits.context` for the run's frozen environment, cached by env
+    /// id; absent env/generation yields the built-in defaults.
+    async fn context_limits_for(
+        &mut self,
+        row: &kernel_store::models::RunRow,
+    ) -> errors::Result<config_engine::schema::ContextLimits> {
+        let Some(env_id) = row.resolved_environment_id else {
+            return Ok(config_engine::schema::ContextLimits::default());
+        };
+        if let Some(limits) = self.context_limits.get(&env_id) {
+            return Ok(limits.clone());
+        }
+        // The environment is frozen state: a missing env/generation row
+        // or an unparseable document is durable corruption — stop the run
+        // rather than silently widening the context budget to defaults.
+        let limits = {
+            let mut txn = self.read_txn().await?;
+            let env = txn
+                .environments()
+                .get_environment(env_id)
+                .await?
+                .ok_or_else(|| {
+                    worker_error(ErrorCode::Internal, "frozen environment row is missing")
+                })?;
+            let generation = txn
+                .config()
+                .get_generation(env.config_generation_id)
+                .await?
+                .ok_or_else(|| {
+                    worker_error(
+                        ErrorCode::Internal,
+                        "frozen config generation row is missing",
+                    )
+                })?;
+            std::str::from_utf8(&generation.document)
+                .ok()
+                .and_then(|s| config_engine::model::parse_document(s).ok())
+                .map(|d| d.limits.context)
+                .ok_or_else(|| {
+                    worker_error(ErrorCode::Internal, "frozen config document is unreadable")
+                })?
+        };
+        self.context_limits.insert(env_id, limits.clone());
+        Ok(limits)
+    }
+
     /// Claims a run only when the live claim belongs to this worker epoch.
     fn claim_ours(&self, row: &kernel_store::models::RunRow) -> bool {
         row.claim_daemon_epoch == Some(self.deps.epoch.epoch())
@@ -1279,7 +1452,11 @@ impl RunWorker {
             .deps
             .bundles
             .iter()
-            .find(|bundle| bundle.adapter_id == adapter_id && bundle.version == version)
+            .find(|bundle| {
+                bundle.adapter_id == adapter_id
+                    && bundle.version == version
+                    && bundle.bundle_digest == digest
+            })
             .cloned()
             .ok_or_else(|| {
                 worker_error(
@@ -1302,6 +1479,9 @@ impl RunWorker {
             ("AGENTOS_ADAPTER_ID".to_owned(), adapter_id.clone()),
             ("AGENTOS_ADAPTER_VERSION".to_owned(), version.clone()),
         ];
+        for (key, value) in &self.deps.loop_env {
+            env.push((key.clone(), value.clone()));
+        }
         if let Ok(level) = std::env::var("RUST_LOG") {
             env.push(("RUST_LOG".to_owned(), level));
         }
@@ -1314,6 +1494,9 @@ impl RunWorker {
             "OPENROUTER_SITE",
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
+            "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // Test/debug knob: the fixture loop records each LoopInput.
+            "FIXTURE_LOOP_RECORD_DIR",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1321,6 +1504,7 @@ impl RunWorker {
                 env.push((key.to_owned(), value));
             }
         }
+        let (executable, argv, ipc) = spawn_target(&bundle, verified.entrypoint)?;
         let mut child = spawn::spawn(&SpawnSpec {
             adapter_id: adapter_uuid,
             adapter_version: version.clone(),
@@ -1329,10 +1513,12 @@ impl RunWorker {
             daemon_instance_id: self.deps.daemon_instance,
             daemon_fencing_epoch: self.deps.epoch.epoch(),
             protocol_version: 1,
-            executable: verified.entrypoint,
-            argv: Vec::new(),
+            executable,
+            argv,
             env,
             cwd: None,
+            isolation: bundle.isolation,
+            stdout_ipc: ipc,
         })?;
         child.drain_output();
         if let Err(error) = self

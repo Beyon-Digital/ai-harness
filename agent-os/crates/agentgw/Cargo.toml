@@ -12,9 +12,11 @@ control-api.workspace = true
 domain.workspace = true
 errors.workspace = true
 prost.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
@@ -24,6 +26,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 ureq = { version = "3", features = ["json"] }
 

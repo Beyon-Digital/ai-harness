@@ -34,6 +34,8 @@ fn spec(program: &str, script: &str) -> SpawnSpec {
         argv: vec!["-c".to_owned(), script.to_owned()],
         env: vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())],
         cwd: None,
+        isolation: process_supervisor::spawn::Isolation::None,
+        stdout_ipc: false,
     }
 }
 
@@ -49,6 +51,59 @@ async fn private_ipc_channel_carries_bytes_both_ways() {
     let mut buf = [0u8; 4];
     child.ipc().read_exact(&mut buf).expect("echo");
     assert_eq!(&buf, b"ping");
+    let _ = terminate(child, Duration::from_millis(500)).await;
+}
+
+/// T1 sandbox (Linux): a `user-ns` spawn must land in a fresh userns —
+/// verified by the child's own uid=0-in-userns view — and keep the IPC
+/// channel on fd 0. On hosts where userns is unavailable (macOS, or a
+/// sysctl-disabled kernel), spawn fails closed rather than degrading.
+#[tokio::test]
+async fn user_namespace_spawn_keeps_ipc_channel() {
+    let mut spec = spec("/bin/sh", "id -u >&2; exec 1>&0; cat");
+    spec.isolation = process_supervisor::spawn::Isolation::UserNamespace { network: true };
+    let mut child = match spawn(&spec) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("userns unavailable on this host, skipping: {e}");
+            return;
+        }
+    };
+    child
+        .ipc()
+        .write_all(b"ping")
+        .and_then(|()| child.ipc().flush())
+        .expect("write");
+    let mut buf = [0u8; 4];
+    child.ipc().read_exact(&mut buf).expect("echo");
+    assert_eq!(&buf, b"ping");
+    // In a fresh userns the child maps to root — `id -u` on stderr is 0.
+    if let Some(stderr) = child.stderr.as_mut() {
+        use std::io::Read;
+        let mut out = [0u8; 8];
+        let n = stderr.read(&mut out).expect("id output");
+        assert_eq!(&out[..n], b"0\n", "userns child should see uid 0");
+    }
+    let _ = terminate(child, Duration::from_millis(500)).await;
+}
+
+/// `stdout_ipc` (wasm-host mode): the socketpair maps onto BOTH the
+/// child's stdin and stdout — one descriptor pair carries the whole
+/// protocol. Verify a `cat` child echoes over that shared channel.
+#[tokio::test]
+async fn stdout_ipc_shares_the_socketpair_channel() {
+    let mut spec = spec("/bin/sh", "cat");
+    spec.stdout_ipc = true;
+    let mut child = spawn(&spec).expect("spawn");
+    assert!(child.stdout.is_none(), "stdout_ipc means no capture pipe");
+    child
+        .ipc()
+        .write_all(b"pong")
+        .and_then(|()| child.ipc().flush())
+        .expect("write");
+    let mut buf = [0u8; 4];
+    child.ipc().read_exact(&mut buf).expect("echo on stdout");
+    assert_eq!(&buf, b"pong");
     let _ = terminate(child, Duration::from_millis(500)).await;
 }
 
@@ -225,6 +280,8 @@ async fn instance_lifecycle_is_durable_in_the_store() {
         argv: vec!["-c".to_owned(), "exit 0".to_owned()],
         env: vec![],
         cwd: None,
+        isolation: process_supervisor::spawn::Isolation::None,
+        stdout_ipc: false,
     };
     let mut child = spawn(&spec).expect("spawn");
     let mut txn = store

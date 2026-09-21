@@ -1,0 +1,19 @@
+[package]
+name = "local-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+adapter-protocol.workspace = true
+domain.workspace = true
+errors.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+process-supervisor.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

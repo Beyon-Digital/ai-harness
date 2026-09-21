@@ -111,7 +111,7 @@
     {
       "path": "contracts/contract-lock.sha256",
       "bytes": 2954,
-      "sha256": "3f04bce6ab35db71e87ac8f2fcfe05e78d0185a9787ddb1536845f2cefadf74a"
+      "sha256": "d61864ba10b6303b62a74aaa95fdd8e7a62d0d819287d7cd5af01f0f026a43a9"
     },
     {
       "path": "contracts/control-api/commands.proto",
@@ -155,8 +155,8 @@
     },
     {
       "path": "contracts/manifests/extension.schema.json",
-      "bytes": 1501,
-      "sha256": "819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea"
+      "bytes": 1639,
+      "sha256": "ba07a94d9c00a93f6cddefbab8e5aa53b2a217618840a742604c82d90ab0edc8"
     },
     {
       "path": "contracts/ports/agent_loop.proto",

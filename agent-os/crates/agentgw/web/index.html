@@ -16,6 +16,7 @@
     <button class="tab" data-tab="approvals">Approvals <span id="pending-count" class="pill"></span></button>
     <button class="tab" data-tab="adapters">Adapters</button>
     <button class="tab" data-tab="config">Config</button>
+    <button class="tab" data-tab="system">System</button>
   </nav>
 </header>
 
@@ -108,14 +109,25 @@
   <section id="tab-adapters" class="panel">
     <button id="btn-adapters" class="card row">Refresh</button>
     <table id="adapters-table">
-      <thead><tr><th>Adapter</th><th>Version</th><th>Status</th><th>Ports</th></tr></thead>
+      <thead><tr><th>Adapter</th><th>Version</th><th>Runtime</th><th>Status</th><th>Ports</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
 
   <section id="tab-config" class="panel">
     <button id="btn-config" class="card row">Refresh</button>
+    <h2>Generation pipeline</h2>
+    <table id="generations-table">
+      <thead><tr><th>Generation</th><th>Validation</th><th>Test</th><th>Created</th><th>Active</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h2>Active document</h2>
     <pre id="config-view" class="log"></pre>
+  </section>
+
+  <section id="tab-system" class="panel">
+    <button id="btn-metrics" class="card row">Refresh</button>
+    <div id="metrics-view" class="card"></div>
   </section>
 </main>
 

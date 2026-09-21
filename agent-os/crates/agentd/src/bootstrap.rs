@@ -58,6 +58,8 @@ pub struct DaemonConfig {
     pub adapter_bundles: Vec<PathBuf>,
     /// Per-run `FIXTURE_LOOP_SCRIPT` values keyed by run id.
     pub loop_scripts: HashMap<RunId, String>,
+    /// Extra env vars injected into spawned loop-adapter processes.
+    pub loop_env: HashMap<String, String>,
     /// Extra env vars injected into spawned effect-adapter processes.
     pub effect_env: HashMap<String, String>,
     /// Worker poll interval.
@@ -73,6 +75,7 @@ impl Default for DaemonConfig {
             config_doc: None,
             adapter_bundles: Vec::new(),
             loop_scripts: HashMap::new(),
+            loop_env: HashMap::new(),
             effect_env: HashMap::new(),
             poll: Duration::from_millis(50),
             json_logs: false,
@@ -265,12 +268,39 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
     )
     .await?;
 
-    // Adapter bundle registration + spawn directory index.
+    // Adapter bundle registration + spawn directory index. Beyond the
+    // config-supplied bundles, every *enabled* bundle installed via
+    // `agentd adapter install` under the runtime dir is registered — a
+    // corrupt installed bundle warns and skips rather than wedging boot.
     let mut bundles = Vec::new();
     for dir in &config.adapter_bundles {
         let bundle =
             register_bundle(store.clone(), dir, ids.as_ref(), epoch, clock.now_unix_ms()).await?;
         bundles.push(bundle);
+    }
+    match crate::adapters::enabled_bundle_dirs(&runtime_dir) {
+        Ok(installed) => {
+            for dir in installed {
+                if config.adapter_bundles.iter().any(|d| d == &dir) {
+                    continue;
+                }
+                match register_bundle(
+                    store.clone(),
+                    &dir,
+                    ids.as_ref(),
+                    epoch,
+                    clock.now_unix_ms(),
+                )
+                .await
+                {
+                    Ok(bundle) => bundles.push(bundle),
+                    Err(error) => {
+                        tracing::warn!(dir = %dir.display(), %error, "installed adapter skipped")
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "installed adapter index unreadable — skipped"),
     }
 
     // Activate the initial config generation when none is active.
@@ -344,6 +374,7 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
                     actor,
                     bundles,
                     loop_scripts: Arc::new(config.loop_scripts.clone()),
+                    loop_env: config.loop_env.clone(),
                     runtime_dir: config.runtime_dir.clone(),
                     effect_env: config.effect_env.clone(),
                 },
@@ -468,6 +499,17 @@ async fn register_bundle(
         adapter_id: registration.adapter_id.to_string(),
         version: registration.version,
         dir: dir.to_path_buf(),
+        bundle_digest: registration.bundle_digest,
+        isolation: match manifest.runtime.isolation.as_deref() {
+            Some("user-ns") => {
+                process_supervisor::spawn::Isolation::UserNamespace { network: true }
+            }
+            Some("user-ns-no-net") => {
+                process_supervisor::spawn::Isolation::UserNamespace { network: false }
+            }
+            _ => process_supervisor::spawn::Isolation::None,
+        },
+        runtime_type: manifest.runtime.runtime_type.clone(),
     })
 }
 
