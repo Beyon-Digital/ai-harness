@@ -392,11 +392,15 @@ tasks:
     - .spec/agentd-microkernel-mvp/reports/task-API-003.md
     notes: Subscribe attaches live before replay; lag yields journal-servable cursor
   API-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 2090901
+    tests:
+    - cargo test -p agentctl
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-API-004.md
+    notes: agentctl create-run/get-run/events read/resolve-effect/approvals +
+      config lifecycle commands; ListApprovals RPC mirrored in f592868; status
+      entry backfilled (work landed in wave D)
   INT-001:
     status: done
     commit: 3ae38c2
