@@ -32,6 +32,7 @@ pub async fn serve_control_api(
     principals: Arc<dyn PeerPrincipalMap>,
     daemon_instance: DaemonInstanceId,
     daemon_epoch: u64,
+    event_service: Option<control_api::EventApiService>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let socket = ControlSocket::bind(runtime_dir, lock)?;
@@ -50,6 +51,7 @@ pub async fn serve_control_api(
                 outbox_unpublished_count: 0,
             },
         ),
+        event_service,
         shutdown,
     )
     .await

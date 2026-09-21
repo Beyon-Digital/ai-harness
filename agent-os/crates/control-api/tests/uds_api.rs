@@ -192,7 +192,7 @@ async fn graceful_shutdown_stops_the_server() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(rig.uid), async move {
+    let server = tokio::spawn(serve(socket, rig.service(rig.uid), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -215,7 +215,7 @@ async fn client_smoke_submit_command_round_trips() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(rig.uid), async move {
+    let server = tokio::spawn(serve(socket, rig.service(rig.uid), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -251,7 +251,7 @@ async fn claimed_principal_must_match_the_peer_principal() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(rig.uid), async move {
+    let server = tokio::spawn(serve(socket, rig.service(rig.uid), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -285,7 +285,7 @@ async fn unknown_uid_is_rejected() {
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     // Map a different uid entirely: this peer has no principal.
-    let server = tokio::spawn(serve(socket, rig.service(u32::MAX - 1), async move {
+    let server = tokio::spawn(serve(socket, rig.service(u32::MAX - 1), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;

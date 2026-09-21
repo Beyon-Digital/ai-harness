@@ -6,10 +6,12 @@
 //! never see a raw store handle.
 #![forbid(unsafe_code)]
 
+pub mod event_service;
 pub mod server;
 pub mod uds;
 pub mod views;
 
+pub use event_service::EventApiService;
 pub use server::{
     ControlApiService, HealthInfo, LocalActor, PeerCreds, PeerPrincipalMap, UdsConn,
     UidPrincipalMap, generated, serve,

@@ -526,6 +526,7 @@ impl MvpControlApi for ControlApiService {
 pub async fn serve(
     socket: ControlSocket,
     service: ControlApiService,
+    event_service: Option<crate::event_service::EventApiService>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> errors::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<UdsConn>>(64);
@@ -554,8 +555,14 @@ pub async fn serve(
         }
     });
     let incoming = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let result = tonic::transport::Server::builder()
-        .add_service(MvpControlApiServer::new(service))
+    let mut builder =
+        tonic::transport::Server::builder().add_service(MvpControlApiServer::new(service));
+    if let Some(events) = event_service {
+        builder = builder.add_service(
+            crate::event_service::generated::mvp_event_api_server::MvpEventApiServer::new(events),
+        );
+    }
+    let result = builder
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
     accept_task.abort();

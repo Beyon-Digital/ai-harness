@@ -19,7 +19,7 @@ async fn submit_command_replays_idempotently() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(), async move {
+    let server = tokio::spawn(serve(socket, rig.service(), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -46,7 +46,7 @@ async fn query_not_found_maps_to_not_found_status() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(), async move {
+    let server = tokio::spawn(serve(socket, rig.service(), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -114,7 +114,7 @@ async fn approval_digest_mismatch_over_api() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(), async move {
+    let server = tokio::spawn(serve(socket, rig.service(), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
@@ -154,7 +154,7 @@ async fn health_reports_fencing_config_and_outbox() {
     let socket = ControlSocket::bind(&rig.runtime_dir, &FakeLock).expect("bind");
     let path = socket.path().to_path_buf();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(socket, rig.service(), async move {
+    let server = tokio::spawn(serve(socket, rig.service(), None, async move {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
