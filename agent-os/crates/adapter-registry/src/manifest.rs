@@ -42,6 +42,10 @@ pub struct RuntimeSection {
     /// Optional implementation language marker.
     #[serde(default)]
     pub language: Option<String>,
+    /// Kernel isolation requested at spawn: `none` (default),
+    /// `user-ns` (userns+ipc, network kept), `user-ns-no-net`.
+    #[serde(default)]
+    pub isolation: Option<String>,
 }
 
 /// Parsed extension manifest v1.
@@ -124,6 +128,14 @@ pub fn parse_manifest(bytes: &[u8]) -> errors::Result<ExtensionManifest> {
             "manifest kind '{}' is not 'adapter'",
             manifest.kind
         )));
+    }
+    match manifest.runtime.isolation.as_deref() {
+        None | Some("none") | Some("user-ns") | Some("user-ns-no-net") => {}
+        Some(other) => {
+            return Err(invalid(format!(
+                "runtime.isolation '{other}' is not one of none|user-ns|user-ns-no-net"
+            )));
+        }
     }
     if manifest.runtime.runtime_type != "process" {
         return Err(invalid(format!(

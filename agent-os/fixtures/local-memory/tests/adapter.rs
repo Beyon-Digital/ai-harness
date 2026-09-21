@@ -50,6 +50,7 @@ fn rig() -> Rig {
                 ("FIXTURE_STORE".to_owned(), store.clone()),
             ],
             cwd: None,
+            isolation: process_supervisor::spawn::Isolation::None,
         },
         _dir: dir,
     }

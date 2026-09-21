@@ -58,6 +58,7 @@ fn rig(script: &str, extra_env: &[(&str, &str)]) -> Rig {
             argv: vec![],
             env,
             cwd: None,
+            isolation: process_supervisor::spawn::Isolation::None,
         },
         _dir: dir,
     }

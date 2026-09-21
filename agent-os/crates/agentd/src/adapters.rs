@@ -168,6 +168,13 @@ pub async fn check_bundle(bundle_dir: &Path) -> errors::Result<CheckReport> {
         expected_bundle_digest: digest.clone(),
         protocol_version: 1,
     };
+    let isolation = match manifest.runtime.isolation.as_deref() {
+        Some("user-ns") => process_supervisor::spawn::Isolation::UserNamespace { network: true },
+        Some("user-ns-no-net") => {
+            process_supervisor::spawn::Isolation::UserNamespace { network: false }
+        }
+        _ => process_supervisor::spawn::Isolation::None,
+    };
     let mut child = process_supervisor::spawn(&SpawnSpec {
         adapter_id,
         adapter_version: manifest.version.clone(),
@@ -198,6 +205,7 @@ pub async fn check_bundle(bundle_dir: &Path) -> errors::Result<CheckReport> {
             ),
         ],
         cwd: None,
+        isolation,
     })?;
     child.drain_output();
     let smoke = probe(child.ipc(), &identity, &ids).await;

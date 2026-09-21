@@ -40,8 +40,8 @@ use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcom
 use domain::effect::EffectState;
 use domain::generated::contract;
 use domain::ids::{
-    ActorId, AdapterId, AdapterInstanceId, CommandId, DaemonInstanceId, IdempotencyKey,
-    PrincipalId, RunId,
+    ActorId, AdapterId, AdapterInstanceId, CommandId, DaemonInstanceId, EnvironmentId,
+    IdempotencyKey, PrincipalId, RunId,
 };
 use domain::provider::IdProvider;
 use domain::run::{RecoveryDisposition, RunState};
@@ -93,6 +93,8 @@ pub struct AdapterBundle {
     /// `(id, version, digest)` identity so same-version bundles from
     /// different dirs never collide.
     pub bundle_digest: String,
+    /// Kernel isolation the bundle's manifest requests at spawn.
+    pub isolation: spawn::Isolation,
 }
 
 /// Shared dependencies of the run driver.
@@ -142,6 +144,9 @@ pub struct RunWorker {
     /// whose step keeps failing (e.g. a queued run missing its spec
     /// binding) backs off instead of spinning every poll.
     retry_after: HashMap<RunId, (u32, Instant)>,
+    /// `limits.context` per resolved environment — the generation doc is
+    /// immutable once activated, so one parse per env is enough.
+    context_limits: HashMap<EnvironmentId, config_engine::schema::ContextLimits>,
 }
 
 impl RunWorker {
@@ -152,6 +157,7 @@ impl RunWorker {
             poll,
             loops: HashMap::new(),
             retry_after: HashMap::new(),
+            context_limits: HashMap::new(),
         }
     }
 
@@ -666,15 +672,30 @@ impl RunWorker {
         // accepted decision's step — a settled effect is eligible for
         // exactly the turn issued right after the decision that created
         // it, so a wait/approval resume cannot replay an old result.
+        let limits = self.context_limits_for(row).await?;
         let (state, events) = {
             let mut txn = self.read_txn().await?;
-            let state = txn
+            let mut state = txn
                 .tasks()
                 .get(row.task_id)
                 .await?
                 .map(|task| task.payload)
                 .unwrap_or_default();
-            let settled: Vec<serde_json::Value> = txn
+            // Context strategy (Phase 10): the profile's generation caps
+            // how much a single turn's LoopInput may carry. State is
+            // prompt text — truncate on a UTF-8 boundary; the events batch
+            // keeps the most recent entries that fit the byte cap.
+            let cap = limits.max_state_bytes as usize;
+            if state.len() > cap {
+                let mut end = cap.min(state.len());
+                // Walk back past UTF-8 continuation bytes (0b10xxxxxx).
+                while end > 0 && state[end] & 0xC0 == 0x80 {
+                    end -= 1;
+                }
+                state.truncate(end);
+                tracing::info!(run = %run_id_str(row.run_id), cap, "loop state truncated");
+            }
+            let mut settled: Vec<serde_json::Value> = txn
                 .effects()
                 .list_by_run(row.run_id)
                 .await?
@@ -690,7 +711,17 @@ impl RunWorker {
                     })
                 })
                 .collect();
-            (state, serde_json::to_vec(&settled).unwrap_or_default())
+            let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
+            if drop_n > 0 {
+                tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
+                settled.drain(..drop_n);
+            }
+            let mut events = serde_json::to_vec(&settled).unwrap_or_default();
+            while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
+                settled.remove(0);
+                events = serde_json::to_vec(&settled).unwrap_or_default();
+            }
+            (state, events)
         };
         let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
         let outcome = loops::drive_turn(
@@ -1197,6 +1228,7 @@ impl RunWorker {
             argv: Vec::new(),
             env,
             cwd: None,
+            isolation: bundle.isolation,
         })?;
         child.drain_output();
         if let Err(error) = self
@@ -1296,6 +1328,46 @@ impl RunWorker {
             .iter()
             .any(|child| child.parent_run_id == Some(row.run_id));
         Ok(has_children && children_done)
+    }
+
+    /// `limits.context` for the run's frozen environment, cached by env
+    /// id; absent env/generation yields the built-in defaults.
+    async fn context_limits_for(
+        &mut self,
+        row: &kernel_store::models::RunRow,
+    ) -> errors::Result<config_engine::schema::ContextLimits> {
+        let Some(env_id) = row.resolved_environment_id else {
+            return Ok(config_engine::schema::ContextLimits::default());
+        };
+        if let Some(limits) = self.context_limits.get(&env_id) {
+            return Ok(limits.clone());
+        }
+        let limits = {
+            let mut txn = self.read_txn().await?;
+            let env = txn.environments().get_environment(env_id).await?;
+            match env {
+                Some(env) => {
+                    match txn
+                        .config()
+                        .get_generation(env.config_generation_id)
+                        .await?
+                    {
+                        Some(generation) => std::str::from_utf8(&generation.document)
+                            .ok()
+                            .and_then(|s| {
+                                config_engine::model::parse_document(s)
+                                    .ok()
+                                    .map(|d| d.limits.context)
+                            })
+                            .unwrap_or_default(),
+                        None => config_engine::schema::ContextLimits::default(),
+                    }
+                }
+                None => config_engine::schema::ContextLimits::default(),
+            }
+        };
+        self.context_limits.insert(env_id, limits.clone());
+        Ok(limits)
     }
 
     /// Claims a run only when the live claim belongs to this worker epoch.
@@ -1407,6 +1479,7 @@ impl RunWorker {
             argv: Vec::new(),
             env,
             cwd: None,
+            isolation: bundle.isolation,
         })?;
         child.drain_output();
         if let Err(error) = self

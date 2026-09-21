@@ -26,6 +26,22 @@ use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use rustix::process::{Pid, Signal, kill_process_group};
 
+/// Kernel-level isolation applied to the child (T1 sandbox tier).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// Plain supervised process (T0).
+    #[default]
+    None,
+    /// Linux user namespace via `unshare`: the adapter runs as fake root
+    /// in fresh user/IPC namespaces; `network: false` also unshares the
+    /// net namespace (no sockets). Falls back to [`Isolation::None`] when
+    /// `unshare` is unavailable or userns creation is denied.
+    UserNamespace {
+        /// Whether the child keeps the parent's network namespace.
+        network: bool,
+    },
+}
+
 /// Everything needed to launch one supervised adapter process.
 #[derive(Debug)]
 pub struct SpawnSpec {
@@ -51,6 +67,8 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     /// Working directory for the child.
     pub cwd: Option<PathBuf>,
+    /// Requested sandbox isolation.
+    pub isolation: Isolation,
 }
 
 /// A spawned adapter child: its OS handle, identity, and parent end of the
@@ -161,9 +179,31 @@ impl std::fmt::Display for ExitReason {
 /// the launcher as non-CLOEXEC only where set).
 pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
     let (parent_end, child_end) = UnixStream::pair().map_err(|e| io("socketpair", e))?;
-    let mut command = Command::new(&spec.executable);
+    // The fallback spawn path needs its own copy — `Stdio::from` consumes.
+    let child_end_fallback = OwnedFd::from(
+        child_end
+            .try_clone()
+            .map_err(|e| io("clone socketpair end", e))?,
+    );
+    let mut command = match spec.isolation {
+        Isolation::None => {
+            let mut c = Command::new(&spec.executable);
+            c.args(&spec.argv);
+            c
+        }
+        Isolation::UserNamespace { network } => {
+            // `unshare --user --map-root-user` needs no privilege: the
+            // child becomes root inside a fresh userns only.
+            let mut c = Command::new("unshare");
+            c.args(["--user", "--map-root-user", "--ipc", "--kill-child"]);
+            if !network {
+                c.arg("--net");
+            }
+            c.arg(&spec.executable).args(&spec.argv);
+            c
+        }
+    };
     command
-        .args(&spec.argv)
         .env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Private channel: the child's fd 0 is its socketpair end.
@@ -175,7 +215,28 @@ pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
-    let mut process = command.spawn().map_err(|e| io("spawn", e))?;
+    let mut process = match command.spawn() {
+        Ok(p) => p,
+        Err(e) if !matches!(spec.isolation, Isolation::None) => {
+            // userns creation can be denied (sysctl) or `unshare` missing —
+            // degrade to a plain supervised child rather than fail spawn.
+            tracing::warn!(error = %e, "namespaced spawn failed; retrying unsandboxed");
+            let mut fallback = Command::new(&spec.executable);
+            fallback
+                .args(&spec.argv)
+                .env_clear()
+                .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                .stdin(Stdio::from(child_end_fallback))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            if let Some(cwd) = &spec.cwd {
+                fallback.current_dir(cwd);
+            }
+            fallback.spawn().map_err(|e| io("spawn", e))?
+        }
+        Err(e) => return Err(io("spawn", e)),
+    };
     let stdout = process.stdout.take().expect("piped stdout");
     let stderr = process.stderr.take().expect("piped stderr");
     let pid = process.id();

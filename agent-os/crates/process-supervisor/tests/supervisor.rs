@@ -34,6 +34,7 @@ fn spec(program: &str, script: &str) -> SpawnSpec {
         argv: vec!["-c".to_owned(), script.to_owned()],
         env: vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())],
         cwd: None,
+        isolation: process_supervisor::spawn::Isolation::None,
     }
 }
 
@@ -41,6 +42,25 @@ fn spec(program: &str, script: &str) -> SpawnSpec {
 async fn private_ipc_channel_carries_bytes_both_ways() {
     // `exec 1>&0; cat`: echo the inherited IPC fd back onto itself.
     let mut child = spawn(&spec("/bin/sh", "exec 1>&0; cat")).expect("spawn");
+    child
+        .ipc()
+        .write_all(b"ping")
+        .and_then(|()| child.ipc().flush())
+        .expect("write");
+    let mut buf = [0u8; 4];
+    child.ipc().read_exact(&mut buf).expect("echo");
+    assert_eq!(&buf, b"ping");
+    let _ = terminate(child, Duration::from_millis(500)).await;
+}
+
+/// T1 sandbox: a `user-ns` spawn either lands in a fresh userns (Linux)
+/// or degrades to a plain child (no `unshare` — e.g. macOS CI) — either
+/// way the private IPC channel on fd 0 must still work.
+#[tokio::test]
+async fn user_namespace_spawn_keeps_ipc_channel() {
+    let mut spec = spec("/bin/sh", "exec 1>&0; cat");
+    spec.isolation = process_supervisor::spawn::Isolation::UserNamespace { network: true };
+    let mut child = spawn(&spec).expect("spawn");
     child
         .ipc()
         .write_all(b"ping")
@@ -225,6 +245,7 @@ async fn instance_lifecycle_is_durable_in_the_store() {
         argv: vec!["-c".to_owned(), "exit 0".to_owned()],
         env: vec![],
         cwd: None,
+        isolation: process_supervisor::spawn::Isolation::None,
     };
     let mut child = spawn(&spec).expect("spawn");
     let mut txn = store
