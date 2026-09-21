@@ -160,6 +160,13 @@ fn cancel_frame_delivered() {
             },
         )
         .expect("cancel");
+        // Keep the socket alive until the kernel drains the cancel frame —
+        // on macOS, closing the peer immediately after write() can race the
+        // buffered frame and surface as EOF instead of `Cancelled`.
+        child
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        while matches!(read_frame(&mut child), Ok(Some(_))) {}
     });
     let mut phase = SessionPhase::Ready;
     let outcome = dispatch_call(
