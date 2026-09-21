@@ -7,15 +7,18 @@
 #![forbid(unsafe_code)]
 
 use domain::generated::contract::{LoopDecision, loop_decision};
-use domain::ids::{DecisionId, RunId, TurnId};
+use domain::ids::{DecisionId, EventId, RunId, TurnId};
+use domain::provider::IdProvider;
 use domain::run::RunState;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
+use events::StreamKey;
 use kernel_store::models::{DecisionRow, LoopTurnPatch, NewDecision, RunCas, RunPatch};
 use kernel_store::txn::KernelTxn;
 use sha2::{Digest, Sha256};
 
 use crate::loop_turn::turn_state;
+use crate::stage_catalogued;
 
 fn dec_error(code: ErrorCode, msg: impl Into<String>) -> KernelError {
     KernelError::new(code, RetryClass::Never, msg.into())
@@ -151,6 +154,7 @@ fn decision_type_and_instruction(
 /// marked `stale`; a losing run CAS → `Conflict`.
 pub async fn accept_decision(
     txn: &mut dyn KernelTxn,
+    ids: &dyn IdProvider,
     run: RunId,
     decision: &LoopDecision,
     decision_bytes: &[u8],
@@ -273,5 +277,41 @@ pub async fn accept_decision(
         .get_decision(run, decision_id)
         .await?
         .ok_or_else(|| dec_error(ErrorCode::Internal, "decision row not visible"))?;
+
+    // SubmitLoopDecision emits LoopDecisionAccepted plus the state event the
+    // transition implies (specs/command-catalog.md, event-catalog.md).
+    stage_catalogued(
+        txn,
+        EventId::new(ids),
+        "LoopDecisionAccepted",
+        StreamKey::run(run),
+        decision_bytes.to_vec(),
+        None,
+        None,
+    )
+    .await?;
+    let state_event = match next_state {
+        RunState::Completed => Some("RunCompleted"),
+        RunState::Failed => Some("RunFailed"),
+        RunState::WaitingTool => Some("RunWaitingTool"),
+        RunState::WaitingChild => Some("RunWaitingChild"),
+        RunState::WaitingHuman => Some("RunWaitingHuman"),
+        _ => None,
+    };
+    if let Some(state_event) = state_event {
+        let payload = decision_bytes.to_vec();
+        for event_type in [state_event, "RunStateChanged"] {
+            stage_catalogued(
+                txn,
+                EventId::new(ids),
+                event_type,
+                StreamKey::run(run),
+                payload.clone(),
+                None,
+                None,
+            )
+            .await?;
+        }
+    }
     Ok(AcceptOutcome::Accepted { row, instruction })
 }

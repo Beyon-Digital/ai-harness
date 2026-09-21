@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 observability.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 errors.workspace = true
 events.workspace = true
 kernel-store.workspace = true
@@ -15,8 +15,25 @@ runtime.workspace = true
 command-coordinator.workspace = true
 domain.workspace = true
 adapter-protocol.workspace = true
+adapter-registry.workspace = true
+approvals.workspace = true
+config-engine.workspace = true
+event-journal.workspace = true
+event-journal-sqlite.workspace = true
+kernel-store-sqlite.workspace = true
 process-supervisor.workspace = true
 prost.workspace = true
 scheduler.workspace = true
 control-api.workspace = true
+run-graph.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+agentctl.workspace = true
+tempfile.workspace = true
+testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

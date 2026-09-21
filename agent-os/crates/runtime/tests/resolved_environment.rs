@@ -123,6 +123,11 @@ async fn insert_run(tx: &mut dyn KernelTxn, ids: &DeterministicIds) -> RunId {
             ),
             cancellation_epoch: 0,
             resolved_environment_id: None,
+            agent_spec_id: None,
+            agent_spec_version: None,
+            agent_spec_digest: None,
+            requested_profile: String::new(),
+            workspace_uri: None,
             created_at_ms: NOW,
         })
         .await

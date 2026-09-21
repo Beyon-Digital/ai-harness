@@ -106,7 +106,8 @@ async fn normal_complete_decision() {
     assert_eq!(d.step_sequence, 1);
     assert_eq!(d.input_event_cursor, "cursor-17");
     assert_eq!(d.turn_id, "turn-3");
-    assert_eq!(d.decision_id, "dec-0001");
+    // decision_id echoes the issued turn id so retries of the same turn replay.
+    assert_eq!(d.decision_id, "turn-3");
     let Some(loop_decision::Decision::Complete(c)) = d.decision else {
         panic!("expected Complete");
     };

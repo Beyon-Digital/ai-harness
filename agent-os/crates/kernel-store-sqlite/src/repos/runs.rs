@@ -26,7 +26,8 @@ async fn fetch_run(conn: &mut sqlx::SqliteConnection, id: RunId) -> errors::Resu
     let row = sqlx::query(
         "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
          run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
-         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
+         resolved_environment_id, agent_spec_id, agent_spec_version, agent_spec_digest, \
+         requested_profile, workspace_uri, claim_owner, claim_token, claim_expires_ms, \
          claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
          updated_at_ms FROM runs WHERE run_id = ?1",
     )
@@ -44,7 +45,8 @@ async fn fetch_runs_by_task(
     let rows = sqlx::query(
         "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
          run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
-         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
+         resolved_environment_id, agent_spec_id, agent_spec_version, agent_spec_digest, \
+         requested_profile, workspace_uri, claim_owner, claim_token, claim_expires_ms, \
          claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
          updated_at_ms FROM runs WHERE task_id = ?1 ORDER BY run_id",
     )
@@ -62,7 +64,8 @@ async fn fetch_active_runs(
     let rows = sqlx::query(
         "SELECT run_id, task_id, session_id, parent_run_id, state, recovery_disposition, \
          run_revision, loop_epoch, step_sequence, input_event_cursor, cancellation_epoch, \
-         resolved_environment_id, claim_owner, claim_token, claim_expires_ms, \
+         resolved_environment_id, agent_spec_id, agent_spec_version, agent_spec_digest, \
+         requested_profile, workspace_uri, claim_owner, claim_token, claim_expires_ms, \
          claim_daemon_epoch, terminal_reason, output_ref, current_turn_id, created_at_ms, \
          updated_at_ms FROM runs WHERE state NOT IN (?1, ?2, ?3) ORDER BY created_at_ms, run_id",
     )
@@ -115,6 +118,14 @@ fn decode_run(row: &SqliteRow) -> errors::Result<RunRow> {
             "runs.resolved_environment_id",
             mapping::opt_text(row, "resolved_environment_id")?,
         )?,
+        agent_spec_id: mapping::decode_opt_id(
+            "runs.agent_spec_id",
+            mapping::opt_text(row, "agent_spec_id")?,
+        )?,
+        agent_spec_version: mapping::opt_text(row, "agent_spec_version")?,
+        agent_spec_digest: mapping::opt_text(row, "agent_spec_digest")?,
+        requested_profile: mapping::text(row, "requested_profile")?,
+        workspace_uri: mapping::opt_text(row, "workspace_uri")?,
         claim_owner: mapping::opt_text(row, "claim_owner")?,
         claim_token: mapping::opt_int(row, "claim_token")?
             .map(|value| mapping::decode_u64("runs.claim_token", value))
@@ -165,8 +176,11 @@ impl RunRepo for SqliteRunRepo {
         sqlx::query(
             "INSERT INTO runs (run_id, task_id, session_id, parent_run_id, state, \
              recovery_disposition, loop_epoch, step_sequence, input_event_cursor, \
-             cancellation_epoch, resolved_environment_id, created_at_ms, updated_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+             cancellation_epoch, resolved_environment_id, agent_spec_id, \
+             agent_spec_version, agent_spec_digest, requested_profile, \
+             workspace_uri, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+             ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
         )
         .bind(run.run_id.to_string())
         .bind(run.task_id.to_string())
@@ -185,6 +199,11 @@ impl RunRepo for SqliteRunRepo {
             run.cancellation_epoch,
         )?)
         .bind(run.resolved_environment_id.map(|id| id.to_string()))
+        .bind(run.agent_spec_id.map(|id| id.to_string()))
+        .bind(run.agent_spec_version)
+        .bind(run.agent_spec_digest)
+        .bind(run.requested_profile)
+        .bind(run.workspace_uri)
         .bind(run.created_at_ms)
         .execute(conn)
         .await

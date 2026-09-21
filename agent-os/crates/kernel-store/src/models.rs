@@ -198,6 +198,16 @@ pub struct RunRow {
     pub input_event_cursor: EventCursor,
     pub cancellation_epoch: u64,
     pub resolved_environment_id: Option<EnvironmentId>,
+    /// Binding input captured at creation: AgentSpec id reference.
+    pub agent_spec_id: Option<AgentSpecId>,
+    /// Binding input captured at creation: AgentSpec version.
+    pub agent_spec_version: Option<String>,
+    /// Binding input captured at creation: AgentSpec content digest.
+    pub agent_spec_digest: Option<String>,
+    /// Binding input captured at creation: requested execution profile.
+    pub requested_profile: String,
+    /// Binding input captured at creation: pre-provisioned workspace URI.
+    pub workspace_uri: Option<String>,
     pub claim_owner: Option<String>,
     pub claim_token: Option<u64>,
     pub claim_expires_ms: Option<i64>,
@@ -223,6 +233,16 @@ pub struct NewRun {
     pub input_event_cursor: EventCursor,
     pub cancellation_epoch: u64,
     pub resolved_environment_id: Option<EnvironmentId>,
+    /// Binding inputs captured at creation (immutable).
+    pub agent_spec_id: Option<AgentSpecId>,
+    /// See [`RunRow::agent_spec_version`].
+    pub agent_spec_version: Option<String>,
+    /// See [`RunRow::agent_spec_digest`].
+    pub agent_spec_digest: Option<String>,
+    /// See [`RunRow::requested_profile`].
+    pub requested_profile: String,
+    /// See [`RunRow::workspace_uri`].
+    pub workspace_uri: Option<String>,
     pub created_at_ms: i64,
 }
 

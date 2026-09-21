@@ -81,6 +81,11 @@ async fn insert_run(tx: &mut dyn KernelTxn, ids: &DeterministicIds) -> RunId {
             ),
             cancellation_epoch: 0,
             resolved_environment_id: None,
+            agent_spec_id: None,
+            agent_spec_version: None,
+            agent_spec_digest: None,
+            requested_profile: String::new(),
+            workspace_uri: None,
             created_at_ms: NOW,
         })
         .await
@@ -133,7 +138,7 @@ async fn issue_then_accept_advances_run() {
         }),
     );
     let bytes = dec.encode_to_vec();
-    let outcome = decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+    let outcome = decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
         .await
         .expect("accept");
     let AcceptOutcome::Accepted {
@@ -182,7 +187,7 @@ async fn duplicate_decision_replays_without_side_effects() {
         }),
     );
     let bytes = dec.encode_to_vec();
-    decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+    decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
         .await
         .expect("first accept");
     let rev_after_first = tx
@@ -194,7 +199,7 @@ async fn duplicate_decision_replays_without_side_effects() {
         .run_revision;
 
     // Replay: same decision_id, would otherwise re-run side effects.
-    let outcome = decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+    let outcome = decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
         .await
         .expect("replay");
     let AcceptOutcome::Replayed { prior } = outcome else {
@@ -246,7 +251,7 @@ async fn stale_fences_are_rejected() {
             _ => unreachable!(),
         }
         let bytes = dec.encode_to_vec();
-        let err = decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+        let err = decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
             .await
             .expect_err(&format!("stale {label}"));
         assert_eq!(err.code(), ErrorCode::Conflict, "{label}");
@@ -296,7 +301,7 @@ async fn restart_bumps_epoch_and_stales_issued() {
         }),
     );
     let bytes = dec.encode_to_vec();
-    let err = decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+    let err = decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
         .await
         .expect_err("old-epoch decision rejected");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition); // turn no longer issued
@@ -313,7 +318,7 @@ async fn restart_bumps_epoch_and_stales_issued() {
     dec.step_sequence = t2.step_sequence;
     dec.decision_id = DecisionId::new(&ids).to_string();
     let bytes = dec.encode_to_vec();
-    decision::accept_decision(&mut *tx, run, &dec, &bytes, NOW)
+    decision::accept_decision(&mut *tx, &ids, run, &dec, &bytes, NOW)
         .await
         .expect("new epoch accepts");
 }

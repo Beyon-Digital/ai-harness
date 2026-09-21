@@ -63,19 +63,33 @@ name = "agentd"
 version = "0.1.0"
 dependencies = [
  "adapter-protocol",
+ "adapter-registry",
+ "agentctl",
+ "approvals",
+ "async-trait",
  "command-coordinator",
+ "config-engine",
  "control-api",
  "domain",
  "errors",
+ "event-journal",
+ "event-journal-sqlite",
  "events",
  "kernel-store",
+ "kernel-store-sqlite",
  "observability",
  "process-supervisor",
  "prost",
+ "run-graph",
  "runtime",
+ "rustix",
  "scheduler",
+ "serde_json",
  "sha2",
+ "tempfile",
+ "testkit",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

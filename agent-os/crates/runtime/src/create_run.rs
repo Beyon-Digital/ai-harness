@@ -181,6 +181,24 @@ pub async fn create_task_run(
             input_event_cursor,
             cancellation_epoch: 0,
             resolved_environment_id: None,
+            agent_spec_id: request
+                .agent_spec_ref
+                .as_ref()
+                .map(|reference| reference.agent_spec_id),
+            agent_spec_version: request
+                .agent_spec_ref
+                .as_ref()
+                .map(|reference| reference.version.clone()),
+            agent_spec_digest: request
+                .agent_spec_ref
+                .as_ref()
+                .map(|reference| reference.digest.clone()),
+            requested_profile: request.requested_profile.clone(),
+            workspace_uri: if request.workspace_uri.is_empty() {
+                None
+            } else {
+                Some(request.workspace_uri.clone())
+            },
             created_at_ms: now_ms,
         })
         .await?;

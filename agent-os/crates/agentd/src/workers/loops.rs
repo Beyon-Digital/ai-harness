@@ -112,7 +112,7 @@ where
 
     // 3. Atomic accept: validate fence, record the decision, move the
     //    run, and produce the follow-up instruction.
-    accept_with_new_txn(store, ctx, turn, &decision, &response.payload, now_ms).await
+    accept_with_new_txn(store, ids, ctx, turn, &decision, &response.payload, now_ms).await
 }
 
 /// Separate txn for accept so the issue commits even if the process
@@ -121,6 +121,7 @@ where
 #[allow(dead_code)]
 async fn accept_with_new_txn<S>(
     store: &S,
+    ids: &dyn IdProvider,
     ctx: &TxContext,
     turn: LoopTurnRow,
     decision: &LoopDecision,
@@ -131,8 +132,15 @@ where
     S: KernelStore + ?Sized,
 {
     let mut txn = store.begin_write(ctx.clone()).await?;
-    let outcome =
-        decision::accept_decision(&mut *txn, turn.run_id, decision, decision_bytes, now_ms).await?;
+    let outcome = decision::accept_decision(
+        &mut *txn,
+        ids,
+        turn.run_id,
+        decision,
+        decision_bytes,
+        now_ms,
+    )
+    .await?;
     txn.commit().await?;
     Ok(outcome)
 }

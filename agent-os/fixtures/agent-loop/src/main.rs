@@ -148,8 +148,10 @@ fn decide(
         loop_epoch,
         step_sequence: input.step_sequence,
         input_event_cursor: input.input_event_cursor,
-        turn_id: input.turn_id,
-        decision_id: format!("dec-{:04}", input.step_sequence),
+        turn_id: input.turn_id.clone(),
+        // Deterministic per issued turn: a redispatched turn replays the
+        // recorded decision instead of double-committing.
+        decision_id: input.turn_id,
         decision: Some(decision),
     };
     PortCallResponse {

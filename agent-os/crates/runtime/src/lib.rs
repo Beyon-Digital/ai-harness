@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_spec;
+pub mod bind;
 pub mod cancel;
 pub mod claim;
 pub mod create_run;
@@ -36,6 +37,8 @@ pub const CMD_CREATE_SESSION: &str = "agentos.spec.v1.CreateSession";
 pub const CMD_PUT_AGENT_SPEC_REVISION: &str = "agentos.spec.v1.PutAgentSpecRevision";
 /// Fully-qualified command type of `CreateTaskRun`.
 pub const CMD_CREATE_TASK_RUN: &str = "agentos.spec.v1.CreateTaskRun";
+/// Fully-qualified command type of `BindRun`.
+pub const CMD_BIND_RUN: &str = bind::CMD_BIND_RUN;
 /// Fully-qualified command type of `ClaimReadyRun`.
 pub const CMD_CLAIM_READY_RUN: &str = "agentos.spec.v1.ClaimReadyRun";
 /// Fully-qualified command type of `CancelRun`.
@@ -75,6 +78,10 @@ pub fn register_handlers(registry: &mut CommandRegistry, deps: RuntimeDeps) -> e
     registry.register(
         CMD_CREATE_TASK_RUN,
         Arc::new(create_run::CreateTaskRunHandler::new(deps.clone())),
+    )?;
+    registry.register(
+        bind::CMD_BIND_RUN,
+        Arc::new(bind::BindRunHandler::new(deps.clone())),
     )?;
     registry.register(
         CMD_CLAIM_READY_RUN,
@@ -179,7 +186,7 @@ where
     required_id(field, text).map(Some)
 }
 
-fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
+pub(crate) fn invalid_field(field: &'static str, detail: &'static str) -> KernelError {
     KernelError::new(
         ErrorCode::InvalidArgument,
         RetryClass::Never,
