@@ -329,9 +329,15 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
                 .to_lowercase();
             let hits: Vec<serde_json::Value> = ns
                 .iter()
-                .filter(|(id, rec)| {
+                // Search matches the record payload only — sensitivity and
+                // provenance are envelope metadata, not user content.
+                .filter(|(id, env)| {
                     id.to_lowercase().contains(&needle)
-                        || rec.to_string().to_lowercase().contains(&needle)
+                        || env
+                            .get("record")
+                            .map(|r| r.to_string().to_lowercase())
+                            .unwrap_or_default()
+                            .contains(&needle)
                 })
                 .map(|(id, env)| {
                     serde_json::json!({

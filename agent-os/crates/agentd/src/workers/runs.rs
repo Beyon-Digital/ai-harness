@@ -89,6 +89,10 @@ pub struct AdapterBundle {
     pub version: String,
     /// Bundle root on disk (manifest + lock + entrypoint).
     pub dir: PathBuf,
+    /// `sha256:` bundle digest — spawn lookup matches the full
+    /// `(id, version, digest)` identity so same-version bundles from
+    /// different dirs never collide.
+    pub bundle_digest: String,
 }
 
 /// Shared dependencies of the run driver.
@@ -481,13 +485,26 @@ impl RunWorker {
         txn: &mut dyn KernelTxn,
         row: &kernel_store::models::RunRow,
     ) -> errors::Result<EnvironmentPlan> {
+        // Resolution may only pick adapters whose exact `(id, version,
+        // digest)` identity has an on-disk bundle this daemon can spawn —
+        // a disabled/removed installed adapter's durable registration
+        // stays for audit but can never satisfy a new run's binding.
         let candidates: Vec<Candidate> = txn
             .adapters()
             .list_registrations()
             .await?
             .into_iter()
             .map(Candidate::decode)
-            .collect::<errors::Result<Vec<_>>>()?;
+            .collect::<errors::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|c| {
+                self.deps.bundles.iter().any(|b| {
+                    b.adapter_id == c.row.adapter_id.to_string()
+                        && b.version == c.row.version
+                        && b.bundle_digest == c.row.bundle_digest
+                })
+            })
+            .collect();
         let agent_loop = resolve(
             &PortRequirement {
                 port_id: LOOP_PORT_ID.to_owned(),
@@ -1100,7 +1117,11 @@ impl RunWorker {
             .deps
             .bundles
             .iter()
-            .find(|bundle| bundle.adapter_id == adapter_id && bundle.version == version)
+            .find(|bundle| {
+                bundle.adapter_id == adapter_id
+                    && bundle.version == version
+                    && bundle.bundle_digest == effect.adapter_digest
+            })
             .cloned()
             .ok_or_else(|| {
                 worker_error(
@@ -1322,7 +1343,11 @@ impl RunWorker {
             .deps
             .bundles
             .iter()
-            .find(|bundle| bundle.adapter_id == adapter_id && bundle.version == version)
+            .find(|bundle| {
+                bundle.adapter_id == adapter_id
+                    && bundle.version == version
+                    && bundle.bundle_digest == digest
+            })
             .cloned()
             .ok_or_else(|| {
                 worker_error(

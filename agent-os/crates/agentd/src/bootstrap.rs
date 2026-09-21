@@ -499,6 +499,7 @@ async fn register_bundle(
         adapter_id: registration.adapter_id.to_string(),
         version: registration.version,
         dir: dir.to_path_buf(),
+        bundle_digest: registration.bundle_digest,
     })
 }
 

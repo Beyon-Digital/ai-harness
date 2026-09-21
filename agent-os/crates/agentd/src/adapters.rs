@@ -324,7 +324,14 @@ pub async fn install(
         return Err(cli_err("installed copy digest mismatch — install aborted"));
     }
     let check = if run_check {
-        Some(check_bundle(&dest).await?.result)
+        let report = check_bundle(&dest).await?;
+        // A failed smoke test must not leave an enabled bundle behind —
+        // boot would register an adapter that already failed to run.
+        if report.result != "pass" {
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(cli_err(format!("adapter check failed: {}", report.result)));
+        }
+        Some(report.result)
     } else {
         None
     };
@@ -337,11 +344,30 @@ pub async fn install(
         check,
         installed_at_ms: now_ms,
     };
-    let mut entries = load_index(runtime_dir)?;
-    entries.retain(|e| !(e.adapter_id == entry.adapter_id && e.version == entry.version));
-    entries.push(entry.clone());
-    save_index(runtime_dir, &entries)?;
+    with_index_lock(runtime_dir, || {
+        let mut entries = load_index(runtime_dir)?;
+        entries.retain(|e| !(e.adapter_id == entry.adapter_id && e.version == entry.version));
+        entries.push(entry.clone());
+        save_index(runtime_dir, &entries)
+    })?;
     Ok(entry)
+}
+
+/// Serializes index mutations across concurrent `agentd adapter`
+/// invocations — `flock` on a sidecar lockfile wraps the load+save pair.
+fn with_index_lock<R>(
+    runtime_dir: &Path,
+    f: impl FnOnce() -> errors::Result<R>,
+) -> errors::Result<R> {
+    let dir = runtime_dir.join(INSTALLED_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| io_err("create install dir", &e))?;
+    let lock =
+        std::fs::File::create(dir.join("index.lock")).map_err(|e| io_err("open index lock", &e))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|e| io_err("lock index", &std::io::Error::from(e)))?;
+    let out = f();
+    let _ = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
+    out
 }
 
 /// `enable`/`disable` flip whether boot registers the bundle.
@@ -351,24 +377,28 @@ pub fn set_enabled(
     version: Option<&str>,
     enabled: bool,
 ) -> errors::Result<InstalledAdapter> {
-    let mut entries = load_index(runtime_dir)?;
-    let i = find_entry(&entries, id_prefix, version)?;
-    entries[i].enabled = enabled;
-    let entry = entries[i].clone();
-    save_index(runtime_dir, &entries)?;
-    Ok(entry)
+    with_index_lock(runtime_dir, || {
+        let mut entries = load_index(runtime_dir)?;
+        let i = find_entry(&entries, id_prefix, version)?;
+        entries[i].enabled = enabled;
+        let entry = entries[i].clone();
+        save_index(runtime_dir, &entries)?;
+        Ok(entry)
+    })
 }
 
 /// `remove` deletes the bundle dir and its index entry.
 pub fn remove(runtime_dir: &Path, id_prefix: &str, version: Option<&str>) -> errors::Result<()> {
-    let mut entries = load_index(runtime_dir)?;
-    let i = find_entry(&entries, id_prefix, version)?;
-    let dir = runtime_dir.join(INSTALLED_DIR).join(&entries[i].dir_name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| io_err("remove bundle dir", &e))?;
-    }
-    entries.remove(i);
-    save_index(runtime_dir, &entries)
+    with_index_lock(runtime_dir, || {
+        let mut entries = load_index(runtime_dir)?;
+        let i = find_entry(&entries, id_prefix, version)?;
+        let dir = runtime_dir.join(INSTALLED_DIR).join(&entries[i].dir_name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| io_err("remove bundle dir", &e))?;
+        }
+        entries.remove(i);
+        save_index(runtime_dir, &entries)
+    })
 }
 
 /// Bundle dirs boot should register: enabled index entries whose dir

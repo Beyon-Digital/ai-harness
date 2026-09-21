@@ -204,7 +204,9 @@ async function loadEnvironment(runId) {
       `<div class="env-row"><b>${esc(b.port_id)}</b><code>${esc(b.adapter_id)}@${esc(b.adapter_version)}</code></div>`).join("");
     el.innerHTML = `<div class="env-box">${rows}${binds ? `<h4>bindings</h4>${binds}` : ""}</div>`;
   } catch (e) {
-    state._envRun = runId; /* 404 → run predates env freezing; don't repoll */
+    // A 404 means the run has no frozen environment — cache it so we stop
+    // repolling; any other failure retries on the next render.
+    if (/no resolved environment/i.test(e.message)) state._envRun = runId;
     el.innerHTML = `<em>${esc(e.message)}</em>`;
   }
 }
@@ -474,7 +476,7 @@ async function loadSystem() {
           ${counter("adapter_instances_total")}
           ${counter("conformance_reports_total")}
           ${counter("reservations_total")}
-          ${counter("outbox_depth")}
+          ${counter("outbox_pending")}
           ${counter("journal_events_total")}
           ${counter("journal_max_sequence")}
           <div class="kv"><b>active generation</b><code>${esc(m.active_generation || "—")}</code></div>

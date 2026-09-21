@@ -817,10 +817,11 @@ async fn api_metrics(State(state): State<Arc<AppState>>) -> Response {
                 json!(count_total(&mut conn, "SELECT COUNT(*) FROM conformance_reports").await);
             metrics["reservations_total"] =
                 json!(count_total(&mut conn, "SELECT COUNT(*) FROM resource_reservations").await);
-            metrics["outbox_depth"] = json!(
+            // Pending = staged but not yet journal-published.
+            metrics["outbox_pending"] = json!(
                 count_total(
                     &mut conn,
-                    "SELECT COALESCE(MAX(sequence), 0) FROM outbox_events"
+                    "SELECT COUNT(*) FROM outbox_events WHERE journal_published_at_ms IS NULL"
                 )
                 .await
             );
@@ -833,11 +834,18 @@ async fn api_metrics(State(state): State<Arc<AppState>>) -> Response {
             metrics["active_generation"] = json!(active);
             let gen_states = count_by(
                 &mut conn,
-                "SELECT state, COUNT(*) FROM config_generations GROUP BY state",
+                "SELECT validation_state, COUNT(*) FROM config_generations GROUP BY validation_state",
                 "state",
             )
             .await;
             metrics["generations_by_state"] = json!(gen_states);
+            let gen_tests = count_by(
+                &mut conn,
+                "SELECT test_state, COUNT(*) FROM config_generations GROUP BY test_state",
+                "state",
+            )
+            .await;
+            metrics["generations_by_test_state"] = json!(gen_tests);
         }
         Err(e) => metrics["kernel_db_error"] = json!(e.to_string()),
     }
