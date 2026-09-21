@@ -151,10 +151,16 @@ function decodeDataUri(ref) {
 
 function renderRunDetail(r) {
   // Skip the rebuild when nothing changed — re-rendering collapses
-  // expanded decision payloads on every poll.
+  // expanded decision payloads on every poll. Decisions are refreshed
+  // regardless: the journal trails the run row, so the decision list can
+  // arrive a poll tick after the run reaches its terminal state.
   const fp = [r.state, r.run_revision, r.step_sequence, r.output_ref].join("|");
-  if (state._runFp === fp) return;
+  if (state._runFp === fp) {
+    loadDecisions(r.run_id);
+    return;
+  }
   state._runFp = fp;
+  state._decFp = null;
   const box = $("#run-detail");
   const decoded = r.output_ref?.startsWith("data:text/plain;base64,")
     ? decodeDataUri(r.output_ref)
@@ -180,6 +186,10 @@ async function loadDecisions(runId) {
     const { decisions } = await api(
       "/api/runs/" + encodeURIComponent(runId) + "/decisions");
     if (state.selectedRun !== runId) return;
+    // Rewrite only on change so expanded payloads survive the poll.
+    const decFp = JSON.stringify(decisions || []);
+    if (state._decFp === decFp) return;
+    state._decFp = decFp;
     el.innerHTML = (decisions || []).map((d) => {
       const det = d.kind === "invoke_effect"
         ? `<code>${esc(d.detail.operation)}</code>` +
@@ -198,6 +208,7 @@ async function loadDecisions(runId) {
 async function selectRun(runId) {
   state.selectedRun = runId;
   state._runFp = null;
+  state._decFp = null;
   try {
     renderRunDetail(await api("/api/runs/" + encodeURIComponent(runId)));
     $("#stream-key").value = "run/" + runId;

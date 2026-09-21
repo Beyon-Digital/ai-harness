@@ -141,11 +141,16 @@ struct OpRecord {
     error_code: String,
 }
 
-fn load_store(path: &str) -> Store {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// Missing store ⇒ fresh empty store; every other failure is reported
+/// so the kernel leaves the effect Dispatched for reconciliation instead
+/// of committing a result computed from a silently-empty memory.
+fn load_store(path: &str) -> std::io::Result<Store> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
+        Err(e) => Err(e),
+    }
 }
 
 fn save_store(path: &str, store: &Store) {
@@ -174,7 +179,10 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
         )
     };
 
-    let mut store = load_store(store_path);
+    let mut store = match load_store(store_path) {
+        Ok(store) => store,
+        Err(e) => return (Vec::new(), format!("unavailable: {e}")),
+    };
     if let Some(rec) = store.ops.get(&req.operation_id) {
         return finish(&rec.status, rec.result_ref.clone(), &rec.error_code);
     }
@@ -277,7 +285,10 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
 }
 
 fn status(req: EffectStatusRequest, store_path: &str) -> (Vec<u8>, String) {
-    let store = load_store(store_path);
+    let store = match load_store(store_path) {
+        Ok(store) => store,
+        Err(e) => return (Vec::new(), format!("unavailable: {e}")),
+    };
     let rec = store.ops.get(&req.operation_id);
     (
         EffectStatusResponse {

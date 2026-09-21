@@ -58,6 +58,8 @@ pub struct DaemonConfig {
     pub adapter_bundles: Vec<PathBuf>,
     /// Per-run `FIXTURE_LOOP_SCRIPT` values keyed by run id.
     pub loop_scripts: HashMap<RunId, String>,
+    /// Extra env vars injected into spawned loop-adapter processes.
+    pub loop_env: HashMap<String, String>,
     /// Extra env vars injected into spawned effect-adapter processes.
     pub effect_env: HashMap<String, String>,
     /// Worker poll interval.
@@ -73,6 +75,7 @@ impl Default for DaemonConfig {
             config_doc: None,
             adapter_bundles: Vec::new(),
             loop_scripts: HashMap::new(),
+            loop_env: HashMap::new(),
             effect_env: HashMap::new(),
             poll: Duration::from_millis(50),
             json_logs: false,
@@ -344,6 +347,7 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
                     actor,
                     bundles,
                     loop_scripts: Arc::new(config.loop_scripts.clone()),
+                    loop_env: config.loop_env.clone(),
                     runtime_dir: config.runtime_dir.clone(),
                     effect_env: config.effect_env.clone(),
                 },

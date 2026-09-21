@@ -84,6 +84,7 @@ async fn e2e_memory_put_get_as_durable_effects() {
         config_doc: Some(PathBuf::from(MEMORY_CFG)),
         adapter_bundles: bundles,
         loop_scripts: scripts,
+        loop_env: HashMap::new(),
         effect_env: HashMap::new(),
         poll: std::time::Duration::from_millis(10),
         json_logs: false,
@@ -191,4 +192,126 @@ async fn e2e_memory_put_get_as_durable_effects() {
     )
     .unwrap();
     assert_eq!(store["memory"]["demo"]["m1"]["note"], "hello world");
+}
+
+/// Regression: a settled effect must be fed to the loop only on the turn
+/// right after the decision that created it. After a `wait` resume, the
+/// old effect must NOT be replayed in `LoopInput.events` — otherwise a
+/// loop that parses the newest `model.chat` result would re-issue the
+/// same decision forever. `FIXTURE_LOOP_RECORD_DIR` dumps each input.
+#[tokio::test]
+async fn e2e_settled_effects_are_fed_once_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime_dir = dir.path().join("runtime");
+    let inputs_dir = dir.path().join("inputs");
+    let run_id = "01905c5e-0000-7000-8000-00e05e700002";
+    let put = b64(serde_json::to_vec(&json!({
+        "op": "memory.put", "namespace": "replay",
+        "memory_id": "k", "record": {"v": 1},
+    }))
+    .unwrap()
+    .as_slice());
+    let get = b64(serde_json::to_vec(&json!({
+        "op": "memory.get", "namespace": "replay", "memory_id": "k",
+    }))
+    .unwrap()
+    .as_slice());
+    let t1 = "01905c5e-0000-7000-8000-00f1ef11aa01";
+    let t2 = "01905c5e-0000-7000-8000-00f1ef11aa02";
+    let script = format!(
+        r#"[{{"invoke_effect":{{"operation":"memory.put","payload":"{put}"}}}},{{"wait":{{"reason":"pause","timer_id":"{t1}"}}}},{{"invoke_effect":{{"operation":"memory.get","payload":"{get}"}}}},{{"wait":{{"reason":"pause","timer_id":"{t2}"}}}},{{"complete":{{"output_ref":"e2e://output/replay"}}}}]"#
+    );
+    let mut scripts = HashMap::new();
+    scripts.insert(RunId::from_str(run_id).unwrap(), script);
+    let mut loop_env = HashMap::new();
+    loop_env.insert(
+        "FIXTURE_LOOP_RECORD_DIR".to_owned(),
+        inputs_dir.to_str().unwrap().to_owned(),
+    );
+    let bundles = vec![
+        make_fixture_bundle(dir.path()),
+        make_effect_bundle(dir.path()),
+        make_memory_bundle(dir.path()),
+    ];
+    let _daemon = boot(DaemonConfig {
+        runtime_dir: runtime_dir.clone(),
+        config_doc: Some(PathBuf::from(MEMORY_CFG)),
+        adapter_bundles: bundles,
+        loop_scripts: scripts,
+        loop_env,
+        effect_env: HashMap::new(),
+        poll: std::time::Duration::from_millis(10),
+        json_logs: false,
+    })
+    .await
+    .expect("daemon boot");
+
+    let socket = runtime_dir.join("control.sock");
+    let session = cli(&socket, &["create-session"]).await;
+    let session_id = session["payload"].as_str().unwrap().to_owned();
+    let spec_body = serde_json::to_vec(&json!({"runtime_profile_name": "local-memory"})).unwrap();
+    let spec_path = dir.path().join("spec-replay.json");
+    std::fs::write(&spec_path, &spec_body).unwrap();
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(&spec_body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let spec_id = "01999999-0000-7000-8000-00000000a0ef";
+    cli(
+        &socket,
+        &[
+            "put-agent-spec",
+            spec_id,
+            "--version",
+            "v1",
+            "--body",
+            spec_path.to_str().unwrap(),
+        ],
+    )
+    .await;
+    cli(
+        &socket,
+        &[
+            "create-run",
+            "--run-id",
+            run_id,
+            "--session-id",
+            &session_id,
+            "--agent-spec-id",
+            spec_id,
+            "--spec-version",
+            "v1",
+            "--spec-digest",
+            &digest,
+            "--task-id",
+            run_id,
+            "--task-kind",
+            "agent",
+            "--profile",
+            "local-memory",
+        ],
+    )
+    .await;
+
+    assert_eq!(wait_terminal(&socket, run_id).await, RUN_COMPLETED);
+
+    let fed_events = |step: u32| -> Vec<serde_json::Value> {
+        let file: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(inputs_dir.join(format!("turn-{step}.json")))
+                .unwrap_or_else(|e| panic!("missing turn-{step}.json: {e}")),
+        )
+        .unwrap();
+        serde_json::from_str(file["events"].as_str().unwrap_or("[]"))
+            .unwrap_or_else(|_| panic!("turn-{step} events not JSON"))
+    };
+    // Step 1's invoke_effect committed ⇒ fed to the step-2 turn.
+    let turn2 = fed_events(2);
+    assert_eq!(turn2.len(), 1, "turn 2 should see the put effect");
+    assert_eq!(turn2[0]["operation"], "memory.put");
+    // Step 2 was `wait` — its outcome must not replay to the step-3 turn.
+    assert_eq!(fed_events(3), Vec::<serde_json::Value>::new());
+    // Step 3's invoke_effect ⇒ fed to step 4; the step-4 wait clears step 5.
+    assert_eq!(fed_events(4).len(), 1);
+    assert_eq!(fed_events(5), Vec::<serde_json::Value>::new());
 }

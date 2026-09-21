@@ -11,7 +11,9 @@
 //! - `FIXTURE_LOOP_DELAY_MS=<ms>` — sleep before each decision;
 //! - `FIXTURE_LOOP_STALE=1` — respond with `loop_epoch - 1`;
 //! - `FIXTURE_LOOP_CRASH=1` — die after receiving the request, before
-//!   responding (restart/crash tests).
+//!   responding (restart/crash tests);
+//! - `FIXTURE_LOOP_RECORD_DIR=<dir>` — write each decoded `LoopInput` as
+//!   JSON to `<dir>/turn-<step>.json` before deciding.
 //!
 //! Script vocabulary (JSON objects, exactly one key each):
 //! `{"complete":{"output_ref":"..."}}`,
@@ -83,6 +85,7 @@ fn run() -> std::io::Result<()> {
         .unwrap_or(0);
     let stale = env("FIXTURE_LOOP_STALE").as_deref() == Ok("1");
     let crash = env("FIXTURE_LOOP_CRASH").as_deref() == Ok("1");
+    let record_dir = env("FIXTURE_LOOP_RECORD_DIR").ok();
 
     while let Some(frame) = read_frame(&mut stream).map_err(err)? {
         let Some(body) = frame.body else { continue };
@@ -103,6 +106,9 @@ fn run() -> std::io::Result<()> {
         };
         if crash {
             std::process::exit(2);
+        }
+        if let Some(dir) = &record_dir {
+            record_input(dir, &request);
         }
         let response = decide(&request, &script, stale);
         if delay_ms > 0 {
@@ -255,6 +261,25 @@ fn parse_decision(step: &serde_json::Value) -> loop_decision::Decision {
     loop_decision::Decision::Fail(Fail {
         reason_code: "unrecognized_script_step".to_owned(),
     })
+}
+
+/// Dumps the decoded LoopInput so tests can inspect what the kernel fed
+/// the loop (state bytes + settled-effect batch) on a given step.
+fn record_input(dir: &str, request: &domain::generated::contract::PortCallRequest) {
+    let Ok(input) = LoopInput::decode(request.payload.as_slice()) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let dumped = serde_json::json!({
+        "step_sequence": input.step_sequence,
+        "turn_id": input.turn_id,
+        "state": String::from_utf8_lossy(&input.state),
+        "events": String::from_utf8_lossy(&input.events),
+    });
+    let _ = std::fs::write(
+        format!("{dir}/turn-{}.json", input.step_sequence),
+        dumped.to_string(),
+    );
 }
 
 fn env(key: &str) -> Result<String, std::env::VarError> {

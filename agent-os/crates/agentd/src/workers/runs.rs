@@ -113,6 +113,9 @@ pub struct RunWorkerDeps {
     pub bundles: Vec<AdapterBundle>,
     /// Per-run loop script environment (`FIXTURE_LOOP_SCRIPT`).
     pub loop_scripts: Arc<HashMap<RunId, String>>,
+    /// Extra environment injected into spawned loop-adapter processes
+    /// (e.g. `FIXTURE_LOOP_RECORD_DIR` in tests).
+    pub loop_env: HashMap<String, String>,
     /// Daemon runtime dir — hosts the fixture adapter's durable store so
     /// provider state survives a daemon restart.
     pub runtime_dir: PathBuf,
@@ -642,8 +645,10 @@ impl RunWorker {
         };
         // The opaque run-state snapshot carries the task payload so real
         // loop adapters (LLM) can see what the run is doing; the
-        // new-events batch carries settled effect outcomes as JSON so
-        // invoke_effect results flow back to the loop on the next turn.
+        // new-events batch carries effect outcomes settled by the last
+        // accepted decision's step — a settled effect is eligible for
+        // exactly the turn issued right after the decision that created
+        // it, so a wait/approval resume cannot replay an old result.
         let (state, events) = {
             let mut txn = self.read_txn().await?;
             let state = txn
@@ -657,7 +662,7 @@ impl RunWorker {
                 .list_by_run(row.run_id)
                 .await?
                 .iter()
-                .filter(|e| effects::is_terminal(e.state))
+                .filter(|e| effects::is_terminal(e.state) && e.step_sequence == row.step_sequence)
                 .map(|e| {
                     serde_json::json!({
                         "effect_id": e.effect_id.to_string(),
@@ -1150,6 +1155,7 @@ impl RunWorker {
             "OPENROUTER_SITE",
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
+            "OPENROUTER_ALLOW_ANY_BASE_URL",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1339,6 +1345,9 @@ impl RunWorker {
             ("AGENTOS_ADAPTER_ID".to_owned(), adapter_id.clone()),
             ("AGENTOS_ADAPTER_VERSION".to_owned(), version.clone()),
         ];
+        for (key, value) in &self.deps.loop_env {
+            env.push((key.clone(), value.clone()));
+        }
         if let Ok(level) = std::env::var("RUST_LOG") {
             env.push(("RUST_LOG".to_owned(), level));
         }
@@ -1351,6 +1360,9 @@ impl RunWorker {
             "OPENROUTER_SITE",
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
+            "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // Test/debug knob: the fixture loop records each LoopInput.
+            "FIXTURE_LOOP_RECORD_DIR",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()

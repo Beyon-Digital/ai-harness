@@ -179,11 +179,16 @@ fn handle(
     }
 }
 
-fn load_store(path: &str) -> BTreeMap<String, OpRecord> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// Missing store ⇒ fresh empty store; every other failure is reported
+/// so the kernel leaves the effect Dispatched for reconciliation rather
+/// than replaying/cancelling from a silently-empty op table.
+fn load_store(path: &str) -> std::io::Result<BTreeMap<String, OpRecord>> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e),
+    }
 }
 
 fn save_store(path: &str, store: &BTreeMap<String, OpRecord>) {
@@ -214,7 +219,10 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         )
     };
 
-    let mut store = load_store(store_path);
+    let mut store = match load_store(store_path) {
+        Ok(store) => store,
+        Err(e) => return (Vec::new(), format!("unavailable: {e}")),
+    };
     if let Some(rec) = store.get(&req.operation_id) {
         return (
             EffectExecutionResponse {
@@ -273,7 +281,10 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
 }
 
 fn status(req: EffectStatusRequest, store_path: &str) -> (Vec<u8>, String) {
-    let store = load_store(store_path);
+    let store = match load_store(store_path) {
+        Ok(store) => store,
+        Err(e) => return (Vec::new(), format!("unavailable: {e}")),
+    };
     let rec = store.get(&req.operation_id);
     (
         EffectStatusResponse {

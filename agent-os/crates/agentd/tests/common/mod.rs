@@ -123,6 +123,7 @@ pub async fn boot_daemon_full(
         config_doc: Some(PathBuf::from(CONFIG_YAML)),
         adapter_bundles: bundles,
         loop_scripts,
+        loop_env: HashMap::new(),
         effect_env,
         poll: std::time::Duration::from_millis(10),
         json_logs: false,

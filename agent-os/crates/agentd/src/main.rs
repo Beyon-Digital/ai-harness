@@ -135,7 +135,9 @@ async fn backup_command(args: &[String]) -> std::process::ExitCode {
     for name in ["kernel.db", "events.db"] {
         let src = runtime_dir.join(name);
         if !src.is_file() {
-            eprintln!("agentd backup: skipping missing {}", src.display());
+            // A backup missing a database is not a usable snapshot.
+            eprintln!("agentd backup: missing {}", src.display());
+            ok = false;
             continue;
         }
         let dst = out.join(name);
