@@ -40,6 +40,7 @@ use domain::generated::contract::{
     GetActiveConfigRequest, GetActiveConfigResponse, GetEffectRequest, GetEffectResponse,
     GetRunGraphRequest, GetRunGraphResponse, GetRunRequest, GetRunResponse, GetTaskRequest,
     GetTaskResponse, HealthRequest, HealthResponse, ListAdaptersRequest, ListAdaptersResponse,
+    ListApprovalsRequest, ListApprovalsResponse,
 };
 use generated::mvp_control_api_server::{MvpControlApi, MvpControlApiServer};
 
@@ -442,6 +443,27 @@ impl MvpControlApi for ControlApiService {
         Ok(Response::new(GetActiveConfigResponse {
             generation: Some(crate::views::config_generation_view(&generation)),
             active_revision: active.revision,
+        }))
+    }
+
+    async fn list_approvals(
+        &self,
+        request: Request<ListApprovalsRequest>,
+    ) -> Result<Response<ListApprovalsResponse>, Status> {
+        let _actor = self.actor_for(&request, "")?;
+        let run_filter = request.get_ref().run_id.clone();
+        let mut txn = self.store.begin_read().await.map_err(unavailable)?;
+        let rows = if run_filter.is_empty() {
+            txn.security().list_approvals().await.map_err(unavailable)?
+        } else {
+            let run_id = parse_id::<RunId>("run_id", &run_filter)?;
+            txn.security()
+                .list_approvals_by_run(run_id)
+                .await
+                .map_err(unavailable)?
+        };
+        Ok(Response::new(ListApprovalsResponse {
+            approvals: rows.iter().map(crate::views::approval_view).collect(),
         }))
     }
 

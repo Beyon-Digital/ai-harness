@@ -224,6 +224,20 @@ impl SecurityRead for SqliteSecurityRepo {
         rows.iter().map(decode_approval_request).collect()
     }
 
+    async fn list_approvals(&mut self) -> errors::Result<Vec<ApprovalRequestRow>> {
+        let mut guard = self.conn.lock().await;
+        let rows = sqlx::query(
+            "SELECT request_id, request_digest, principal_id, actor_id, run_id, operation, \
+             target_resource, capability_ids, extension_bundle_digest, config_generation_digest, \
+             expires_at_ms, nonce, state, created_at_ms, resolved_at_ms \
+             FROM approval_requests ORDER BY created_at_ms, request_id",
+        )
+        .fetch_all(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        rows.iter().map(decode_approval_request).collect()
+    }
+
     async fn list_approval_responses(
         &mut self,
         request: ApprovalRequestId,

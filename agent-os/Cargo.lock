@@ -35,10 +35,27 @@ dependencies = [
 name = "agentctl"
 version = "0.1.0"
 dependencies = [
+ "approvals",
+ "command-coordinator",
+ "config-engine",
  "control-api",
  "domain",
  "errors",
+ "event-journal-sqlite",
  "events",
+ "hyper-util",
+ "kernel-store",
+ "kernel-store-sqlite",
+ "prost",
+ "runtime",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "tokio",
+ "tonic",
+ "tower",
 ]
 
 [[package]]
@@ -290,10 +307,14 @@ name = "config-engine"
 version = "0.1.0"
 dependencies = [
  "adapter-registry",
+ "async-trait",
+ "command-coordinator",
  "domain",
  "errors",
+ "events",
  "kernel-store",
  "kernel-store-sqlite",
+ "prost",
  "serde",
  "serde_json",
  "serde_yaml",

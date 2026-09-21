@@ -217,6 +217,8 @@ pub trait SecurityRead: Send + Sync {
     ) -> Result<Option<ApprovalRequestRow>>;
     /// Approval requests owned by `run_id`, ordered oldest first.
     async fn list_approvals_by_run(&mut self, run_id: RunId) -> Result<Vec<ApprovalRequestRow>>;
+    /// Every approval request, ordered oldest first.
+    async fn list_approvals(&mut self) -> Result<Vec<ApprovalRequestRow>>;
     async fn list_approval_responses(
         &mut self,
         request: ApprovalRequestId,

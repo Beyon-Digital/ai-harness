@@ -1421,6 +1421,13 @@ impl SecurityRead for MockSecurityRepo {
         Ok(rows)
     }
 
+    async fn list_approvals(&mut self) -> errors::Result<Vec<ApprovalRequestRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<ApprovalRequestRow> = state.approval_requests.values().cloned().collect();
+        rows.sort_by_key(|row| (row.created_at_ms, row.request_id));
+        Ok(rows)
+    }
+
     async fn list_approval_responses(
         &mut self,
         request: ApprovalRequestId,

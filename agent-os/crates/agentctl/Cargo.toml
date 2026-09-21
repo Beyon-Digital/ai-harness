@@ -10,3 +10,28 @@ control-api.workspace = true
 domain.workspace = true
 errors.workspace = true
 events.workspace = true
+hyper-util.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+approvals.workspace = true
+kernel-store.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+serde_json.workspace = true
+errors.workspace = true
+command-coordinator.workspace = true
+config-engine.workspace = true
+event-journal-sqlite.workspace = true
+kernel-store-sqlite.workspace = true
+runtime.workspace = true
+tempfile.workspace = true
+testkit.workspace = true
+
+[[bin]]
+name = "agentctl"
+path = "src/main.rs"

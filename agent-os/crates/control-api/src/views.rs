@@ -184,3 +184,36 @@ pub fn adapter_view(row: &AdapterRegistrationRow) -> generated::AdapterRegistrat
         conformance_state: row.conformance_state.as_str().to_owned(),
     }
 }
+
+/// Approval request projection for `ListApprovals`.
+pub fn approval_view(
+    row: &kernel_store::models::ApprovalRequestRow,
+) -> generated::ApprovalRequestView {
+    let capabilities = if row.capability_ids.is_empty() {
+        Vec::new()
+    } else {
+        std::str::from_utf8(&row.capability_ids)
+            .unwrap_or("")
+            .split('\n')
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    generated::ApprovalRequestView {
+        request_id: row.request_id.to_string(),
+        request_digest: row.request_digest.clone(),
+        principal_id: row.principal_id.to_string(),
+        actor_id: row.actor_id.to_string(),
+        run_id: row.run_id.map(|id| id.to_string()).unwrap_or_default(),
+        operation: row.operation.clone(),
+        target_resource: row.target_resource.clone().unwrap_or_default(),
+        capability_ids: capabilities,
+        extension_bundle_digest: row.extension_bundle_digest.clone().unwrap_or_default(),
+        config_generation_digest: row.config_generation_digest.clone().unwrap_or_default(),
+        expires_at_ms: row.expires_at_ms,
+        nonce: row.nonce.clone(),
+        state: row.state.as_str().to_owned(),
+        created_at_ms: row.created_at_ms,
+        resolved_at_ms: row.resolved_at_ms.unwrap_or(0),
+    }
+}

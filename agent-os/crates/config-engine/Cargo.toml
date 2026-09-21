@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 adapter-registry.workspace = true
+async-trait.workspace = true
+command-coordinator.workspace = true
+events.workspace = true
+prost.workspace = true
 domain.workspace = true
 errors.workspace = true
 kernel-store.workspace = true
