@@ -59,7 +59,7 @@ async function loadHealth() {
   try {
     const h = await api("/api/health");
     el.textContent = `${h.status} · epoch ${h.daemon_fencing_epoch} · outbox ${h.outbox_unpublished_count}`;
-    el.className = "badge " + (h.status === "ok" || h.status === "healthy" ? "badge-ok" : "badge-warn");
+    el.className = "badge " + (["ok", "healthy", "running"].includes(h.status) ? "badge-ok" : "badge-warn");
   } catch (e) {
     el.textContent = "daemon unreachable";
     el.className = "badge badge-down";
@@ -112,6 +112,11 @@ async function loadIndex() {
   $("#runs-table tbody").innerHTML = rows.join("") ||
     '<tr><td colspan="4"><em>no runs recorded — create one or restart the gateway</em></td></tr>';
 
+  if (state.selectedRun && runs.some((r) => r.run_id === state.selectedRun)) {
+    try {
+      renderRunDetail(await api("/api/runs/" + encodeURIComponent(state.selectedRun)));
+    } catch { /* keep stale detail on transient errors */ }
+  }
 }
 
 // Delegated clicks on the stable tbody — re-rendering rows mid-poll
@@ -132,25 +137,29 @@ document.querySelector("#runs-table tbody").addEventListener("click", async (ev)
   if (link) selectRun(link.textContent.trim());
 });
 
-async function selectRun(runId) {
+function renderRunDetail(r) {
   const box = $("#run-detail");
-  try {
-    const r = await api("/api/runs/" + encodeURIComponent(runId));
-    const out = r.output_ref?.startsWith("data:text/plain;base64,")
+  const out = r.output_ref?.startsWith("data:text/plain;base64,")
       ? `<div class="kv"><b>output</b><div class="answer">${esc(atob(r.output_ref.slice("data:text/plain;base64,".length)))}</div></div>`
       : `<div class="kv"><b>output</b><code>${esc(r.output_ref || "—")}</code></div>`;
-    box.innerHTML = `
-      <div class="kv"><b>run</b><code>${esc(r.run_id)}</code></div>
-      <div class="kv"><b>task</b><code>${esc(r.task_id)}</code></div>
-      <div class="kv"><b>session</b><code>${esc(r.session_id)}</code></div>
-      <div class="kv"><b>state</b><span class="state state-${esc(r.state_name)}">${esc(r.state_name)} (${r.state})</span></div>
-      <div class="kv"><b>revision</b>${r.run_revision} · <b>epoch</b> ${r.loop_epoch} · <b>step</b> ${r.step_sequence}</div>
-      ${out}`;
-    $("#stream-key").value = "run/" + r.run_id;
+  box.innerHTML = `
+    <div class="kv"><b>run</b><code>${esc(r.run_id)}</code></div>
+    <div class="kv"><b>task</b><code>${esc(r.task_id)}</code></div>
+    <div class="kv"><b>session</b><code>${esc(r.session_id)}</code></div>
+    <div class="kv"><b>state</b><span class="state state-${esc(r.state_name)}">${esc(r.state_name)} (${r.state})</span></div>
+    <div class="kv"><b>revision</b>${r.run_revision} · <b>epoch</b> ${r.loop_epoch} · <b>step</b> ${r.step_sequence}</div>
+    ${out}`;
+}
+
+async function selectRun(runId) {
+  state.selectedRun = runId;
+  try {
+    renderRunDetail(await api("/api/runs/" + encodeURIComponent(runId)));
+    $("#stream-key").value = "run/" + runId;
     startStream();
-    loadApprovals(r.run_id);
+    loadApprovals(runId);
   } catch (e) {
-    box.innerHTML = `<em>${esc(e.message)}</em>`;
+    $("#run-detail").innerHTML = `<em>${esc(e.message)}</em>`;
   }
 }
 
@@ -303,8 +312,8 @@ async function loadAdapters() {
     $("#adapters-table tbody").innerHTML = adapters.map((a) => `<tr>
       <td><code>${esc(a.adapter?.id || "?")}</code></td>
       <td>${esc(a.adapter?.version || "")}</td>
-      <td>${esc(a.status)}</td>
-      <td>${a.ports.map((p) => `<code>${esc(p.port_id)}</code>[${p.operations.map(esc).join(",")}]`).join(" ")}</td>
+      <td>${esc(a.trust_state)} · ${esc(a.conformance_state)}</td>
+      <td>${(a.ports || []).map((p) => `<code>${esc(p)}</code>`).join(" ")}</td>
     </tr>`).join("") || '<tr><td colspan="4"><em>none registered</em></td></tr>';
   } catch (e) { toast(e.message, true); }
 }

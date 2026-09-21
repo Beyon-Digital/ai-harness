@@ -54,6 +54,18 @@ commands from `agent-os/`.
   run must carry `agent_spec_id`/`spec_version`/`spec_digest`/`requested_profile`, else it
   sits in `failed_precondition` (the run worker retries with exponential backoff).
 - GUI clicks: the runs table re-renders every 3s — click handlers are delegated on `tbody`.
+- `agent_spec_id` (and other entity ids) MUST be UUIDv7 — a v4 UUID is rejected with
+  "not a valid identifier". Mint with python:
+  `python3 -c "import time,secrets; ms=int(time.time()*1000)&0xFFFFFFFFFFFF; v=(ms<<80)|(0x7<<76)|(secrets.randbits(12)<<64)|(0b10<<62)|secrets.randbits(62); h=f'{v:032x}'; print(f'{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}')"`.
+- `agent_specs` has `UNIQUE(digest)` — an identical spec body can only ever be stored once;
+  a second id with the same body fails "conflict: storage constraint conflict". Vary the
+  body (e.g. add a label field) when re-testing.
+- Clicking a run row selects it and re-subscribes the SSE log to `run/<id>`; the detail
+  panel auto-refreshes with the 3s index poll once selected.
+- Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to
+  badge-ok, anything else warns.
+- Read the kernel sqlite read-only with python (`sqlite3` CLI may be absent):
+  `python3 -c "import sqlite3; c=sqlite3.connect('file:<db>?mode=ro',uri=True); ..."`.
 
 ## Devin Secrets Needed
 
