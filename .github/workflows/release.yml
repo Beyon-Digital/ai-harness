@@ -1,0 +1,146 @@
+name: release
+
+# Tag pushes (`v*`) publish a draft GitHub Release with desktop
+# installers and CLI binaries. PRs touching the desktop app and manual
+# dispatches run the same matrix build-only so the pipeline stays
+# continuously validated without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish artifacts to a draft release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.publish }}
+  RELEASE_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+
+jobs:
+  desktop:
+    name: Desktop bundle (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x86_64, os: ubuntu-22.04 }
+          - { label: windows-x86_64, os: windows-latest }
+          - { label: macos-arm64, os: macos-14 }
+          - { label: macos-x86_64, os: macos-13 }
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install Rust (repo-pinned channel)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.94.0"
+      - name: Linux webview/build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev libfuse2 file
+      - name: Install JS deps
+        run: npm ci
+      - name: Build bundles (build-only run)
+        if: ${{ !env.IS_RELEASE }}
+        run: npm run build
+      - name: Build bundles and attach to release (tagged run)
+        if: ${{ env.IS_RELEASE }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ env.RELEASE_NAME }}
+          releaseName: "Agent OS ${{ env.RELEASE_NAME }}"
+          releaseBody: |
+            Desktop installers for the Agent OS gateway shell plus CLI
+            binaries (agentd / agentctl / agentgw / agentos-wasm-host and
+            the bundled adapters). The desktop app connects to a running
+            gateway — start `agentd` + `agentgw` first (see
+            docs/guides/web-gui-and-llm-adapter.md), or set
+            AGENTOS_GATEWAY to a reachable gateway URL.
+
+            Binaries are unsigned: macOS Gatekeeper and Windows
+            SmartScreen will warn on first launch.
+          releaseDraft: true
+          prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
+      - name: Upload bundles as workflow artifacts (non-release runs)
+        if: ${{ !env.IS_RELEASE }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: apps/desktop/src-tauri/target/release/bundle/**
+
+  cli:
+    name: CLI binaries (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # agentd/agentgw use Unix sockets — no Windows CLI build. The
+        # Windows desktop app connects to a remote gateway instead.
+        include:
+          - { label: linux-x86_64, os: ubuntu-22.04 }
+          - { label: macos-arm64, os: macos-14 }
+          - { label: macos-x86_64, os: macos-13 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (repo-pinned channel)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.94.0"
+          targets: wasm32-wasip1
+      - name: Build CLI binaries + wasm plugin
+        working-directory: agent-os
+        run: |
+          cargo build --release \
+            -p agentd -p agentctl -p agentgw -p wasm-host \
+            -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop
+          cargo build --release -p wasm-echo --target wasm32-wasip1
+      - name: Stage archive
+        run: |
+          set -euo pipefail
+          pkg="agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}"
+          mkdir -p "dist/$pkg/bin" "dist/$pkg/share/manifests"
+          cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop} \
+             "dist/$pkg/bin/"
+          cp agent-os/target/wasm32-wasip1/release/wasm-echo.wasm "dist/$pkg/bin/"
+          cp agent-os/scripts/make-adapter-bundle.sh "dist/$pkg/bin/"
+          cp agent-os/config/*.yaml "dist/$pkg/share/"
+          for m in agent-os/fixtures/*/adapter.manifest.json; do
+            name=$(basename "$(dirname "$m")")
+            cp "$m" "dist/$pkg/share/manifests/$name.manifest.json"
+          done
+          cp docs/guides/web-gui-and-llm-adapter.md "dist/$pkg/share/"
+          cd dist && tar -czf "$pkg.tar.gz" "$pkg" && mv "$pkg.tar.gz" ..
+      - name: Publish to release
+        if: ${{ env.IS_RELEASE }}
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}.tar.gz
+      - name: Upload as workflow artifacts (non-release runs)
+        if: ${{ !env.IS_RELEASE }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.label }}
+          path: agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}.tar.gz
