@@ -13,6 +13,7 @@ use domain::ids::{
     TimerId, TurnId, WorkspaceId,
 };
 use domain::resource::{ReservationState, TimerState};
+use domain::security::ConformanceState;
 use errors::Result;
 
 use crate::models::{
@@ -291,6 +292,15 @@ pub trait AdapterRead: Send + Sync {
 #[async_trait]
 pub trait AdapterRepo: AdapterRead {
     async fn insert_registration(&mut self, registration: NewAdapterRegistration) -> Result<()>;
+    /// Reflects a conformance report outcome on the registration's
+    /// `conformance_state` (the only mutable field on the row).
+    async fn set_conformance_state(
+        &mut self,
+        adapter_id: AdapterId,
+        version: &str,
+        bundle_digest: &str,
+        state: ConformanceState,
+    ) -> Result<()>;
     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> Result<()>;
     async fn cas_instance_state(
         &mut self,

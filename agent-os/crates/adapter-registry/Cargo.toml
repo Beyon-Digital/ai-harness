@@ -9,4 +9,15 @@ publish.workspace = true
 adapter-protocol.workspace = true
 domain.workspace = true
 errors.workspace = true
+kernel-store.workspace = true
 process-supervisor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+kernel-store-sqlite.workspace = true
+serde_yaml.workspace = true
+tempfile.workspace = true
+testkit.workspace = true
+tokio.workspace = true
