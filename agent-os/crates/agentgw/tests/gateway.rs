@@ -289,11 +289,27 @@ fn gateway_decisions_decodes_run_stream() {
         assert!(Instant::now() < deadline, "run never settled");
         std::thread::park_timeout(Duration::from_millis(50));
     }
-    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/decisions"));
-    assert_eq!(code, 200, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let decisions = v["decisions"].as_array().unwrap();
-    assert!(!decisions.is_empty(), "expected at least one decision");
+    // The journal trails the run row slightly: a terminal run can read
+    // back before its LoopDecisionAccepted event is flushed, so poll for
+    // the decision rather than reading once.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let decisions = loop {
+        let (code, body) = http_get(port, &format!("/api/runs/{run_id}/decisions"));
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let decisions = v["decisions"].as_array().unwrap().clone();
+        if !decisions.is_empty() {
+            break decisions;
+        }
+        if Instant::now() >= deadline {
+            let (_, ev) = http_get(
+                port,
+                &format!("/api/events/read?stream_key=run/{run_id}&limit=50"),
+            );
+            panic!("expected at least one decision; events={ev}");
+        }
+        std::thread::park_timeout(Duration::from_millis(50));
+    };
     assert_eq!(decisions[0]["kind"], "fail");
     assert_eq!(
         decisions[0]["detail"]["reason_code"].as_str().unwrap(),

@@ -12,3 +12,8 @@ errors.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+process-supervisor.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

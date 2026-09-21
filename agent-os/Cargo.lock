@@ -1424,9 +1424,12 @@ dependencies = [
  "adapter-protocol",
  "domain",
  "errors",
+ "process-supervisor",
  "prost",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
