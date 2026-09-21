@@ -237,29 +237,38 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-ADP-001.md
     notes: 'fd-0 socketpair IPC, digest-bound handshake, process-group termination, durable instance rows.'
   ADP-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'bbc141e'
+    tests: 
+      - cargo test -p adapter-protocol
+      - cargo test -p process-supervisor
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ADP-002.md
+    notes: 'Length-prefixed frames, identity-pinned handshake, request/response/cancel/deadline session semantics; supervisor shares it.'
   ADP-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '23365a9'
+    tests: 
+      - cargo test -p adapter-registry
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ADP-003.md
+    notes: 'Manifest v1 + sha256 bundle lock; digest-bound (id,version,digest) identity; re-verify immediately before spawn.'
   ADP-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '0eb071a'
+    tests: 
+      - cargo test -p adapter-registry
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ADP-004.md
+    notes: 'Exact-major port resolution, capability+trust+sandbox-tier gates, deterministic tie-break.'
   ADP-005:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'c273829'
+    tests: 
+      - cargo test -p fixture-effect-adapter
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ADP-005.md
+    notes: 'Idempotent counter keyed by operation_id; status reconcile; crash/delay/fence flags; bundled manifest+lock.'
   WRK-001:
     status: done
     commit: 'd5bb548'
@@ -269,11 +278,13 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-WRK-001.md
     notes: 'Strict canonical parser (8 schemes, traversal-proof); capability-gated resolver; secret -> opaque ref.'
   WRK-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '9e7b4b1'
+    tests: 
+      - cargo test -p workspace
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-WRK-002.md
+    notes: 'Local adapter + git worktree fork pinned to parent recorded base_revision; copy-fork labeled; traversal denied.'
   WRK-003:
     status: pending
     commit: null
@@ -311,11 +322,13 @@ tasks:
     evidence: []
     notes: ''
   LOOP-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'c273829'
+    tests: 
+      - cargo test -p fixture-agent-loop
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-LOOP-001.md
+    notes: 'Scripted deterministic loop fixture echoing fenced step fields; no spawn/privileged capability.'
   LOOP-002:
     status: pending
     commit: null
@@ -393,11 +406,14 @@ tasks:
       - .spec/agentd-microkernel-mvp/reports/task-QUE-001.md
     notes: 'In-memory adapter: dedupe/conflict/capacity, in-flight consume, ack/nack; durable=false honestly reported.'
   ADP-006:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 'c273829'
+    tests: 
+      - cargo test -p fixture-effect-adapter
+      - cargo test -p testkit
+    evidence: 
+      - .spec/agentd-microkernel-mvp/reports/task-ADP-006.md
+    notes: 'Behavioral packs in testkit; digest-bound ConformanceReport persists state in one txn; resolver gate.'
   RUN-000:
     status: done
     commit: '5b4e2ab'
