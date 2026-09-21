@@ -72,6 +72,41 @@ async fn txn<'s>(store: &'s SqliteKernelStore, epoch: u64) -> Box<dyn KernelTxn 
         .expect("txn")
 }
 
+/// `local-trusted` binds `effect.execute` to the fixture effect adapter —
+/// generation smoke fails closed on unregistered profile bindings, so every
+/// pipeline run on the default doc needs this registration first.
+async fn seed_effect_adapter(tx: &mut dyn KernelTxn) {
+    let adapter_id: domain::ids::AdapterId =
+        "01905c5e-0000-7000-8000-e11ec7ad01ef".parse().unwrap();
+    if tx
+        .adapters()
+        .get_registration(adapter_id, "0.1.0", "sha256:effect-fixture")
+        .await
+        .expect("lookup")
+        .is_some()
+    {
+        return;
+    }
+    tx.adapters()
+        .insert_registration(kernel_store::models::NewAdapterRegistration {
+            adapter_id,
+            version: "0.1.0".into(),
+            bundle_digest: "sha256:effect-fixture".into(),
+            manifest_digest: "sha256:effect-fixture-manifest".into(),
+            runtime_type: "process".into(),
+            implemented_ports: serde_json::to_vec(&serde_json::json!([
+                {"port_id": "effect.execute", "port_version": 1}
+            ]))
+            .unwrap(),
+            capabilities: serde_json::to_vec(&Vec::<String>::new()).unwrap(),
+            trust_state: domain::security::TrustState::Trusted,
+            conformance_state: domain::security::ConformanceState::Passed,
+            created_at_ms: NOW,
+        })
+        .await
+        .expect("seed effect adapter");
+}
+
 async fn activate_gen(tx: &mut dyn KernelTxn, ids: &DeterministicIds, doc: &str) {
     use config_engine::{activate, generations, model};
     let g = generations::propose(tx, ids, doc.as_bytes().to_vec(), ActorId::new(ids), NOW)
@@ -142,6 +177,7 @@ async fn run_keeps_g1_bindings_after_g2_activates() {
 
     // G1 active -> run binds under G1.
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     activate_gen(&mut *tx, &ids, CONFIG).await;
     let run_a = insert_run(&mut *tx, &ids).await;
     let plan = plan_environment(
@@ -167,6 +203,7 @@ async fn run_keeps_g1_bindings_after_g2_activates() {
 
     // G2 activates (run-scoped profile change only).
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     let doc2 = CONFIG.replace(
         "profiles:\n  local-trusted:",
         "profiles:\n  alt:\n    agent_loop: fixture-loop\n  local-trusted:",
@@ -201,6 +238,7 @@ async fn environment_rows_are_immutable() {
     let (store, epoch, _d) = open().await;
     let ids = DeterministicIds::new(SEED + 3);
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     activate_gen(&mut *tx, &ids, CONFIG).await;
     let run = insert_run(&mut *tx, &ids).await;
     let plan = plan_environment(
@@ -284,6 +322,7 @@ async fn registered_adapter_produces_frozen_binding_row() {
         })
         .await
         .expect("register");
+    seed_effect_adapter(&mut *tx).await;
     let doc = CONFIG.replace(
         "profiles:\n  local-trusted:",
         &format!("profiles:\n  ext:\n    memory_store: {mem_adapter}\n  local-trusted:"),
@@ -333,6 +372,7 @@ async fn missing_registry_adapter_fails_run_start() {
     let (store, epoch, _d) = open().await;
     let ids = DeterministicIds::new(SEED + 5);
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     activate_gen(&mut *tx, &ids, CONFIG).await;
     let run = insert_run(&mut *tx, &ids).await;
     // "ghost" profile doesn't exist in the active generation.

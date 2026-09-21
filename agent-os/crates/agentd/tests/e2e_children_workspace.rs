@@ -28,27 +28,6 @@ fn wid(s: &str) -> WorkspaceId {
     s.parse().unwrap()
 }
 
-/// Minimal base64 (fixture scripts carry child requests as proto bytes).
-fn b64(data: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let mut n = 0u32;
-        for (i, b) in chunk.iter().enumerate() {
-            n |= (*b as u32) << (16 - 8 * i);
-        }
-        let pad = 3 - chunk.len();
-        for i in 0..4 {
-            if i < 4 - pad {
-                out.push(T[(n >> (18 - 6 * i)) as usize & 0x3f] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Proc::new("git")
         .arg("-C")
@@ -125,29 +104,6 @@ async fn wtxn(daemon: &agentd::bootstrap::Daemon) -> Box<dyn kernel_store::Kerne
         })
         .await
         .expect("write txn")
-}
-
-/// `get-run` without panicking on not-found.
-async fn try_get_run(socket: &Path, run_id: &str) -> Option<Value> {
-    let args = vec!["get-run".to_owned(), run_id.to_owned()];
-    agentctl::run(&args, socket).await.ok()
-}
-
-/// Wait until `get-run` reports a terminal state; returns the state.
-async fn wait_terminal(socket: &Path, run_id: &str) -> i64 {
-    let deadline = Instant::now() + std::time::Duration::from_millis(30_000);
-    loop {
-        let run = cli(socket, &["get-run", run_id]).await;
-        let state = run["state"].as_i64().unwrap();
-        if state >= 9 {
-            return state;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "run {run_id} never terminalized: {run}"
-        );
-        tokio::task::yield_now().await;
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

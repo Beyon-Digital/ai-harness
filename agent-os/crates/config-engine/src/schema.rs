@@ -80,6 +80,8 @@ pub struct ProfileSection {
     pub tool_runtime: Option<String>,
     /// Agent loop binding.
     pub agent_loop: Option<String>,
+    /// `effect.execute` port binding (adapter `id@version`).
+    pub effect_execute: Option<String>,
 }
 
 /// `limits:` — every normative key from `limits.yaml`.

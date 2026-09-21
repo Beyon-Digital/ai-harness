@@ -30,13 +30,14 @@ use std::time::{Duration, Instant};
 use crate::workers::loops;
 use adapter_protocol::framing::{read_frame, write_frame};
 use adapter_protocol::handshake::ExpectedIdentity;
-use adapter_protocol::session::SessionPhase;
+use adapter_protocol::session::{self, SessionPhase};
 use adapter_registry::SandboxTier;
 use adapter_registry::registry::verify_for_spawn;
 use adapter_registry::resolver::{Candidate, PortRequirement, resolve};
 use command_coordinator::CommandCoordinator;
 use command_coordinator::envelope::{CommandEnvelope, RequestDigest};
 use command_coordinator::handler::{CommandContext, CommandHandler, CommandOutcome, OutcomeCode};
+use domain::effect::EffectState;
 use domain::generated::contract;
 use domain::ids::{
     ActorId, AdapterId, AdapterInstanceId, CommandId, DaemonInstanceId, IdempotencyKey,
@@ -47,7 +48,7 @@ use domain::run::{RecoveryDisposition, RunState};
 use domain::time::Clock;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
-use kernel_store::models::{RunCas, RunPatch};
+use kernel_store::models::{EffectRow, RunCas, RunPatch};
 use kernel_store::{KernelStore, KernelTxn, TxContext};
 use process_supervisor::spawn::{self, Child, SpawnSpec, terminate};
 use prost::Message;
@@ -62,6 +63,8 @@ use crate::workers::outbox::EpochSource;
 
 /// Port id every fixture loop bundle implements.
 pub const LOOP_PORT_ID: &str = "agent_loop";
+/// Port id effect invocations dispatch against.
+pub const EFFECT_PORT_ID: &str = "effect.execute";
 /// Internal command type a loop `Wait` timer fires into.
 pub const CMD_RUN_WAIT_EXPIRED: &str = "agentos.internal.RunWaitExpired";
 
@@ -105,6 +108,12 @@ pub struct RunWorkerDeps {
     pub bundles: Vec<AdapterBundle>,
     /// Per-run loop script environment (`FIXTURE_LOOP_SCRIPT`).
     pub loop_scripts: Arc<HashMap<RunId, String>>,
+    /// Daemon runtime dir — hosts the fixture adapter's durable store so
+    /// provider state survives a daemon restart.
+    pub runtime_dir: PathBuf,
+    /// Extra environment injected into spawned effect-adapter processes
+    /// (fixture fault flags like `FIXTURE_CRASH_BEFORE_RESPONSE`).
+    pub effect_env: HashMap<String, String>,
 }
 
 struct LoopHandle {
@@ -180,14 +189,16 @@ impl RunWorker {
                 }
             }
             RunState::WaitingTool => {
-                if self.wait_expired(row).await? {
-                    self.drive(row).await
+                if self.claim_ours(row) {
+                    self.step_waiting_tool(row).await
                 } else {
-                    Ok(())
+                    self.restake_claim(row).await
                 }
             }
             RunState::WaitingChild => {
-                if self.children_terminal(row).await? {
+                if !self.claim_ours(row) {
+                    self.restake_claim(row).await
+                } else if self.children_terminal(row).await? {
                     self.drive(row).await
                 } else {
                     Ok(())
@@ -351,6 +362,42 @@ impl RunWorker {
         Ok(())
     }
 
+    /// Re-stamps the run claim under this epoch without touching the state
+    /// — a waiting run (`WaitingTool`/`WaitingChild`) keeps its wait reason
+    /// while a dead epoch's claim is fenced off. The next tick then takes
+    /// the normal `claim_ours` path.
+    async fn restake_claim(&mut self, row: &kernel_store::models::RunRow) -> errors::Result<()> {
+        let now = self.deps.clock.now_unix_ms();
+        let mut txn = self.write_txn().await?;
+        let moved = txn
+            .runs()
+            .cas_update(
+                row.run_id,
+                RunCas {
+                    run_revision: row.run_revision,
+                    state: Some(row.state),
+                    cancellation_epoch: None,
+                },
+                RunPatch {
+                    claim: Some(kernel_store::models::ClaimPatch {
+                        owner: format!("run-worker:{}", self.deps.actor),
+                        token: fresh_token(self.deps.ids.as_ref()),
+                        expires_unix_ms: now.saturating_add(CLAIM_TTL_MS as i64),
+                        daemon_epoch: self.deps.epoch.epoch(),
+                    }),
+                    bump_revision: true,
+                    ..RunPatch::default()
+                },
+            )
+            .await?;
+        if moved {
+            txn.commit().await?;
+        } else {
+            txn.rollback().await.ok();
+        }
+        Ok(())
+    }
+
     /// Issues one turn against the run's live loop process and accepts the
     /// decision; handles the follow-up instruction.
     async fn drive(&mut self, row: &kernel_store::models::RunRow) -> errors::Result<()> {
@@ -373,6 +420,7 @@ impl RunWorker {
         let outcome = loops::drive_turn(
             self.deps.store.as_ref(),
             self.deps.ids.as_ref(),
+            self.deps.clock.as_ref(),
             &ctx,
             &mut handle.child,
             &mut handle.phase,
@@ -439,10 +487,447 @@ impl RunWorker {
                 )
                 .await
             }
-            DecisionInstruction::InvokeEffect { .. } => Err(worker_error(
-                ErrorCode::FailedPrecondition,
-                "effect invocation is not wired in this driver yet",
-            )),
+            // The effect row was prepared atomically at decision accept; the
+            // `WaitingTool` arm claims, dispatches, and settles it.
+            DecisionInstruction::InvokeEffect { .. } => Ok(()),
+        }
+    }
+
+    /// Drives a `WaitingTool` run: in-flight effects are claimed,
+    /// dispatched, and reconciled; once nothing is in-flight the run
+    /// resumes (a settled effect or a fired wait timer both qualify).
+    /// A run holding an `Unknown` effect stays parked — only
+    /// `ResolveUnknownEffect` can exit that state.
+    async fn step_waiting_tool(
+        &mut self,
+        row: &kernel_store::models::RunRow,
+    ) -> errors::Result<()> {
+        let effects = {
+            let mut txn = self.read_txn().await?;
+            txn.effects().list_by_run(row.run_id).await?
+        };
+        if effects
+            .iter()
+            .any(|effect| effect.state == EffectState::Unknown)
+        {
+            return Ok(());
+        }
+        let in_flight: Vec<EffectRow> = effects
+            .into_iter()
+            .filter(|effect| effects::is_in_flight(effect.state))
+            .collect();
+        if in_flight.is_empty() {
+            if !{
+                let mut txn = self.read_txn().await?;
+                txn.effects().list_by_run(row.run_id).await?.is_empty()
+            } || self.wait_expired(row).await?
+            {
+                return self.drive(row).await;
+            }
+            return Ok(());
+        }
+        for effect in in_flight {
+            match effect.state {
+                EffectState::Prepared | EffectState::Claimed => {
+                    self.dispatch_effect(&effect).await?;
+                }
+                EffectState::Dispatched => {
+                    self.maybe_reconcile_effect(&effect).await?;
+                }
+                EffectState::Acknowledged => self.commit_acknowledged(&effect).await?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// `Acknowledged -> Committed` — same-epoch commits verify the executor;
+    /// rows acknowledged under a dead epoch commit via the durable
+    /// acknowledgment (recovery matrix: no external call needed).
+    async fn commit_acknowledged(&self, effect: &EffectRow) -> errors::Result<()> {
+        let env = self.effect_env();
+        let mut txn = self.write_txn().await?;
+        let outcome = match (effect.executor_id.as_deref(), effect.executor_fencing_token) {
+            (Some(executor_id), Some(token))
+                if effect.daemon_fencing_epoch == Some(self.deps.epoch.epoch())
+                    && effect
+                        .lease_expires_ms
+                        .is_some_and(|lease| lease > env.clock.now_unix_ms()) =>
+            {
+                effects::commit(
+                    &mut *txn,
+                    &env,
+                    effect.effect_id,
+                    &effects::ExecutorRef {
+                        executor_id,
+                        fencing_token: token,
+                    },
+                    effect.result_ref.clone(),
+                )
+                .await
+            }
+            _ => {
+                effects::commit_durable(
+                    &mut *txn,
+                    &env,
+                    effect.effect_id,
+                    effect.result_ref.clone(),
+                )
+                .await
+            }
+        };
+        match outcome {
+            Ok(_) => txn.commit().await?,
+            Err(error) => {
+                txn.rollback().await.ok();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Claims then dispatches a `Prepared`/stale-`Claimed` effect to its
+    /// bound adapter. `Dispatched` commits before the adapter call, so a
+    /// lost response reconciles by operation id rather than re-dispatching.
+    async fn dispatch_effect(&self, effect: &EffectRow) -> errors::Result<()> {
+        let env = self.effect_env();
+        let executor_id = self.executor_id();
+        // 1. Claim (or reuse a claim this worker already holds).
+        let fencing_token = {
+            let mut txn = self.write_txn().await?;
+            let outcome = effects::claim(&mut *txn, &env, effect.effect_id, &executor_id).await?;
+            let token = match outcome {
+                effects::ClaimOutcome::Claimed { fencing_token, .. } => Some(fencing_token),
+                effects::ClaimOutcome::Busy(row)
+                    if row.executor_id.as_deref() == Some(executor_id.as_str())
+                        && row.daemon_fencing_epoch == Some(self.deps.epoch.epoch())
+                        && row
+                            .lease_expires_ms
+                            .is_some_and(|lease| lease > env.clock.now_unix_ms()) =>
+                {
+                    row.executor_fencing_token
+                }
+                effects::ClaimOutcome::Busy(_) => None,
+            };
+            match token {
+                Some(token) => {
+                    // 2. Persist Dispatched before any external I/O.
+                    effects::mark_dispatched(
+                        &mut *txn,
+                        &env,
+                        effect.effect_id,
+                        &effects::ExecutorRef {
+                            executor_id: &executor_id,
+                            fencing_token: token,
+                        },
+                        Some(effect.effect_id.to_string()),
+                    )
+                    .await?;
+                    txn.commit().await?;
+                    token
+                }
+                None => {
+                    txn.rollback().await.ok();
+                    return Ok(());
+                }
+            }
+        };
+
+        // 3. Spawn the bound adapter and call `execute`.
+        let call = async {
+            let (mut child, mut phase) = self.spawn_effect_adapter(effect).await?;
+            let request = contract::PortCallRequest {
+                call_id: format!("effect-{}", effect.effect_id),
+                port_id: EFFECT_PORT_ID.to_owned(),
+                operation: "execute".to_owned(),
+                context: None,
+                payload: contract::EffectExecutionRequest {
+                    effect_id: effect.effect_id.to_string(),
+                    operation_id: effect.effect_id.to_string(),
+                    request_hash: effect.request_hash.clone(),
+                    fencing_token,
+                    payload: effect.request_payload.clone(),
+                }
+                .encode_to_vec(),
+            };
+            let response = session::dispatch_call(
+                child.ipc(),
+                &mut phase,
+                request,
+                Instant::now() + CALL_TIMEOUT,
+            );
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            response
+        }
+        .await;
+
+        // 4. Record the adapter's answer; a lost answer leaves the row
+        //    Dispatched — the reconciler owns that ambiguity.
+        let mut txn = self.write_txn().await?;
+        let executor = effects::ExecutorRef {
+            executor_id: &executor_id,
+            fencing_token,
+        };
+        let outcome = match call {
+            Ok(response) if response.error_code.is_empty() => {
+                match contract::EffectExecutionResponse::decode(response.payload.as_slice()) {
+                    Ok(decoded) if decoded.status == "succeeded" => {
+                        effects::acknowledge(
+                            &mut *txn,
+                            &env,
+                            effect.effect_id,
+                            &executor,
+                            Some(decoded.result_ref.clone()),
+                        )
+                        .await?;
+                        effects::commit(
+                            &mut *txn,
+                            &env,
+                            effect.effect_id,
+                            &executor,
+                            Some(decoded.result_ref),
+                        )
+                        .await
+                    }
+                    Ok(decoded) => {
+                        effects::fail(
+                            &mut *txn,
+                            &env,
+                            effect.effect_id,
+                            &executor,
+                            if decoded.error_code.is_empty() {
+                                decoded.status
+                            } else {
+                                decoded.error_code
+                            },
+                        )
+                        .await
+                    }
+                    Err(_) => {
+                        return Err(worker_error(
+                            ErrorCode::InvalidArgument,
+                            "effect adapter response did not decode",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                // Lost/failed call: leave Dispatched for reconciliation.
+                txn.rollback().await.ok();
+                return Ok(());
+            }
+        };
+        match outcome {
+            Ok(_) => txn.commit().await?,
+            Err(error) => {
+                txn.rollback().await.ok();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconciles a `Dispatched` effect once the dispatching executor is
+    /// dead (epoch change) or its lease lapsed — queries the provider by
+    /// the same operation id and applies the observed outcome.
+    async fn maybe_reconcile_effect(&self, effect: &EffectRow) -> errors::Result<()> {
+        let epoch_stale = effect.daemon_fencing_epoch != Some(self.deps.epoch.epoch());
+        let lease_dead = effect
+            .lease_expires_ms
+            .is_some_and(|lease| lease <= self.deps.clock.now_unix_ms());
+        let mine =
+            effect.executor_id.as_deref() == Some(self.executor_id().as_str()) && !epoch_stale;
+        if !mine && !epoch_stale && !lease_dead {
+            return Ok(());
+        }
+        let env = self.effect_env();
+        let call = async {
+            let (mut child, mut phase) = self.spawn_effect_adapter(effect).await?;
+            let operation_id = effect
+                .provider_operation_ref
+                .clone()
+                .unwrap_or_else(|| effect.effect_id.to_string());
+            let request = contract::PortCallRequest {
+                call_id: format!("status-{}", effect.effect_id),
+                port_id: EFFECT_PORT_ID.to_owned(),
+                operation: "status".to_owned(),
+                context: None,
+                payload: contract::EffectStatusRequest {
+                    effect_id: effect.effect_id.to_string(),
+                    operation_id: operation_id.clone(),
+                    provider_operation_ref: operation_id,
+                }
+                .encode_to_vec(),
+            };
+            let response = session::dispatch_call(
+                child.ipc(),
+                &mut phase,
+                request,
+                Instant::now() + CALL_TIMEOUT,
+            );
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            response
+        }
+        .await;
+        // An unreachable provider is transient — leave Dispatched for the
+        // next tick rather than parking the run on a flaky observation.
+        let Ok(response) = call else {
+            tracing::warn!(effect = %effect.effect_id, "effect status call failed");
+            return Ok(());
+        };
+        if !response.error_code.is_empty() {
+            tracing::warn!(effect = %effect.effect_id, error = %response.error_code, "effect status returned error");
+            return Ok(());
+        }
+        let observed = match contract::EffectStatusResponse::decode(response.payload.as_slice()) {
+            Ok(decoded) => match decoded.status.as_str() {
+                "succeeded" => effects::ObservedOutcome::Succeeded {
+                    result_ref: decoded.result_ref,
+                },
+                "failed" => effects::ObservedOutcome::Failed {
+                    error_code: decoded.error_code,
+                },
+                "not_found" => effects::ObservedOutcome::NotFound,
+                _ => effects::ObservedOutcome::Unknown,
+            },
+            Err(_) => effects::ObservedOutcome::Unknown,
+        };
+        let mut txn = self.write_txn().await?;
+        let plan = effects::reconcile_plan(effect, observed);
+        let outcome = effects::apply_observed(&mut *txn, &env, effect.effect_id, plan).await;
+        match outcome {
+            Ok(_) => txn.commit().await?,
+            Err(error) => {
+                txn.rollback().await.ok();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Spawns the fixture effect adapter a prepared effect binds to,
+    /// verifies the bundle digest, and completes the handshake.
+    async fn spawn_effect_adapter(
+        &self,
+        effect: &EffectRow,
+    ) -> errors::Result<(Child, SessionPhase)> {
+        let adapter_id = effect.adapter_id.to_string();
+        let version = effect.adapter_version.clone();
+        let bundle = self
+            .deps
+            .bundles
+            .iter()
+            .find(|bundle| bundle.adapter_id == adapter_id && bundle.version == version)
+            .cloned()
+            .ok_or_else(|| {
+                worker_error(
+                    ErrorCode::FailedPrecondition,
+                    "no local bundle for the frozen effect adapter",
+                )
+            })?;
+        let adapter_uuid = AdapterId::from_str(&adapter_id).map_err(|_| {
+            worker_error(
+                ErrorCode::Internal,
+                "effect adapter id is not an adapter id",
+            )
+        })?;
+        let verified = {
+            let mut txn = self.write_txn().await?;
+            let verified = verify_for_spawn(
+                &mut *txn,
+                adapter_uuid,
+                &version,
+                &effect.adapter_digest,
+                &bundle.dir,
+            )
+            .await;
+            txn.rollback().await.ok();
+            verified?
+        };
+        let mut env = vec![
+            ("FIXTURE_ADAPTER_ID".to_owned(), adapter_id.clone()),
+            ("FIXTURE_ADAPTER_VERSION".to_owned(), version.clone()),
+            (
+                "FIXTURE_STORE".to_owned(),
+                self.deps
+                    .runtime_dir
+                    .join(format!("fixture-store-{adapter_id}.json"))
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        ];
+        for (key, value) in &self.deps.effect_env {
+            env.push((key.clone(), value.clone()));
+        }
+        if let Ok(level) = std::env::var("RUST_LOG") {
+            env.push(("RUST_LOG".to_owned(), level));
+        }
+        let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());
+        let mut child = spawn::spawn(&SpawnSpec {
+            adapter_id: adapter_uuid,
+            adapter_version: version.clone(),
+            expected_bundle_digest: effect.adapter_digest.clone(),
+            adapter_instance_id: adapter_instance,
+            daemon_instance_id: self.deps.daemon_instance,
+            daemon_fencing_epoch: self.deps.epoch.epoch(),
+            protocol_version: 1,
+            executable: verified.entrypoint,
+            argv: Vec::new(),
+            env,
+            cwd: None,
+        })?;
+        let nonce = self.deps.ids.new_uuid_v7().to_string();
+        let identity = ExpectedIdentity {
+            daemon_instance_id: self.deps.daemon_instance,
+            daemon_fencing_epoch: self.deps.epoch.epoch(),
+            adapter_instance_id: adapter_instance.to_string(),
+            adapter_id: adapter_id.clone(),
+            adapter_version: version,
+            expected_bundle_digest: effect.adapter_digest.clone(),
+            protocol_version: 1,
+        };
+        let stream = child.ipc();
+        write_frame(stream, &identity.bootstrap_frame(&nonce))?;
+        let hello_deadline = Instant::now() + CALL_TIMEOUT;
+        stream
+            .set_read_timeout(Some(
+                hello_deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default(),
+            ))
+            .map_err(|error| {
+                worker_error(ErrorCode::Unavailable, "effect ipc timeout setup failed")
+                    .with_source(error)
+            })?;
+        let phase = match read_frame(stream)? {
+            Some(contract::AdapterFrame {
+                body: Some(contract::adapter_frame::Body::Hello(hello)),
+            }) => {
+                identity.verify_hello(&hello, &nonce)?;
+                SessionPhase::Ready
+            }
+            _ => {
+                return Err(worker_error(
+                    ErrorCode::Unavailable,
+                    "effect adapter did not complete the handshake",
+                ));
+            }
+        };
+        Ok((child, phase))
+    }
+
+    /// The executor identity this worker claims effects under.
+    fn executor_id(&self) -> String {
+        format!("agentd.run-worker.{}", self.deps.epoch.epoch())
+    }
+
+    /// Ambient effect-operation dependencies.
+    fn effect_env(&self) -> effects::EffectEnv<'_> {
+        effects::EffectEnv {
+            ids: self.deps.ids.as_ref(),
+            clock: self.deps.clock.as_ref(),
+            correlation_id: None,
+            causation_id: None,
         }
     }
 

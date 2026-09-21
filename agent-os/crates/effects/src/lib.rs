@@ -14,10 +14,10 @@ pub use contract::{CancellationSemantics, EffectContract};
 pub use coordinator::{AdapterBinding, PrepareOutcome, PrepareRequest, prepare_effect};
 pub use env::EffectEnv;
 pub use executor::{
-    ClaimOutcome, EFFECT_LEASE_MS, ExecutorRef, acknowledge, cancel, claim, commit, fail,
-    mark_dispatched, mark_unknown,
+    ClaimOutcome, EFFECT_LEASE_MS, ExecutorRef, acknowledge, cancel, claim, commit, commit_durable,
+    fail, mark_dispatched, mark_unknown,
 };
-pub use policy::{DeclaredSemantics, ResolveInputs, resolve};
+pub use policy::{DeclaredSemantics, ResolveInputs, kernel_declared, resolve};
 pub use reconcile::{
     EffectExecutor, ExecutionOutcome, ExecutionRequest, ObservedOutcome, ReconcilePlan, Resolution,
     apply_observed, apply_resolution, reconcile_plan,

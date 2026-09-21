@@ -18,7 +18,9 @@ use std::task::{Context, Poll};
 use command_coordinator::CommandCoordinator;
 use command_coordinator::envelope::CommandEnvelope;
 use command_coordinator::envelope::RequestDigest;
-use domain::ids::{CommandId, DeviceId, EffectId, IdempotencyKey, PrincipalId, RunId, TaskId};
+use domain::ids::{
+    CommandId, DelegationChainId, DeviceId, EffectId, IdempotencyKey, PrincipalId, RunId, TaskId,
+};
 use domain::provider::IdProvider;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
@@ -174,6 +176,9 @@ pub struct ControlApiService {
     store: Arc<dyn KernelStore>,
     ids: Arc<dyn IdProvider>,
     principals: Arc<dyn PeerPrincipalMap>,
+    /// Daemon-owner self-issued chain carrying operator capabilities
+    /// (`effect.resolve_unknown`) for local peer commands.
+    operator_chain: Option<DelegationChainId>,
     health: HealthInfo,
 }
 
@@ -185,6 +190,7 @@ impl ControlApiService {
         store: Arc<dyn KernelStore>,
         ids: Arc<dyn IdProvider>,
         principals: Arc<dyn PeerPrincipalMap>,
+        operator_chain: Option<DelegationChainId>,
         health: HealthInfo,
     ) -> Self {
         Self {
@@ -192,6 +198,7 @@ impl ControlApiService {
             store,
             ids,
             principals,
+            operator_chain,
             health,
         }
     }
@@ -265,7 +272,7 @@ impl MvpControlApi for ControlApiService {
                         .map_err(|_| Status::invalid_argument("device_id is malformed"))?,
                 )
             },
-            delegation_chain_id: None,
+            delegation_chain_id: self.operator_chain,
             request_digest: parse_id("request_digest", &req.request_digest)?,
             correlation_id: if req.correlation_id.is_empty() {
                 None

@@ -24,13 +24,16 @@ use control_api::{
 };
 use domain::faults::NoFaults;
 use domain::generated::contract;
-use domain::ids::{ActorId, DaemonInstanceId, IdempotencyKey, PrincipalId, RunId};
+use domain::ids::{
+    ActorId, CapabilityGrantId, CommandId, DaemonInstanceId, DelegationChainId, IdempotencyKey,
+    PrincipalId, RunId,
+};
 use domain::provider::{IdProvider, SystemIdProvider};
 use domain::security::TrustState;
 use domain::time::SystemClock;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
-use kernel_store::KernelStore;
+use kernel_store::{KernelStore, NewCapabilityGrant, NewDelegationHop, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -55,6 +58,8 @@ pub struct DaemonConfig {
     pub adapter_bundles: Vec<PathBuf>,
     /// Per-run `FIXTURE_LOOP_SCRIPT` values keyed by run id.
     pub loop_scripts: HashMap<RunId, String>,
+    /// Extra env vars injected into spawned effect-adapter processes.
+    pub effect_env: HashMap<String, String>,
     /// Worker poll interval.
     pub poll: Duration,
     /// Log as JSON when true.
@@ -68,6 +73,7 @@ impl Default for DaemonConfig {
             config_doc: None,
             adapter_bundles: Vec::new(),
             loop_scripts: HashMap::new(),
+            effect_env: HashMap::new(),
             poll: Duration::from_millis(50),
             json_logs: false,
         }
@@ -113,6 +119,26 @@ impl Daemon {
     /// Signals drain-first shutdown.
     pub fn initiate_shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Aborts every worker and the API server without draining — the
+    /// crash simulation a recovery test needs (kernel store, lock file,
+    /// and all committed rows survive; in-flight work does not). Blocks
+    /// until the control socket is unconnectable so an immediate reboot
+    /// cannot race the dying listener.
+    pub async fn abort(self) {
+        for worker in &self.workers {
+            worker.abort();
+        }
+        self.server.abort();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::os::unix::net::UnixStream::connect(&self.socket_path).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "aborted daemon's socket stayed live"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     /// Waits for workers and the API server to finish draining.
@@ -229,6 +255,15 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
         .expect("fixed daemon principal");
     let actor =
         ActorId::from_str("00000000-0000-7000-8000-0000000000ae").expect("fixed daemon actor");
+    let operator_chain = seed_operator_chain(
+        &store,
+        ids.as_ref(),
+        epoch,
+        clock.now_unix_ms(),
+        principal,
+        actor,
+    )
+    .await?;
 
     // Adapter bundle registration + spawn directory index.
     let mut bundles = Vec::new();
@@ -309,6 +344,8 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
                     actor,
                     bundles,
                     loop_scripts: Arc::new(config.loop_scripts.clone()),
+                    runtime_dir: config.runtime_dir.clone(),
+                    effect_env: config.effect_env.clone(),
                 },
                 config.poll,
             )
@@ -331,6 +368,7 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
         store.clone(),
         ids.clone(),
         principals.clone(),
+        Some(operator_chain),
         HealthInfo {
             status: "running".to_owned(),
             daemon_instance_id: daemon_instance.to_string(),
@@ -556,6 +594,81 @@ async fn submit(
             payload,
         })
         .await
+}
+
+/// Derives a deterministic UUIDv7-shaped id from a seed — the operator
+/// chain/grant must be identical across daemon restarts for the same owner.
+fn deterministic_uuid_v7(seed: &str) -> String {
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = 0x70 | (bytes[6] & 0x0f);
+    bytes[8] = 0x80 | (bytes[8] & 0x3f);
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+/// The local socket owner is the daemon's operator. Seeds a self-issued
+/// single-hop chain granting `effect.resolve_unknown` — the recorded exit
+/// from `BlockedUnknownEffect` requires a delegation chain, and local-peer
+/// auth derives only the owner principal, so the daemon itself must issue
+/// the operator's authority. Idempotent: the ids are content-derived and an
+/// existing chain is left untouched.
+async fn seed_operator_chain(
+    store: &SqliteKernelStore,
+    ids: &dyn IdProvider,
+    epoch: u64,
+    now_ms: i64,
+    principal: PrincipalId,
+    actor: ActorId,
+) -> errors::Result<DelegationChainId> {
+    let chain_id = DelegationChainId::from_str(&deterministic_uuid_v7(&format!(
+        "agentos/operator-chain/{principal}"
+    )))
+    .map_err(|_| boot_error("derived operator chain id is invalid"))?;
+    let grant_id = CapabilityGrantId::from_str(&deterministic_uuid_v7(&format!(
+        "agentos/operator-grant/{principal}"
+    )))
+    .map_err(|_| boot_error("derived operator grant id is invalid"))?;
+    let mut txn = store
+        .begin_write(TxContext {
+            daemon_epoch: epoch,
+            principal_id: principal,
+            command_id: CommandId::new(ids),
+            correlation_id: None,
+        })
+        .await?;
+    if txn
+        .security()
+        .list_delegation_hops(chain_id)
+        .await?
+        .is_empty()
+    {
+        txn.security()
+            .insert_grant(NewCapabilityGrant {
+                grant_id,
+                principal_id: principal,
+                actor_id: actor,
+                run_id: None,
+                capability_id: "effect.resolve_unknown".to_owned(),
+                scope: Vec::new(),
+                delegated_from_grant_id: None,
+                expires_at_ms: None,
+                revoked_at_ms: None,
+                created_at_ms: now_ms,
+            })
+            .await?;
+        txn.security()
+            .insert_delegation_hop(NewDelegationHop {
+                chain_id,
+                hop_index: 0,
+                principal_or_actor_id: actor.to_string(),
+                run_id: None,
+                capability_grant_ids: grant_id.to_hyphenated().into_bytes(),
+            })
+            .await?;
+    }
+    txn.commit().await?;
+    Ok(chain_id)
 }
 
 fn current_uid() -> u32 {

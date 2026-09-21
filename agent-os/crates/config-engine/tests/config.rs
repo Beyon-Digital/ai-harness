@@ -13,6 +13,28 @@ use tempfile::TempDir;
 use testkit::ids::DeterministicIds;
 
 const SEED: i64 = 1_700_000_000_000;
+
+/// `local-trusted` binds `effect.execute` to the fixture effect adapter —
+/// generation smoke validates profile bindings against the registry, so
+/// tests that run the pipeline on the default doc need it registered.
+async fn seed_effect_adapter(tx: &mut dyn KernelTxn) {
+    use kernel_store::NewAdapterRegistration;
+    tx.adapters()
+        .insert_registration(NewAdapterRegistration {
+            adapter_id: "01905c5e-0000-7000-8000-e11ec7ad01ef".parse().unwrap(),
+            version: "0.1.0".to_owned(),
+            bundle_digest: "ab".repeat(32),
+            manifest_digest: "cd".repeat(32),
+            runtime_type: "process".to_owned(),
+            implemented_ports: serde_json::to_vec(&["effect.execute"]).unwrap(),
+            capabilities: serde_json::to_vec(&Vec::<String>::new()).unwrap(),
+            trust_state: domain::security::TrustState::Trusted,
+            conformance_state: domain::security::ConformanceState::Passed,
+            created_at_ms: NOW,
+        })
+        .await
+        .expect("effect adapter registration");
+}
 const NOW: i64 = 1_700_000_000_000;
 const DEFAULT_CONFIG: &str = include_str!("../../../config/default.yaml");
 
@@ -211,6 +233,7 @@ async fn activation_cas_one_winner() {
     let services = model::generation_services(&model::parse_document(DEFAULT_CONFIG).unwrap());
 
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     let g1 = pipeline(&mut *tx, &ids, DEFAULT_CONFIG, true).await;
     // Differ only in a run-scoped profile (services unchanged).
     let g2_doc = DEFAULT_CONFIG.replace(
@@ -251,6 +274,7 @@ async fn service_binding_change_requires_restart() {
     // G2 changes a generation-global service binding.
     let doc2 = DEFAULT_CONFIG.replace("message_queue: memory-queue", "message_queue: other-queue");
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     let g1 = pipeline(&mut *tx, &ids, DEFAULT_CONFIG, true).await;
     let g2 = pipeline(&mut *tx, &ids, &doc2, true).await;
     activate::activate(&mut *tx, g1, 0, &running, NOW)
@@ -281,6 +305,7 @@ async fn failed_smoke_leaves_pointer_unchanged() {
     let services = model::generation_services(&model::parse_document(DEFAULT_CONFIG).unwrap());
 
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     let g1 = pipeline(&mut *tx, &ids, DEFAULT_CONFIG, true).await;
     activate::activate(&mut *tx, g1, 0, &services, NOW)
         .await
@@ -331,6 +356,7 @@ async fn reactivation_restores_known_good() {
     let services = model::generation_services(&model::parse_document(DEFAULT_CONFIG).unwrap());
 
     let mut tx = txn(&store, epoch).await;
+    seed_effect_adapter(&mut *tx).await;
     let g1 = pipeline(&mut *tx, &ids, DEFAULT_CONFIG, true).await;
     let doc2 = DEFAULT_CONFIG.replace(
         "profiles:\n  local-trusted:",

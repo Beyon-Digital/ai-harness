@@ -18,6 +18,7 @@ pub const PROFILE_PORTS: &[&str] = &[
     "model_provider",
     "tool_runtime",
     "agent_loop",
+    "effect.execute",
 ];
 
 /// A fully resolved profile: `extends` flattened in order.
@@ -62,6 +63,7 @@ pub fn resolve_profile(doc: &ConfigDocument, name: &str) -> errors::Result<Resol
             ("model_provider", &p.model_provider),
             ("tool_runtime", &p.tool_runtime),
             ("agent_loop", &p.agent_loop),
+            ("effect.execute", &p.effect_execute),
         ] {
             if let Some(v) = value {
                 bindings.insert(slot.to_owned(), v.clone());

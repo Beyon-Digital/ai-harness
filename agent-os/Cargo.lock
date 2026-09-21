@@ -71,6 +71,7 @@ dependencies = [
  "config-engine",
  "control-api",
  "domain",
+ "effects",
  "errors",
  "event-journal",
  "event-journal-sqlite",
@@ -90,6 +91,7 @@ dependencies = [
  "testkit",
  "tokio",
  "tracing",
+ "uuid",
  "workspace",
 ]
 

@@ -44,6 +44,7 @@ pub async fn serve_control_api(
             store,
             ids,
             principals,
+            None,
             HealthInfo {
                 status: "running".to_owned(),
                 daemon_instance_id: daemon_instance.to_string(),

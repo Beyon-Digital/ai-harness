@@ -115,6 +115,7 @@ impl Rig {
             self.store.clone(),
             self.ids.clone(),
             principals,
+            None,
             HealthInfo {
                 status: "running".to_owned(),
                 daemon_instance_id: "daemon-1".to_owned(),

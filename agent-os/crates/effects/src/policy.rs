@@ -110,6 +110,34 @@ pub fn resolve(inputs: &ResolveInputs) -> EffectContract {
     }
 }
 
+/// Kernel-known semantics for in-tree operations (`kernel` evidence source).
+///
+/// These are operations the kernel itself defines — the fixture adapter
+/// operations shipped for conformance/integration testing — so their
+/// semantics are authoritative evidence, not a claim. Unknown operations
+/// return `DeclaredSemantics::default()` (no contributing evidence).
+pub fn kernel_declared(operation: &str) -> DeclaredSemantics {
+    match operation {
+        "fixture.increment_counter" => DeclaredSemantics {
+            effect_class: Some(EffectClass::ExternalMutation),
+            idempotency: Some(IdempotencySemantics::IdempotencyKeySupported),
+            reconciliation: Some(ReconciliationSemantics::StatusLookup),
+            cancellation: Some(CancellationSemantics::BeforeDispatch),
+            compensation_capability: None,
+        },
+        // Non-reconcilable mode for the INT-003 blocked-run path: the kernel
+        // knows this operation cannot be observed after dispatch.
+        "fixture.unreconcilable_counter" => DeclaredSemantics {
+            effect_class: Some(EffectClass::ExternalMutation),
+            idempotency: Some(IdempotencySemantics::NotIdempotent),
+            reconciliation: Some(ReconciliationSemantics::Impossible),
+            cancellation: Some(CancellationSemantics::Unsupported),
+            compensation_capability: None,
+        },
+        _ => DeclaredSemantics::default(),
+    }
+}
+
 /// Returns the least-safe contributed value for one axis.
 fn weakest<T: Copy>(
     sources: &[&DeclaredSemantics],

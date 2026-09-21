@@ -7,9 +7,10 @@
 #![forbid(unsafe_code)]
 
 use domain::generated::contract::{LoopDecision, loop_decision};
-use domain::ids::{DecisionId, EventId, RunId, TurnId};
+use domain::ids::{DecisionId, EffectId, EventId, RunId, TurnId};
 use domain::provider::IdProvider;
 use domain::run::RunState;
+use domain::time::Clock;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use events::StreamKey;
@@ -131,7 +132,9 @@ fn decision_type_and_instruction(
                 payload: e.payload.clone(),
                 effect_claim: e.effect_claim.clone(),
             },
-            RunState::Running,
+            // The run parks on the prepared effect; the worker dispatches
+            // it, then settles the wait (specs/command-catalog.md).
+            RunState::WaitingTool,
         ),
         loop_decision::Decision::RequestApproval(a) => (
             "RequestApproval",
@@ -155,6 +158,7 @@ fn decision_type_and_instruction(
 pub async fn accept_decision(
     txn: &mut dyn KernelTxn,
     ids: &dyn IdProvider,
+    clock: &dyn Clock,
     run: RunId,
     decision: &LoopDecision,
     decision_bytes: &[u8],
@@ -272,6 +276,31 @@ pub async fn accept_decision(
             "run moved during decision accept",
         ));
     }
+    // An accepted `InvokeEffect` prepares the durable effect record in the
+    // same transaction as the decision (specs/command-catalog.md:
+    // "Acceptance and resulting mutation/effect/child preparation are
+    // atomic"; emits `EffectPrepared` + `RunWaitingTool`).
+    if let DecisionInstruction::InvokeEffect {
+        operation, payload, ..
+    } = &instruction
+    {
+        let effect_env = effects::EffectEnv {
+            ids,
+            clock,
+            correlation_id: None,
+            causation_id: None,
+        };
+        prepare_effect_in_txn(
+            txn,
+            &effect_env,
+            run,
+            decision,
+            turn.step_sequence,
+            operation,
+            payload,
+        )
+        .await?;
+    }
     let row = txn
         .loop_turns()
         .get_decision(run, decision_id)
@@ -314,4 +343,90 @@ pub async fn accept_decision(
         }
     }
     Ok(AcceptOutcome::Accepted { row, instruction })
+}
+
+/// Prepares the durable `Prepared` effect for an accepted `InvokeEffect`
+/// inside the decision transaction.
+///
+/// The adapter binding comes from the run's frozen `resolved_bindings`
+/// (`effect.execute` port); the effective contract is the conservative
+/// policy resolution over kernel-known semantics plus the bound adapter's
+/// trust/conformance state.
+async fn prepare_effect_in_txn(
+    txn: &mut dyn KernelTxn,
+    env: &effects::EffectEnv<'_>,
+    run: RunId,
+    decision: &LoopDecision,
+    step_sequence: u64,
+    operation: &str,
+    payload: &[u8],
+) -> errors::Result<()> {
+    let row = txn
+        .runs()
+        .get(run)
+        .await?
+        .ok_or_else(|| dec_error(ErrorCode::Internal, "run vanished mid-accept"))?;
+    let environment_id = row.resolved_environment_id.ok_or_else(|| {
+        dec_error(
+            ErrorCode::FailedPrecondition,
+            "InvokeEffect before environment binding",
+        )
+    })?;
+    let binding = txn
+        .environments()
+        .get_bindings(environment_id)
+        .await?
+        .into_iter()
+        .find(|b| b.port_id == "effect.execute")
+        .ok_or_else(|| {
+            dec_error(
+                ErrorCode::FailedPrecondition,
+                "frozen environment has no effect.execute binding",
+            )
+        })?;
+    let registration = txn
+        .adapters()
+        .get_registration(
+            binding.adapter_id,
+            &binding.adapter_version,
+            &binding.adapter_digest,
+        )
+        .await?
+        .ok_or_else(|| {
+            dec_error(
+                ErrorCode::FailedPrecondition,
+                "bound effect adapter is not registered",
+            )
+        })?;
+    let contract = effects::resolve(&effects::ResolveInputs {
+        kernel: Some(effects::kernel_declared(operation)),
+        claim: None,
+        trust: registration.trust_state,
+        conformance: registration.conformance_state,
+        policy: None,
+    });
+    let decision_id = decision
+        .decision_id
+        .parse::<DecisionId>()
+        .map_err(|_| dec_error(ErrorCode::InvalidArgument, "decision_id is not an id"))?;
+    effects::prepare_effect(
+        txn,
+        env,
+        effects::PrepareRequest {
+            effect_id: EffectId::new(env.ids),
+            run_id: run,
+            step_sequence,
+            decision_id,
+            operation: operation.to_owned(),
+            request_payload: payload.to_vec(),
+            adapter: effects::AdapterBinding {
+                adapter_id: binding.adapter_id,
+                adapter_version: binding.adapter_version,
+                adapter_digest: binding.adapter_digest,
+            },
+            contract,
+        },
+    )
+    .await?;
+    Ok(())
 }

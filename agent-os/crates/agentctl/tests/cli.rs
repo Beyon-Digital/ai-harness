@@ -10,9 +10,9 @@ use control_api::{
     ControlApiService, ControlSocket, EventApiService, HealthInfo, UidPrincipalMap, serve,
 };
 use domain::faults::NoFaults;
-use domain::ids::PrincipalId;
+use domain::ids::{CommandId, PrincipalId};
 use domain::time::SystemClock;
-use kernel_store::KernelStore;
+use kernel_store::{KernelStore, TxContext};
 use kernel_store_sqlite::{SqliteKernelStore, StoreConfig};
 use tempfile::TempDir;
 use testkit::ids::DeterministicIds;
@@ -48,6 +48,36 @@ impl Rig {
             .expect("fence");
         let uid = rustix::process::geteuid().as_raw();
         let principal = PrincipalId::from_str("00000000-0000-7000-8000-000000000001").unwrap();
+
+        // The canonical config binds `effect.execute` to the fixture effect
+        // adapter — seed its registration so `config test` resolves it.
+        {
+            let mut txn = store
+                .begin_write(TxContext {
+                    daemon_epoch: fence.epoch.0,
+                    principal_id: principal,
+                    command_id: CommandId::new(ids.as_ref()),
+                    correlation_id: None,
+                })
+                .await
+                .expect("write txn");
+            txn.adapters()
+                .insert_registration(kernel_store::NewAdapterRegistration {
+                    adapter_id: "01905c5e-0000-7000-8000-e11ec7ad01ef".parse().unwrap(),
+                    version: "0.1.0".to_owned(),
+                    bundle_digest: "test".repeat(16),
+                    manifest_digest: "test".repeat(16),
+                    runtime_type: "process".to_owned(),
+                    implemented_ports: serde_json::to_vec(&["effect.execute"]).unwrap(),
+                    capabilities: serde_json::to_vec(&Vec::<String>::new()).unwrap(),
+                    trust_state: domain::security::TrustState::Trusted,
+                    conformance_state: domain::security::ConformanceState::Passed,
+                    created_at_ms: 0,
+                })
+                .await
+                .expect("fixture effect registration");
+            txn.commit().await.expect("registration commit");
+        }
 
         let mut registry = CommandRegistry::new();
         runtime::register_handlers(
@@ -106,6 +136,7 @@ impl Rig {
             store,
             ids,
             principals.clone(),
+            None,
             HealthInfo {
                 status: "running".to_owned(),
                 daemon_instance_id: "test-daemon".to_owned(),

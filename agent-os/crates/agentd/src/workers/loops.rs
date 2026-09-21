@@ -19,6 +19,7 @@ use adapter_protocol::session::{self, CallError, SessionPhase};
 use domain::generated::contract::{LoopDecision, LoopInput, PortCallRequest};
 use domain::ids::RunId;
 use domain::provider::IdProvider;
+use domain::time::Clock;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::models::LoopTurnRow;
@@ -52,6 +53,7 @@ pub const LOOP_NEXT_OPERATION: &str = "next";
 pub async fn drive_turn<S>(
     store: &S,
     ids: &dyn IdProvider,
+    clock: &dyn Clock,
     ctx: &TxContext,
     child: &mut Child,
     phase: &mut SessionPhase,
@@ -112,16 +114,27 @@ where
 
     // 3. Atomic accept: validate fence, record the decision, move the
     //    run, and produce the follow-up instruction.
-    accept_with_new_txn(store, ids, ctx, turn, &decision, &response.payload, now_ms).await
+    accept_with_new_txn(
+        store,
+        ids,
+        clock,
+        ctx,
+        turn,
+        &decision,
+        &response.payload,
+        now_ms,
+    )
+    .await
 }
 
 /// Separate txn for accept so the issue commits even if the process
 /// dies mid-call (the `issued` turn is then reconciled as stale on
 /// restart/rebind).
-#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn accept_with_new_txn<S>(
     store: &S,
     ids: &dyn IdProvider,
+    clock: &dyn Clock,
     ctx: &TxContext,
     turn: LoopTurnRow,
     decision: &LoopDecision,
@@ -135,6 +148,7 @@ where
     let outcome = decision::accept_decision(
         &mut *txn,
         ids,
+        clock,
         turn.run_id,
         decision,
         decision_bytes,

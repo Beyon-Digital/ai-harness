@@ -16,6 +16,7 @@ profiles:
     workspace: local-workspace
     artifact_store: local-artifacts
     agent_loop: fixture-loop
+    effect_execute: 01905c5e-0000-7000-8000-e11ec7ad01ef@1
 
 policies:
   sandbox:
