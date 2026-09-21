@@ -423,11 +423,21 @@ tasks:
       cancel/spawn race consistent under both orderings; fixed agentctl cancel-run
       sending u64::MAX instead of 0 for an absent --expected-revision.
   INT-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 39edab0
+    tests:
+      - cargo test -p agentd --test e2e_effect_recovery
+      - cargo test -p agentd --test e2e_children_workspace
+      - cargo test --workspace
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo fmt --check
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-INT-003.md
+    notes: real daemon abort/restart under higher epoch; fixture crash flag
+      forces Dispatched-after-side-effect; reconciles by operation_id
+      (exactly-once); unreconcilable contract -> Unknown +
+      BLOCKED_UNKNOWN_EFFECT until resolve-effect. Also restakes dead-epoch
+      claims on waiting runs (WaitingTool/WaitingChild were unreclaimable).
   INT-004:
     status: pending
     commit: null
