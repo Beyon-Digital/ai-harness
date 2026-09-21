@@ -314,6 +314,9 @@ pub struct LeasePatch {
     pub owner_run_id: Option<RunId>,
     pub mode: Option<WorkspaceAccessMode>,
     pub delegated_from: Option<Vec<u8>>,
+    /// Next epoch to stamp on transfer; `cas_lease` still checks the
+    /// current epoch, so a stale-token write to the new owner fails.
+    pub lease_epoch: Option<u64>,
 }
 
 /// Row mirror of `effects`.

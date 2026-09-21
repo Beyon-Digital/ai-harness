@@ -24,6 +24,7 @@ pub(crate) mod sessions;
 pub(crate) mod streams;
 pub(crate) mod tasks;
 pub(crate) mod timers;
+pub(crate) mod workspace_leases;
 pub(crate) mod workspaces;
 
 use std::sync::Arc;
