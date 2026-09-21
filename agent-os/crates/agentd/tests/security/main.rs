@@ -235,7 +235,8 @@ fn t2_requirement_never_served_by_untrusted_adapter() {
     };
 
     // The untrusted adapter alone must fail closed.
-    let only_untrusted = adapter_registry::resolve(&requirement, &[untrusted.clone()], &[]);
+    let only_untrusted =
+        adapter_registry::resolve(&requirement, std::slice::from_ref(&untrusted), &[]);
     assert!(
         only_untrusted.is_err(),
         "T2 requirement resolved to an untrusted adapter"
