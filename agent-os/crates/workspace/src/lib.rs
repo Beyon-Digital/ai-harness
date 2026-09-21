@@ -1,6 +1,7 @@
 //! Workspace coordination, leases, and the local adapter.
 #![forbid(unsafe_code)]
 
+pub mod coordinator;
 pub mod git;
 pub mod local;
 
