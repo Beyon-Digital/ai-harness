@@ -460,11 +460,18 @@ tasks:
     notes: 10 boundary checks; parser hardened so secret:// tokens reject
       decoded separators (%2e%2e%2f traversal)
   REL-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 7d382c4
+    tests:
+    - bash scripts/release_gate.sh --fast (clean worktree checkout)
+    evidence:
+    - docs/verification-report-template.md
+    - scripts/release_gate.sh
+    notes: gate PASS on clean checkout — 12 checks green (validators, contract
+      lock, fmt, clippy -D warnings, workspace tests, concurrency/security/
+      property/e2e suites, BLOCKING_MVP + sleep-hygiene sweeps); JSON +
+      Markdown reports carry git SHA/toolchain/platform and map all 24
+      MVP_EXIT_CRITERIA rows to passing evidence
   QUE-001:
     status: done
     commit: ce2cd5a
