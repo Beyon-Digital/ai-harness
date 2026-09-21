@@ -55,6 +55,7 @@ struct LlmConfig {
     api_key: String,
     default_model: String,
     base_url: String,
+    allow_any: bool,
     site: Option<String>,
     app_name: Option<String>,
     timeout: Duration,
@@ -92,23 +93,17 @@ fn run() -> std::io::Result<()> {
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned())
         .trim_end_matches('/')
         .to_owned();
-    if env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() != Ok("1") {
-        let host = base_url
-            .strip_prefix("https://")
-            .and_then(|rest| rest.split('/').next())
-            .and_then(|h| h.split(':').next())
-            .unwrap_or_default();
-        if !(host == "openrouter.ai" || host.ends_with(".openrouter.ai")) {
-            return Err(err_msg(
-                "OPENROUTER_BASE_URL must be https on openrouter.ai \
-                 (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)",
-            ));
-        }
+    let allow_any = env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() == Ok("1");
+    if !allow_any && let Err(e) = endpoint_allowed(&base_url) {
+        return Err(err_msg(format!(
+            "OPENROUTER_BASE_URL {e} (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)"
+        )));
     }
     let config = LlmConfig {
         api_key: env("OPENROUTER_API_KEY").unwrap_or_default(),
         default_model: env("OPENROUTER_MODEL").unwrap_or_else(|_| "openrouter/free".to_owned()),
         base_url,
+        allow_any,
         site: env("OPENROUTER_SITE").ok(),
         app_name: env("OPENROUTER_APP_NAME").ok(),
         timeout: env("OPENROUTER_TIMEOUT_MS")
@@ -242,7 +237,25 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
     let Ok(payload) = serde_json::from_slice::<Value>(&req.payload) else {
         return fail("invalid_argument");
     };
+    // Per-request endpoint override: the GUI sends `base_url` when a
+    // custom OpenAI-compatible provider is selected. Same guard as the
+    // env default — https on openrouter.ai unless the operator opted out
+    // with OPENROUTER_ALLOW_ANY_BASE_URL=1 — so an effect payload cannot
+    // exfiltrate the API key to an arbitrary host.
+    let base_url = match payload.get("base_url").and_then(Value::as_str) {
+        Some(url) => {
+            let url = url.trim_end_matches('/').to_owned();
+            if !config.allow_any
+                && let Err(e) = endpoint_allowed(&url)
+            {
+                return fail(&format!("base_url {e}"));
+            }
+            url
+        }
+        None => config.base_url.clone(),
+    };
     let mut body = payload.clone();
+    body.as_object_mut().map(|m| m.remove("base_url"));
     if body.get("model").is_none() {
         body["model"] = Value::String(config.default_model.clone());
     }
@@ -250,7 +263,7 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         return fail("invalid_argument");
     }
 
-    match call_chat(config, &body) {
+    match call_chat(config, &base_url, &body) {
         Ok(content) => {
             let result_ref = data_uri(&content);
             store.insert(
@@ -299,8 +312,23 @@ fn status(req: EffectStatusRequest, store_path: &str) -> (Vec<u8>, String) {
     )
 }
 
-fn call_chat(config: &LlmConfig, body: &Value) -> Result<String, String> {
-    let url = format!("{}/chat/completions", config.base_url);
+/// SSRF guard for provider endpoints: https on openrouter.ai or a
+/// subdomain. Anything else requires the operator opt-out.
+fn endpoint_allowed(url: &str) -> Result<(), String> {
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|h| h.split(':').next())
+        .unwrap_or_default();
+    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
+        Ok(())
+    } else {
+        Err("must be https on openrouter.ai".to_owned())
+    }
+}
+
+fn call_chat(config: &LlmConfig, base_url: &str, body: &Value) -> Result<String, String> {
+    let url = format!("{base_url}/chat/completions");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
         .build()
@@ -373,6 +401,6 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
-fn err_msg(msg: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_owned())
+fn err_msg(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
 }

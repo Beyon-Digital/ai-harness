@@ -203,11 +203,30 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
     }
 
     // No model effect yet — request one through the Effect Coordinator.
-    let task = String::from_utf8_lossy(&input.state);
+    // The run task may be a plain string or a JSON envelope
+    // `{"task": ..., "model"?: ..., "base_url"?: ...}` the GUI emits when a
+    // non-default OpenAI-compatible provider is selected; the base URL is
+    // enforced by the effect adapter's endpoint guard.
+    let raw = String::from_utf8_lossy(&input.state);
+    let envelope = serde_json::from_str::<Value>(raw.trim()).ok();
+    let get = |key: &str| {
+        envelope
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let task = get("task").unwrap_or_else(|| raw.to_string());
+    let effective_model = get("model").unwrap_or_else(|| model.to_owned());
+    let mut request = chat_request(&effective_model, &task);
+    if let Some(url) = get("base_url") {
+        request["base_url"] = Value::String(url);
+    }
     reply(
         Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
             operation: MODEL_CHAT_OP.to_owned(),
-            payload: serde_json::to_vec(&chat_request(model, &task)).unwrap_or_default(),
+            payload: serde_json::to_vec(&request).unwrap_or_default(),
             effect_claim: Vec::new(),
         })),
         String::new(),

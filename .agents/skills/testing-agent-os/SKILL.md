@@ -80,6 +80,38 @@ commands from `agent-os/`.
   render `key=value` pairs. The `environment` block comes from
   `GET /api/runs/<id>/environment` (profile env id, loop adapter, bindings per port —
   wasm adapter ids show the wasm-bound effect.execute).
+
+## React SPA (rebuilt web UI, agentgw serves rust-embed from crates/agentgw/web/dist)
+
+- Source is `crates/agentgw/web-app/` (React/Vite/Tailwind/shadcn). Left sidebar:
+  Chat, Runs, Pipelines, Adapters, Config, Approvals, System. Health badge bottom-left.
+- The app is state-based with NO client router — server fallback serves index.html for
+  any path (`/runs` → 200, no 404) but the SPA always boots to Chat; deep links are
+  cosmetic only.
+- `GET /api/index` returns BARE REFS — runs `{run_id,session_id,task_id}`, specs
+  `{agent_spec_id,digest,version}`; hydrated rows come from `GET /api/runs`
+  (state/state_name/epoch/step/output) added later. Specs carry display_name+profile
+  in newer index entries — specs created before that build render as "agent".
+- (Fixed) `ChatPage.send()` used to omit `requested_profile` → daemon retried
+  `not_found: profile '' not defined` forever at `thinking…`/`created`. Now send()
+  passes the spec's profile AND the gateway backfills `requested_profile` from the
+  spec index when callers omit it. If a chat ever wedges at `created` again, check
+  `agentd.log` for `profile ''` retries — that's this regression.
+- `POST /api/config/proposals {document}` → `{proposal_id,path,valid,error}` — writes
+  `<runtime>/proposed/*.yaml` even when `valid:false`. Specs are POST-only (PUT → 405).
+- React Flow drag for pipeline edges: source handles are ~10px dots; tool presses off
+  by ≥1px drag the node instead. Calibrate with a pointermove listener
+  (`window.__hit`) — this session's mapping was `css_x = tool_x*1.5625 - 17`,
+  `css_y = tool_y*1.5625 - 97` (differs per window size; verify before dragging).
+  `left_mouse_down`/`left_mouse_up` take no coordinate — mouse_move to the handle
+  first, verify `elementFromPoint`/`__hit` says `react-flow__handle`, press, move in
+  ~100px steps to the target handle, release. Synthetic PointerEvent dispatch does NOT
+  connect (edges=0); real drags only.
+- System page metrics: map-valued metrics (`runs_by_state`, `effects_by_state`, …)
+  render `state: count` pairs ("9: 4  10: 1"); an earlier build rendered literal
+  `[object Object]` — if that regresses, flattenMetrics is not formatting maps.
+- `provider_unreachable` from openrouter-effect can be transient free-tier routing —
+  retry before calling it a failure (key auth was 200 while the model call failed).
 - Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to
   badge-ok, anything else warns.
 - Read the kernel sqlite read-only with python (`sqlite3` CLI may be absent):
