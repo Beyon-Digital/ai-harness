@@ -167,18 +167,36 @@ async fn over_delegation_is_rejected() {
         .reserve(run, ResourceUnit::SandboxSlots, 4, None, 0)
         .await
         .expect("parent");
-    h.reserve(run, ResourceUnit::SandboxSlots, 3, Some(parent.reservation_id), 0)
-        .await
-        .expect("first child fits");
+    h.reserve(
+        run,
+        ResourceUnit::SandboxSlots,
+        3,
+        Some(parent.reservation_id),
+        0,
+    )
+    .await
+    .expect("first child fits");
     let err = h
-        .reserve(run, ResourceUnit::SandboxSlots, 2, Some(parent.reservation_id), 0)
+        .reserve(
+            run,
+            ResourceUnit::SandboxSlots,
+            2,
+            Some(parent.reservation_id),
+            0,
+        )
         .await
         .expect_err("3+2 exceeds 4");
     assert_eq!(err.code(), ErrorCode::ResourceExhausted);
     // Boundary: exactly the remaining budget still fits.
-    h.reserve(run, ResourceUnit::SandboxSlots, 1, Some(parent.reservation_id), 0)
-        .await
-        .expect("remaining 1 fits");
+    h.reserve(
+        run,
+        ResourceUnit::SandboxSlots,
+        1,
+        Some(parent.reservation_id),
+        0,
+    )
+    .await
+    .expect("remaining 1 fits");
 }
 
 #[tokio::test]
@@ -190,7 +208,13 @@ async fn released_budget_can_be_re_reserved() {
         .await
         .expect("parent");
     let child = h
-        .reserve(run, ResourceUnit::ModelTokens, 2, Some(parent.reservation_id), 0)
+        .reserve(
+            run,
+            ResourceUnit::ModelTokens,
+            2,
+            Some(parent.reservation_id),
+            0,
+        )
         .await
         .expect("child fills the budget");
     // Allocate then release frees the delegated amount.
@@ -202,11 +226,20 @@ async fn released_budget_can_be_re_reserved() {
         .await
         .expect("release");
     txn.commit().await.expect("commit");
-    assert_eq!(h.state(child.reservation_id).await, ReservationState::Released);
+    assert_eq!(
+        h.state(child.reservation_id).await,
+        ReservationState::Released
+    );
     // A fresh child may re-reserve the full budget.
-    h.reserve(run, ResourceUnit::ModelTokens, 2, Some(parent.reservation_id), 0)
-        .await
-        .expect("released budget re-reservable");
+    h.reserve(
+        run,
+        ResourceUnit::ModelTokens,
+        2,
+        Some(parent.reservation_id),
+        0,
+    )
+    .await
+    .expect("released budget re-reservable");
 }
 
 #[tokio::test]
@@ -222,14 +255,24 @@ async fn concurrent_children_cannot_exceed_parent() {
     for _ in 0..10 {
         let h = Arc::clone(&h);
         joins.push(tokio::spawn(async move {
-            h.reserve(run, ResourceUnit::ChildRunSlots, 1, Some(parent.reservation_id), 0)
-                .await
+            h.reserve(
+                run,
+                ResourceUnit::ChildRunSlots,
+                1,
+                Some(parent.reservation_id),
+                0,
+            )
+            .await
         }));
     }
     let mut won = 0;
     let mut lost = 0;
     for join in joins {
-        match join.await.expect("task").map_err(|e: errors::KernelError| e.code()) {
+        match join
+            .await
+            .expect("task")
+            .map_err(|e: errors::KernelError| e.code())
+        {
             Ok(_) => won += 1,
             Err(ErrorCode::ResourceExhausted | ErrorCode::Conflict | ErrorCode::Unavailable) => {
                 lost += 1
@@ -250,7 +293,13 @@ async fn unknown_external_allocation_recovers_by_refencing() {
         .await
         .expect("parent");
     let child = h
-        .reserve(run, ResourceUnit::SandboxSlots, 1, Some(parent.reservation_id), 7)
+        .reserve(
+            run,
+            ResourceUnit::SandboxSlots,
+            1,
+            Some(parent.reservation_id),
+            7,
+        )
         .await
         .expect("external reservation");
     let mut txn = h.write().await;
@@ -264,7 +313,13 @@ async fn unknown_external_allocation_recovers_by_refencing() {
     txn.commit().await.expect("commit");
     // The uncertain child still counts against the budget — nothing frees it.
     let err = h
-        .reserve(run, ResourceUnit::SandboxSlots, 1, Some(parent.reservation_id), 0)
+        .reserve(
+            run,
+            ResourceUnit::SandboxSlots,
+            1,
+            Some(parent.reservation_id),
+            0,
+        )
         .await
         .expect_err("unknown allocations still hold budget");
     assert_eq!(err.code(), ErrorCode::ResourceExhausted);
@@ -283,7 +338,10 @@ async fn unknown_external_allocation_recovers_by_refencing() {
         .await
         .expect("new owner releases");
     txn.commit().await.expect("commit");
-    assert_eq!(h.state(child.reservation_id).await, ReservationState::Released);
+    assert_eq!(
+        h.state(child.reservation_id).await,
+        ReservationState::Released
+    );
 }
 
 #[tokio::test]
@@ -295,7 +353,13 @@ async fn mismatched_unit_or_dead_parent_is_rejected() {
         .await
         .expect("parent");
     let err = h
-        .reserve(run, ResourceUnit::WallClockMs, 1, Some(parent.reservation_id), 0)
+        .reserve(
+            run,
+            ResourceUnit::WallClockMs,
+            1,
+            Some(parent.reservation_id),
+            0,
+        )
         .await
         .expect_err("cross-unit delegation");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);
@@ -309,7 +373,13 @@ async fn mismatched_unit_or_dead_parent_is_rejected() {
         .expect("release");
     txn.commit().await.expect("commit");
     let err = h
-        .reserve(run, ResourceUnit::DiskBytes, 1, Some(parent.reservation_id), 0)
+        .reserve(
+            run,
+            ResourceUnit::DiskBytes,
+            1,
+            Some(parent.reservation_id),
+            0,
+        )
         .await
         .expect_err("released parent cannot delegate");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);

@@ -335,7 +335,9 @@ pub async fn mark_fired(
 /// `run/<run-id>` for run-bound timers, `config/global` for daemon timers
 /// (the catalog stream is run-scoped; run-less timers are out of catalog).
 fn timer_stream(run_id: Option<RunId>) -> StreamKey {
-    run_id.map(StreamKey::run).unwrap_or_else(StreamKey::config_global)
+    run_id
+        .map(StreamKey::run)
+        .unwrap_or_else(StreamKey::config_global)
 }
 
 /// Canonical event payload: the schedule-shaped identity of the timer.

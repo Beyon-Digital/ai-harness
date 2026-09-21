@@ -3,9 +3,7 @@
 use domain::generated::contract::ExecutionContext;
 use errors::codes::ErrorCode;
 use proptest::prelude::*;
-use resource_uri::{
-    DenyAllGate, PermitSetGate, ResolvedResource, ResourceResolver, ResourceUri,
-};
+use resource_uri::{DenyAllGate, PermitSetGate, ResolvedResource, ResourceResolver, ResourceUri};
 use testkit::ids::DeterministicIds;
 
 const SEED: i64 = 1_700_000_000_000;
@@ -157,9 +155,7 @@ fn resolver_checks_capability_before_dispatch() {
 
     // Without the capability the same URI fails before dispatch.
     let denied = ResourceResolver::new(DenyAllGate);
-    let err = denied
-        .resolve(&ctx(), &uri)
-        .expect_err("permission denied");
+    let err = denied.resolve(&ctx(), &uri).expect_err("permission denied");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);
 }
 
@@ -171,7 +167,10 @@ fn secret_resolution_never_exposes_a_path() {
     let resolved = resolver.resolve(&ctx(), &uri).expect("permitted");
     match resolved {
         ResolvedResource::SecretRef { namespace, name } => {
-            assert_eq!((namespace, name), ("openrouter".to_owned(), "key".to_owned()));
+            assert_eq!(
+                (namespace, name),
+                ("openrouter".to_owned(), "key".to_owned())
+            );
         }
         other => panic!("unexpected handle: {other:?}"),
     }

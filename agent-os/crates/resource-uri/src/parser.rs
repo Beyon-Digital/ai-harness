@@ -9,9 +9,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use domain::ids::{
-    AdapterId, ArtifactId, RunId, SandboxId, SessionId, TaskId, WorkspaceId,
-};
+use domain::ids::{AdapterId, ArtifactId, RunId, SandboxId, SessionId, TaskId, WorkspaceId};
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 
@@ -57,7 +55,9 @@ pub enum ResourceUri {
 impl ResourceUri {
     /// Parses a resource URI string.
     pub fn parse(raw: &str) -> errors::Result<Self> {
-        let (scheme, rest) = raw.split_once("://").ok_or_else(|| invalid("missing ://"))?;
+        let (scheme, rest) = raw
+            .split_once("://")
+            .ok_or_else(|| invalid("missing ://"))?;
         if rest.is_empty() {
             return Err(invalid("empty URI body"));
         }
@@ -66,7 +66,8 @@ impl ResourceUri {
                 let (id, path) = rest
                     .split_once('/')
                     .ok_or_else(|| invalid("workspace URI needs <id>/<path>"))?;
-                let workspace_id = WorkspaceId::from_str(id).map_err(|_| invalid("workspace id"))?;
+                let workspace_id =
+                    WorkspaceId::from_str(id).map_err(|_| invalid("workspace id"))?;
                 Ok(Self::Workspace {
                     workspace_id,
                     relative_path: normalize_path(path)?,
@@ -93,12 +94,10 @@ impl ResourceUri {
                     .map_err(|_| invalid("sandbox id"))?,
             )),
             "run" => Ok(Self::Run(
-                RunId::from_str(single_id(rest, "run id")?)
-                    .map_err(|_| invalid("run id"))?,
+                RunId::from_str(single_id(rest, "run id")?).map_err(|_| invalid("run id"))?,
             )),
             "task" => Ok(Self::Task(
-                TaskId::from_str(single_id(rest, "task id")?)
-                    .map_err(|_| invalid("task id"))?,
+                TaskId::from_str(single_id(rest, "task id")?).map_err(|_| invalid("task id"))?,
             )),
             "session" => Ok(Self::Session(
                 SessionId::from_str(single_id(rest, "session id")?)
@@ -244,5 +243,9 @@ fn hex(byte: u8) -> errors::Result<u8> {
 }
 
 fn invalid(message: impl Into<String>) -> KernelError {
-    KernelError::new(ErrorCode::InvalidArgument, RetryClass::Never, message.into())
+    KernelError::new(
+        ErrorCode::InvalidArgument,
+        RetryClass::Never,
+        message.into(),
+    )
 }

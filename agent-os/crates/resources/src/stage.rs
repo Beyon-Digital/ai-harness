@@ -29,15 +29,14 @@ pub(crate) async fn stage_resource_event(
     let retention = policy
         .default_retention(event_type)
         .ok_or_else(|| uncatalogued(event_type))?;
-    let stream_key = EventStreamKey::new(StreamKey::run(run_id).as_str().to_owned()).map_err(
-        |_| {
+    let stream_key =
+        EventStreamKey::new(StreamKey::run(run_id).as_str().to_owned()).map_err(|_| {
             KernelError::new(
                 ErrorCode::Internal,
                 RetryClass::Never,
                 "catalogued resource stream key is not canonical",
             )
-        },
-    )?;
+        })?;
     stage(
         txn,
         DraftEvent {

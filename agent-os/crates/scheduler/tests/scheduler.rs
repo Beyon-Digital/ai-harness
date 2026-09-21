@@ -165,9 +165,7 @@ async fn claim_and_cancel_race_has_exactly_one_winner() {
     };
     assert!(claimed.is_some(), "first claim wins");
     assert_eq!(
-        cancel
-            .expect_err("claimed timer cannot cancel")
-            .code(),
+        cancel.expect_err("claimed timer cannot cancel").code(),
         ErrorCode::FailedPrecondition
     );
     assert_eq!(h.timer_state(row.timer_id).await, TimerState::Claimed);
@@ -247,31 +245,21 @@ async fn restart_after_claim_recovers_safely() {
     // Epoch 1 claims, then "crashes" (its claim stays durable).
     {
         let mut txn = h.write().await;
-        let claimed = scheduler::claim_next_due(
-            txn.as_mut(),
-            &h.env(),
-            h.clock.now_unix_ms(),
-            "w1",
-            1,
-        )
-        .await
-        .expect("claim");
+        let claimed =
+            scheduler::claim_next_due(txn.as_mut(), &h.env(), h.clock.now_unix_ms(), "w1", 1)
+                .await
+                .expect("claim");
         txn.commit().await.expect("commit");
         assert!(claimed.is_some());
     }
     assert_eq!(h.timer_state(row.timer_id).await, TimerState::Claimed);
     // Epoch 2 scans: the stale claim is re-fenced and dispatchable again.
     let mut txn = h.write().await;
-    let reclaimed = scheduler::claim_next_due(
-        txn.as_mut(),
-        &h.env(),
-        h.clock.now_unix_ms(),
-        "w2",
-        2,
-    )
-    .await
-    .expect("reclaim")
-    .expect("stale claim is recoverable");
+    let reclaimed =
+        scheduler::claim_next_due(txn.as_mut(), &h.env(), h.clock.now_unix_ms(), "w2", 2)
+            .await
+            .expect("reclaim")
+            .expect("stale claim is recoverable");
     assert_eq!(reclaimed.claim_daemon_epoch, Some(2));
     assert_eq!(reclaimed.claim_owner.as_deref(), Some("w2"));
     txn.commit().await.expect("commit");
@@ -282,10 +270,9 @@ async fn not_due_timer_is_not_claimable() {
     let h = Harness::new().await;
     let _row = schedule_timer(&h, SEED_MS + 60_000).await;
     let mut txn = h.write().await;
-    let claimed =
-        scheduler::claim_next_due(txn.as_mut(), &h.env(), h.clock.now_unix_ms(), "w", 1)
-            .await
-            .expect("scan");
+    let claimed = scheduler::claim_next_due(txn.as_mut(), &h.env(), h.clock.now_unix_ms(), "w", 1)
+        .await
+        .expect("scan");
     txn.rollback().await.expect("rollback");
     assert!(claimed.is_none());
 }
