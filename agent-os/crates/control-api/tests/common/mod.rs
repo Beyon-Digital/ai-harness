@@ -119,7 +119,7 @@ impl Rig {
             HealthInfo {
                 status: "running".to_owned(),
                 daemon_instance_id: "daemon-1".to_owned(),
-                daemon_fencing_epoch: 7,
+                daemon_fencing_epoch: self.epoch,
                 active_config_generation_id: "gen-9".to_owned(),
                 outbox_unpublished_count: 3,
             },

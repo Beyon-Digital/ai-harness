@@ -272,7 +272,15 @@ impl MvpControlApi for ControlApiService {
                         .map_err(|_| Status::invalid_argument("device_id is malformed"))?,
                 )
             },
-            delegation_chain_id: self.operator_chain,
+            // The operator self-chain is granted only to commands that
+            // declare an operator capability (`effect.resolve_unknown`) —
+            // attaching it to every command would widen what a mapped uid
+            // can reach beyond the peer's own delegation.
+            delegation_chain_id: if req.command_type == runtime::CMD_RESOLVE_UNKNOWN_EFFECT {
+                self.operator_chain
+            } else {
+                None
+            },
             request_digest: parse_id("request_digest", &req.request_digest)?,
             correlation_id: if req.correlation_id.is_empty() {
                 None
@@ -310,13 +318,36 @@ impl MvpControlApi for ControlApiService {
         request: Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
         // Health also resolves the actor — an unknown uid gets nothing.
-        let _actor = self.actor_for(&request, "")?;
+        let actor = self.actor_for(&request, "")?;
+        // Status/epoch/generation are epoch constants captured at boot; the
+        // outbox backlog is live, so count it under a short write txn (the
+        // stream repo is write-txn scoped) and roll back — nothing persists.
+        let outbox_unpublished_count = {
+            let mut txn = self
+                .store
+                .begin_write(kernel_store::TxContext {
+                    daemon_epoch: self.health.daemon_fencing_epoch,
+                    principal_id: actor.principal_id,
+                    command_id: CommandId::new(self.ids.as_ref()),
+                    correlation_id: None,
+                })
+                .await
+                .map_err(unavailable)?;
+            let count = txn
+                .streams()
+                .scan_unpublished(u32::MAX)
+                .await
+                .map_err(unavailable)?
+                .len() as u64;
+            txn.rollback().await.ok();
+            count
+        };
         Ok(Response::new(HealthResponse {
             status: self.health.status.clone(),
             daemon_instance_id: self.health.daemon_instance_id.clone(),
             daemon_fencing_epoch: self.health.daemon_fencing_epoch,
             active_config_generation_id: self.health.active_config_generation_id.clone(),
-            outbox_unpublished_count: self.health.outbox_unpublished_count,
+            outbox_unpublished_count,
         }))
     }
 

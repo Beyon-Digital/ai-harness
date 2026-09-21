@@ -140,7 +140,8 @@ pub async fn reserve(
         let identical = existing.run_id == request.run_id
             && existing.unit == request.unit.as_str()
             && existing.amount == request.amount
-            && existing.parent_reservation_id == request.parent;
+            && existing.parent_reservation_id == request.parent
+            && existing.fencing_token == request.fencing_token;
         if identical {
             return Ok(existing);
         }

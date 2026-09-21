@@ -389,3 +389,42 @@ async fn mismatched_unit_or_dead_parent_is_rejected() {
         .expect_err("released parent cannot delegate");
     assert_eq!(err.code(), ErrorCode::FailedPrecondition);
 }
+
+#[tokio::test]
+async fn replay_with_different_fencing_token_conflicts() {
+    let h = Harness::new().await;
+    let run = h.seed_run().await;
+    let reservation_id = ReservationId::new(&h.ids);
+    let request = |token: u64| ReserveRequest {
+        reservation_id: Some(reservation_id),
+        run_id: run,
+        unit: ResourceUnit::SandboxSlots,
+        amount: 1,
+        parent: None,
+        fencing_token: token,
+    };
+
+    let mut txn = h.write().await;
+    let stored = resources::reserve(txn.as_mut(), &h.env(), request(7))
+        .await
+        .expect("first reserve");
+    txn.commit().await.expect("commit");
+    assert_eq!(stored.fencing_token, 7);
+
+    // Identical replay returns the stored row.
+    let mut txn = h.write().await;
+    let replayed = resources::reserve(txn.as_mut(), &h.env(), request(7))
+        .await
+        .expect("identical replay");
+    txn.commit().await.expect("commit");
+    assert_eq!(replayed.reservation_id, reservation_id);
+
+    // A replay claiming a different external owner must not pass as
+    // identical — the persisted row still belongs to token 7.
+    let mut txn = h.write().await;
+    let err = resources::reserve(txn.as_mut(), &h.env(), request(9))
+        .await
+        .expect_err("divergent token conflicts");
+    txn.rollback().await.expect("rollback");
+    assert_eq!(err.code(), ErrorCode::Conflict);
+}

@@ -199,6 +199,12 @@ impl MvpEventApi for EventApiService {
             loop {
                 match sub.next().await {
                     LiveItem::Event(event) => {
+                        // The bus is global: sequence numbers are per-stream,
+                        // so foreign-stream events must neither forward nor
+                        // move the dedup cursor.
+                        if event.stream_key != stream_key {
+                            continue;
+                        }
                         if event.sequence <= last_sequence {
                             continue;
                         }

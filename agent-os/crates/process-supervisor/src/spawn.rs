@@ -8,6 +8,7 @@
 //! discoverable socket, so an unrelated local process cannot connect.
 #![forbid(unsafe_code)]
 
+use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -75,10 +76,26 @@ pub struct Child {
     daemon_instance_id: DaemonInstanceId,
     /// Protocol version offered in bootstrap.
     protocol_version: u32,
-    /// Separate capture pipe.
-    pub stdout: ChildStdout,
-    /// Separate capture pipe.
-    pub stderr: ChildStderr,
+    /// Separate capture pipe. Either consume it (see [`Child::channels`]) or
+    /// hand it to [`Child::drain_output`] — an unread pipe deadlocks the
+    /// child once the kernel buffer fills. `None` once drained.
+    pub stdout: Option<ChildStdout>,
+    /// Separate capture pipe. Same drain requirement as [`Child::stdout`].
+    pub stderr: Option<ChildStderr>,
+}
+
+/// Reads one pipe to EOF and discards the bytes, so a noisy child never
+/// blocks on a full kernel buffer.
+fn drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
 }
 
 impl Child {
@@ -88,8 +105,31 @@ impl Child {
     }
 
     /// Disjoint mutable access to all three channels.
-    pub fn channels(&mut self) -> (&mut UnixStream, &mut ChildStdout, &mut ChildStderr) {
-        (&mut self.ipc, &mut self.stdout, &mut self.stderr)
+    pub fn channels(
+        &mut self,
+    ) -> (
+        &mut UnixStream,
+        Option<&mut ChildStdout>,
+        Option<&mut ChildStderr>,
+    ) {
+        (&mut self.ipc, self.stdout.as_mut(), self.stderr.as_mut())
+    }
+
+    /// Detaches stdout/stderr onto drain threads that read them to EOF.
+    ///
+    /// Callers that never read the capture pipes (the daemon path) must call
+    /// this right after spawn: the adapter protocol carries no output on
+    /// those descriptors, and a full pipe buffer would otherwise block the
+    /// child's next `write` mid-call — stalling IPC behind a writer that can
+    /// never proceed. The drain threads exit on EOF when the child dies or
+    /// the pipes close.
+    pub fn drain_output(&mut self) {
+        if let Some(pipe) = self.stdout.take() {
+            drain(pipe);
+        }
+        if let Some(pipe) = self.stderr.take() {
+            drain(pipe);
+        }
     }
 }
 
@@ -151,8 +191,8 @@ pub fn spawn(spec: &SpawnSpec) -> errors::Result<Child> {
         protocol_version: spec.protocol_version,
         process,
         ipc: parent_end,
-        stdout,
-        stderr,
+        stdout: Some(stdout),
+        stderr: Some(stderr),
     })
 }
 

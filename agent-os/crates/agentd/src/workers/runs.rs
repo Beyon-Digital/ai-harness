@@ -159,7 +159,10 @@ impl RunWorker {
         }
         let children = std::mem::take(&mut self.loops);
         for (run, handle) in children {
+            let instance = handle.child.instance;
             let reason = terminate(handle.child, Duration::from_secs(2)).await;
+            self.mark_instance_exit(instance, "exited", reason.to_string())
+                .await;
             tracing::info!(run = %run_id_str(run), %reason, "loop child terminated at shutdown");
         }
     }
@@ -204,6 +207,13 @@ impl RunWorker {
                     Ok(())
                 }
             }
+            RunState::WaitingHuman => {
+                if !self.claim_ours(row) {
+                    self.restake_claim(row).await
+                } else {
+                    self.step_waiting_human(row).await
+                }
+            }
             // The in-flight work for this run is the loop child this epoch
             // owns — terminate it, then terminalize through the internal
             // command so the event + revision stay auditable.
@@ -212,13 +222,187 @@ impl RunWorker {
         }
     }
 
+    /// `WaitingHuman`: resume once the run's latest approval resolves —
+    /// approved returns to `Running` so the next turn issues; denied fails
+    /// the run. Pending, expired, or invalidated requests leave the run
+    /// parked (renew, respond, or cancel is the operator's move; recovery
+    /// reports an expired request as `RequiresHumanDecision`).
+    async fn step_waiting_human(
+        &mut self,
+        row: &kernel_store::models::RunRow,
+    ) -> errors::Result<()> {
+        let now = self.deps.clock.now_unix_ms();
+        let mut txn = self.write_txn().await?;
+        let latest = {
+            let approvals = txn.security().list_approvals_by_run(row.run_id).await?;
+            approvals
+                .into_iter()
+                .max_by_key(|a| (a.created_at_ms, a.request_id))
+        };
+        let Some(latest) = latest else {
+            txn.rollback().await.ok();
+            return Ok(());
+        };
+        let Ok(expected) = approvals::ApprovalDigest::from_str(&latest.request_digest) else {
+            txn.rollback().await.ok();
+            return Ok(());
+        };
+        let outcome = approvals::is_satisfied(&mut *txn, latest.request_id, &expected, now).await?;
+        let (next, denied) = match outcome {
+            approvals::ApprovalOutcome::Approved => (
+                RunPatch {
+                    state: Some(RunState::Running),
+                    bump_revision: true,
+                    ..RunPatch::default()
+                },
+                false,
+            ),
+            approvals::ApprovalOutcome::Denied => (
+                RunPatch {
+                    state: Some(RunState::Failed),
+                    terminal_reason: Some("approval denied".to_owned()),
+                    bump_revision: true,
+                    ..RunPatch::default()
+                },
+                true,
+            ),
+            _ => {
+                txn.rollback().await.ok();
+                return Ok(());
+            }
+        };
+        let moved = txn
+            .runs()
+            .cas_update(
+                row.run_id,
+                RunCas {
+                    run_revision: row.run_revision,
+                    state: Some(RunState::WaitingHuman),
+                    cancellation_epoch: None,
+                },
+                next,
+            )
+            .await?;
+        if moved {
+            txn.commit().await?;
+            if denied {
+                self.stop_loop(row.run_id, "failed").await;
+            }
+        } else {
+            txn.rollback().await.ok();
+        }
+        Ok(())
+    }
+
+    /// Persists the `adapter_instances` row every spawned process must have
+    /// (specs/process-supervisor.md): `starting` at spawn, `ready` after a
+    /// verified handshake, `exited`/`failed` when the process ends.
+    async fn record_instance_spawn(
+        &self,
+        adapter_id: AdapterId,
+        adapter_version: &str,
+        bundle_digest: &str,
+        instance: AdapterInstanceId,
+        pid: u32,
+        start_identity: &str,
+    ) -> errors::Result<()> {
+        let mut txn = self.write_txn().await?;
+        txn.adapters()
+            .insert_instance(kernel_store::models::NewAdapterInstance {
+                adapter_instance_id: instance,
+                adapter_id,
+                adapter_version: adapter_version.to_owned(),
+                bundle_digest: bundle_digest.to_owned(),
+                daemon_instance_id: self.deps.daemon_instance,
+                pid: Some(i64::from(pid)),
+                process_start_identity: Some(start_identity.to_owned()),
+                state: "starting".to_owned(),
+                exit_reason: None,
+                last_heartbeat_ms: None,
+                started_at_ms: self.deps.clock.now_unix_ms(),
+                ended_at_ms: None,
+            })
+            .await?;
+        txn.commit().await
+    }
+
+    /// CAS `starting -> ready` once the adapter's hello verifies.
+    async fn mark_instance_ready(&self, instance: AdapterInstanceId) -> errors::Result<()> {
+        let mut txn = self.write_txn().await?;
+        let moved = txn
+            .adapters()
+            .cas_instance_state(
+                instance,
+                "starting",
+                kernel_store::models::AdapterInstanceStatePatch {
+                    state: Some("ready".to_owned()),
+                    exit_reason: None,
+                    last_heartbeat_ms: Some(self.deps.clock.now_unix_ms()),
+                    ended_at_ms: None,
+                },
+            )
+            .await?;
+        if moved {
+            txn.commit().await?;
+        } else {
+            txn.rollback().await.ok();
+        }
+        Ok(())
+    }
+
+    /// Best-effort terminal instance update — the row is observability, so
+    /// store failures never block termination. Accepts `ready` or
+    /// `starting` (a process can die before its hello completes).
+    async fn mark_instance_exit(
+        &self,
+        instance: AdapterInstanceId,
+        state: &'static str,
+        reason: String,
+    ) {
+        let Ok(mut txn) = self.write_txn().await else {
+            return;
+        };
+        let patch = || kernel_store::models::AdapterInstanceStatePatch {
+            state: Some(state.to_owned()),
+            exit_reason: Some(reason.clone()),
+            last_heartbeat_ms: None,
+            ended_at_ms: Some(self.deps.clock.now_unix_ms()),
+        };
+        let mut moved = txn
+            .adapters()
+            .cas_instance_state(instance, "ready", patch())
+            .await
+            .unwrap_or(false);
+        if !moved {
+            moved = txn
+                .adapters()
+                .cas_instance_state(instance, "starting", patch())
+                .await
+                .unwrap_or(false);
+        }
+        if moved {
+            txn.commit().await.ok();
+        } else {
+            txn.rollback().await.ok();
+        }
+    }
+
+    /// Removes the cached loop child, terminates it, and marks its
+    /// `adapter_instances` row terminal.
+    async fn stop_loop(&mut self, run_id: RunId, state: &'static str) {
+        if let Some(handle) = self.loops.remove(&run_id) {
+            let instance = handle.child.instance;
+            let reason = terminate(handle.child, Duration::from_secs(2)).await;
+            self.mark_instance_exit(instance, state, reason.to_string())
+                .await;
+        }
+    }
+
     /// `Cancelling -> Cancelled`: terminate this epoch's loop child, then
     /// finalize through the coordinator so the terminal transition + events
     /// commit under the fencing epoch.
     async fn finalize_cancel(&mut self, row: &kernel_store::models::RunRow) -> errors::Result<()> {
-        if let Some(handle) = self.loops.remove(&row.run_id) {
-            let _ = terminate(handle.child, Duration::from_millis(500)).await;
-        }
+        self.stop_loop(row.run_id, "exited").await;
         self.submit(
             CMD_RUN_CANCEL_COMPLETE,
             row.run_id.to_string().into_bytes(),
@@ -328,7 +512,9 @@ impl RunWorker {
     /// Reclaims a `Running` run left `RECOVERING` by a dead epoch, bumping
     /// `loop_epoch` so decisions issued to the previous process go stale.
     async fn reclaim(&mut self, row: &kernel_store::models::RunRow) -> errors::Result<()> {
-        self.loops.remove(&row.run_id);
+        // A cached handle whose epoch lost the claim must not keep running:
+        // terminate it before the loop_epoch bump spawns a replacement.
+        self.stop_loop(row.run_id, "failed").await;
         let now = self.deps.clock.now_unix_ms();
         let mut txn = self.write_txn().await?;
         let moved = txn
@@ -430,7 +616,17 @@ impl RunWorker {
             CALL_TIMEOUT,
             self.deps.clock.now_unix_ms(),
         )
-        .await?;
+        .await;
+        // A failed turn leaves the session's protocol state unknown — drop
+        // the cached handle so the next tick spawns a fresh, handshaken
+        // child instead of reusing a broken one.
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.stop_loop(row.run_id, "failed").await;
+                return Err(error);
+            }
+        };
         let AcceptOutcome::Accepted { instruction, .. } = outcome else {
             return Ok(());
         };
@@ -445,9 +641,7 @@ impl RunWorker {
     ) -> errors::Result<()> {
         match instruction {
             DecisionInstruction::Complete { .. } | DecisionInstruction::Fail { .. } => {
-                if let Some(handle) = self.loops.remove(&row.run_id) {
-                    let _ = terminate(handle.child, Duration::from_secs(2)).await;
-                }
+                self.stop_loop(row.run_id, "exited").await;
                 Ok(())
             }
             DecisionInstruction::SpawnAgent { child_request } => {
@@ -656,7 +850,10 @@ impl RunWorker {
                 request,
                 Instant::now() + CALL_TIMEOUT,
             );
-            let _ = terminate(child, Duration::from_secs(2)).await;
+            let instance = child.instance;
+            let reason = terminate(child, Duration::from_secs(2)).await;
+            self.mark_instance_exit(instance, "exited", reason.to_string())
+                .await;
             response
         }
         .await;
@@ -765,7 +962,10 @@ impl RunWorker {
                 request,
                 Instant::now() + CALL_TIMEOUT,
             );
-            let _ = terminate(child, Duration::from_secs(2)).await;
+            let instance = child.instance;
+            let reason = terminate(child, Duration::from_secs(2)).await;
+            self.mark_instance_exit(instance, "exited", reason.to_string())
+                .await;
             response
         }
         .await;
@@ -876,6 +1076,21 @@ impl RunWorker {
             env,
             cwd: None,
         })?;
+        child.drain_output();
+        if let Err(error) = self
+            .record_instance_spawn(
+                adapter_uuid,
+                &version,
+                &effect.adapter_digest,
+                adapter_instance,
+                child.pid,
+                &child.start_identity,
+            )
+            .await
+        {
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            return Err(error);
+        }
         let nonce = self.deps.ids.new_uuid_v7().to_string();
         let identity = ExpectedIdentity {
             daemon_instance_id: self.deps.daemon_instance,
@@ -907,12 +1122,19 @@ impl RunWorker {
                 SessionPhase::Ready
             }
             _ => {
+                self.mark_instance_exit(adapter_instance, "failed", "handshake failed".to_owned())
+                    .await;
+                let _ = terminate(child, Duration::from_secs(2)).await;
                 return Err(worker_error(
                     ErrorCode::Unavailable,
                     "effect adapter did not complete the handshake",
                 ));
             }
         };
+        if let Err(error) = self.mark_instance_ready(adapter_instance).await {
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            return Err(error);
+        }
         Ok((child, phase))
     }
 
@@ -1036,6 +1258,21 @@ impl RunWorker {
             env,
             cwd: None,
         })?;
+        child.drain_output();
+        if let Err(error) = self
+            .record_instance_spawn(
+                adapter_uuid,
+                &version,
+                &digest,
+                adapter_instance,
+                child.pid,
+                &child.start_identity,
+            )
+            .await
+        {
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            return Err(error);
+        }
 
         // Adapter handshake: kernel writes Bootstrap, child replies Hello.
         let nonce = self.deps.ids.new_uuid_v7().to_string();
@@ -1069,12 +1306,19 @@ impl RunWorker {
                 SessionPhase::Ready
             }
             _ => {
+                self.mark_instance_exit(adapter_instance, "failed", "handshake failed".to_owned())
+                    .await;
+                let _ = terminate(child, Duration::from_secs(2)).await;
                 return Err(worker_error(
                     ErrorCode::Unavailable,
                     "loop adapter did not complete the handshake",
                 ));
             }
         };
+        if let Err(error) = self.mark_instance_ready(adapter_instance).await {
+            let _ = terminate(child, Duration::from_secs(2)).await;
+            return Err(error);
+        }
         Ok(LoopHandle { child, phase })
     }
 

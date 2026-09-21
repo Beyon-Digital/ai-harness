@@ -13,6 +13,7 @@ errors.workspace = true
 kernel-store.workspace = true
 events.workspace = true
 prost.workspace = true
+runtime.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-stream.workspace = true

@@ -158,6 +158,36 @@ async fn health_reports_fencing_config_and_outbox() {
         let _ = stop_rx.await;
     }));
     wait_ready(&path).await;
+
+    // The outbox count is live: stage three unpublished events, then a
+    // fourth after the first read to prove the value is re-queried.
+    for lane in 0..3u64 {
+        let mut txn = rig.write_txn().await;
+        let key = domain::ids::EventStreamKey::new(format!("prop/h-{lane}")).unwrap();
+        let seq = txn.streams().allocate(key.clone()).await.unwrap();
+        txn.streams()
+            .insert_outbox(kernel_store::models::NewOutboxEvent {
+                event_id: domain::ids::EventId::new(rig.ids.as_ref()),
+                event_type: "test.staged".to_owned(),
+                event_version: 1,
+                stream_key: key,
+                sequence: seq,
+                occurred_at_ms: NOW,
+                run_id: None,
+                task_id: None,
+                session_id: None,
+                effect_id: None,
+                causation_id: None,
+                correlation_id: None,
+                sensitivity: domain::security::SensitivityClass::Internal,
+                retention: domain::security::RetentionClass::Standard,
+                payload: vec![],
+            })
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+    }
+
     let mut c = client(&path).await;
     let health = c
         .health(HealthRequest {})
@@ -165,7 +195,7 @@ async fn health_reports_fencing_config_and_outbox() {
         .expect("health")
         .into_inner();
     assert_eq!(health.status, "running");
-    assert_eq!(health.daemon_fencing_epoch, 7);
+    assert_eq!(health.daemon_fencing_epoch, rig.epoch);
     assert_eq!(health.active_config_generation_id, "gen-9");
     assert_eq!(health.outbox_unpublished_count, 3);
     stop_tx.send(()).unwrap();

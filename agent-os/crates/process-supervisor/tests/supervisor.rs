@@ -64,8 +64,14 @@ async fn stdout_and_stderr_are_separate_from_ipc() {
     // Read one byte at a time up to a newline on each channel.
     for (stream, want) in [
         (ipc as &mut dyn Read, b"ipc-msg\n".as_slice()),
-        (stdout as &mut dyn Read, b"out-msg\n".as_slice()),
-        (stderr as &mut dyn Read, b"err-msg\n".as_slice()),
+        (
+            stdout.expect("stdout pipe") as &mut dyn Read,
+            b"out-msg\n".as_slice(),
+        ),
+        (
+            stderr.expect("stderr pipe") as &mut dyn Read,
+            b"err-msg\n".as_slice(),
+        ),
     ] {
         line.clear();
         let mut byte = [0u8; 1];
@@ -105,7 +111,12 @@ async fn descendants_are_killed_with_the_process_group() {
     let mut pid_text = String::new();
     loop {
         let mut byte = [0u8; 1];
-        child.stderr.read_exact(&mut byte).expect("read pid");
+        child
+            .stderr
+            .as_mut()
+            .expect("stderr pipe")
+            .read_exact(&mut byte)
+            .expect("read pid");
         if byte[0] == b'\n' {
             break;
         }

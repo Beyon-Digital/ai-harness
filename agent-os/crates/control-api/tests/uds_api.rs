@@ -44,6 +44,7 @@ struct Rig {
     principal: PrincipalId,
     actor: ActorId,
     uid: u32,
+    epoch: u64,
 }
 
 impl Rig {
@@ -83,6 +84,7 @@ impl Rig {
             principal: PrincipalId::new(&ids),
             actor: ActorId::new(&ids),
             uid: rustix::process::getuid().as_raw(),
+            epoch: fence.epoch.0,
         }
     }
 
@@ -98,7 +100,7 @@ impl Rig {
             HealthInfo {
                 status: "running".to_owned(),
                 daemon_instance_id: "daemon-1".to_owned(),
-                daemon_fencing_epoch: 7,
+                daemon_fencing_epoch: self.epoch,
                 active_config_generation_id: String::new(),
                 outbox_unpublished_count: 0,
             },
@@ -204,7 +206,7 @@ async fn graceful_shutdown_stops_the_server() {
         .expect("health")
         .into_inner();
     assert_eq!(health.daemon_instance_id, "daemon-1");
-    assert_eq!(health.daemon_fencing_epoch, 7);
+    assert_eq!(health.daemon_fencing_epoch, rig.epoch);
     stop_tx.send(()).expect("stop");
     server.await.expect("join").expect("serve clean");
     assert!(!path.exists(), "socket file is unlinked on shutdown");

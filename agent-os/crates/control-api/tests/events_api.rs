@@ -294,3 +294,78 @@ async fn subscribe_lag_terminates_with_resume_cursor() {
     );
     assert!(last_seq >= BACKLOG, "all durable events replayed");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_filters_foreign_streams_at_live_handoff() {
+    // The bus carries every stream; per-stream sequences are unrelated.
+    // A foreign event with a high sequence must neither forward nor move
+    // the dedup cursor past requested-stream events.
+    let rig = EventRig::new().await;
+    let ids = DeterministicIds::new(SEED + 12);
+    let wanted = events::stream::StreamKey::from_str("run/a").unwrap();
+    let other = events::stream::StreamKey::from_str("run/b").unwrap();
+
+    let mut req = tonic::Request::new(SubscribeEventsRequest {
+        stream_key: "run/a".into(),
+        after_sequence: 0,
+    });
+    req.extensions_mut().insert(control_api::PeerCreds {
+        uid: rig.rig.uid,
+        pid: None,
+    });
+    let svc = rig.event_service();
+    let mut frames = svc.subscribe(req).await.expect("subscribe").into_inner();
+
+    // Foreign events at sequences above anything run/a will reach.
+    let foreign: Vec<_> = (1..=5)
+        .map(|seq| {
+            envelope(
+                &ids,
+                &other,
+                seq,
+                domain::security::SensitivityClass::Public,
+            )
+        })
+        .collect();
+    rig.journal
+        .append(&other, 0, &foreign)
+        .await
+        .expect("append foreign");
+    rig.bus.publish(foreign.last().unwrap());
+
+    // Wanted events at low sequences must still arrive, unfiltered.
+    for seq in 1..=2 {
+        let ev = envelope(
+            &ids,
+            &wanted,
+            seq,
+            domain::security::SensitivityClass::Public,
+        );
+        rig.journal
+            .append(&wanted, seq - 1, std::slice::from_ref(&ev))
+            .await
+            .expect("append wanted");
+        rig.bus.publish(&ev);
+    }
+
+    use domain::generated::contract::event_stream_frame::Frame;
+    use tokio_stream::StreamExt;
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        match tokio::time::timeout(Duration::from_secs(5), frames.next())
+            .await
+            .expect("frame timeout")
+            .expect("stream open")
+            .expect("frame ok")
+            .frame
+        {
+            Some(Frame::Event(e)) => got.push((e.stream_key.clone(), e.sequence)),
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    assert_eq!(
+        got,
+        vec![("run/a".to_string(), 1), ("run/a".to_string(), 2),],
+        "only requested-stream events, foreign high-seq event must not suppress seq 1-2"
+    );
+}
