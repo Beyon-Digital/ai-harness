@@ -123,3 +123,36 @@ backs return `data:application/json;base64,` result refs. The store is
 - SIGINT/SIGTERM drains first: workers stop claiming, in-flight turns
   finish, the outbox flushes, the lock releases
   (`limits.shutdown.drain_deadline_ms`).
+
+## Adapter lifecycle
+
+Bundles live under `<runtime-dir>/installed-adapters/` once installed —
+`agentd` auto-registers every enabled bundle at boot.
+
+- `agentd adapter install --runtime-dir <dir> --bundle <dir> [--check]` —
+  verifies the bundle lock, copies it into `installed-adapters/<id>-<v>-<digest>`,
+  optionally spawns a handshake+ping smoke check, and indexes it.
+- `agentd adapter check --runtime-dir <dir> --bundle <dir>` — the same
+  conformance smoke without installing.
+- `agentd adapter list|enable|disable|remove --runtime-dir <dir>` — manage
+  the `index.json` enable flags and on-disk copies.
+
+## Observability surface
+
+- `GET /api/metrics` — read-only counters over `kernel.db`/`events.db`
+  (runs/effects/approvals/timers by state, decisions, adapter instances,
+  outbox + journal depth, active generation). Rendered in the GUI's
+  **System** tab.
+- `GET /api/config/generations` — the generation pipeline
+  (proposed → validated → tested → active); rendered under **Config**.
+- `GET /api/runs/{id}/environment` — the run's frozen resolved
+  environment + adapter bindings; rendered in run detail. 404 for runs
+  started without a spec.
+
+Memory writes record provenance internally: each stored record is an
+envelope `{record, sensitivity, provenance:{effect_id, operation_id,
+fencing_token, written_at_ms}}`. `memory.put` accepts `sensitivity` of
+`public|internal|confidential|secret` (default `internal`); an existing
+record's sensitivity can only be raised — downgrades and cross-namespace
+writes with mismatched class are rejected (`sensitivity_downgrade`).
+Namespaces must match `[a-z0-9][a-z0-9._-]{0,63}`.

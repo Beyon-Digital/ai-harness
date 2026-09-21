@@ -20,6 +20,9 @@ async fn main() -> std::process::ExitCode {
     if argv.first().is_some_and(|a| a == "backup") {
         return backup_command(&argv[1..]).await;
     }
+    if argv.first().is_some_and(|a| a == "adapter") {
+        return adapter_command(&argv[1..]).await;
+    }
     let mut config = DaemonConfig::default();
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
@@ -53,7 +56,12 @@ async fn main() -> std::process::ExitCode {
             "--help" | "-h" => {
                 println!(
                     "agentd --runtime-dir <dir> [--config <doc.yaml>] \\\n  [--adapter-bundle <dir>]... [--json]\n\
-                     agentd backup --runtime-dir <dir> --out <dir>"
+                     agentd backup --runtime-dir <dir> --out <dir>\n\
+                     agentd adapter install --runtime-dir <dir> --bundle <dir> [--check]\n\
+                     agentd adapter check --bundle <dir>\n\
+                     agentd adapter list --runtime-dir <dir>\n\
+                     agentd adapter enable|disable --runtime-dir <dir> <id-prefix> [--version v]\n\
+                     agentd adapter remove --runtime-dir <dir> <id-prefix> [--version v]"
                 );
                 return std::process::ExitCode::SUCCESS;
             }
@@ -94,6 +102,156 @@ async fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("agentd: shutdown error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `agentd adapter <install|check|list|enable|disable|remove>` — Phase-13
+/// bundle lifecycle over `<runtime_dir>/installed-adapters/`.
+async fn adapter_command(args: &[String]) -> std::process::ExitCode {
+    let Some(sub) = args.first().map(String::as_str) else {
+        eprintln!("agentd adapter: missing subcommand (install|check|list|enable|disable|remove)");
+        return std::process::ExitCode::FAILURE;
+    };
+    let mut runtime_dir = PathBuf::from("run");
+    let mut bundle = None;
+    let mut version = None;
+    let mut id_prefix = None;
+    let mut run_check = false;
+    let mut it = args[1..].iter().peekable();
+    while let Some(arg) = it.next() {
+        let (flag, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(f, v)| (f, Some(v.to_owned())));
+        // Value-taking flags consume the next arg only when no inline
+        // `--flag=value` was given; positionals and bare flags consume
+        // nothing.
+        let mut value = || inline.clone().or_else(|| it.next().cloned());
+        match flag {
+            "--runtime-dir" => {
+                if let Some(v) = value() {
+                    runtime_dir = PathBuf::from(v);
+                }
+            }
+            "--bundle" => bundle = value().map(PathBuf::from),
+            "--version" => version = value(),
+            "--check" => run_check = true,
+            other if !other.starts_with('-') => {
+                if id_prefix.is_some() {
+                    eprintln!("agentd adapter: unexpected argument '{other}'");
+                    return std::process::ExitCode::FAILURE;
+                }
+                id_prefix = Some(other.to_owned());
+            }
+            other => {
+                eprintln!("agentd adapter: unknown flag {other}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+    let fail = |e: errors::KernelError| -> std::process::ExitCode {
+        eprintln!("agentd adapter {sub}: {e}");
+        std::process::ExitCode::FAILURE
+    };
+    match sub {
+        "install" => {
+            let Some(bundle) = bundle else {
+                eprintln!("agentd adapter install: --bundle <dir> is required");
+                return std::process::ExitCode::FAILURE;
+            };
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            match agentd::adapters::install(&runtime_dir, &bundle, run_check, now_ms).await {
+                Ok(entry) => {
+                    println!(
+                        "installed {}@{} ({}) → {}/{}",
+                        entry.adapter_id,
+                        entry.version,
+                        entry.bundle_digest,
+                        runtime_dir.join(agentd::adapters::INSTALLED_DIR).display(),
+                        entry.dir_name
+                    );
+                    if let Some(check) = &entry.check {
+                        println!("  check: {check}");
+                    }
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        "check" => {
+            let Some(bundle) = bundle else {
+                eprintln!("agentd adapter check: --bundle <dir> is required");
+                return std::process::ExitCode::FAILURE;
+            };
+            match agentd::adapters::check_bundle(&bundle).await {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_default()
+                    );
+                    if report.result == "pass" {
+                        std::process::ExitCode::SUCCESS
+                    } else {
+                        std::process::ExitCode::FAILURE
+                    }
+                }
+                Err(e) => fail(e),
+            }
+        }
+        "list" => match agentd::adapters::load_index(&runtime_dir) {
+            Ok(entries) if entries.is_empty() => {
+                println!("no installed adapters");
+                std::process::ExitCode::SUCCESS
+            }
+            Ok(entries) => {
+                for e in entries {
+                    println!(
+                        "{}@{}\t{}\t{}\tcheck={}",
+                        e.adapter_id,
+                        e.version,
+                        &e.bundle_digest[..e.bundle_digest.len().min(19)],
+                        if e.enabled { "enabled" } else { "disabled" },
+                        e.check.as_deref().unwrap_or("—"),
+                    );
+                }
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
+        "enable" | "disable" => {
+            let Some(prefix) = id_prefix else {
+                eprintln!("agentd adapter {sub}: <id-prefix> is required");
+                return std::process::ExitCode::FAILURE;
+            };
+            match agentd::adapters::set_enabled(
+                &runtime_dir,
+                &prefix,
+                version.as_deref(),
+                sub == "enable",
+            ) {
+                Ok(e) => {
+                    println!("{}@{} {}", e.adapter_id, e.version, sub);
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        "remove" => {
+            let Some(prefix) = id_prefix else {
+                eprintln!("agentd adapter remove: <id-prefix> is required");
+                return std::process::ExitCode::FAILURE;
+            };
+            match agentd::adapters::remove(&runtime_dir, &prefix, version.as_deref()) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => fail(e),
+            }
+        }
+        other => {
+            eprintln!("agentd adapter: unknown subcommand '{other}'");
             std::process::ExitCode::FAILURE
         }
     }

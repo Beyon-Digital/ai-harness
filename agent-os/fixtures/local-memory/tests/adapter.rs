@@ -182,10 +182,10 @@ async fn memory_put_get_over_protocol() {
         ),
     ));
     assert_eq!(get.status, "succeeded");
-    assert_eq!(
-        decode_data_uri(&get.result_ref),
-        serde_json::json!({"text": "hello"})
-    );
+    let envelope = decode_data_uri(&get.result_ref);
+    assert_eq!(envelope["record"], serde_json::json!({"text": "hello"}));
+    assert_eq!(envelope["sensitivity"], "internal");
+    assert!(envelope["provenance"]["effect_id"].is_string());
 
     // duplicate execute replays the recorded result
     let replay = exec_resp(&call(
@@ -201,6 +201,58 @@ async fn memory_put_get_over_protocol() {
     assert_eq!(replay.status, "succeeded");
     assert_eq!(replay.result_ref, put.result_ref);
 
+    let _ = terminate(child, Duration::from_millis(300)).await;
+
+    // Phase-10 authorities: a `secret` record cannot be downgraded by a
+    // lower-class put, namespaces reject non-authority characters, and a
+    // bad class name is invalid.
+    let mut child = spawn(&r.spec).expect("respawn for sensitivity");
+    handshake(&mut child, "n", 3_000).expect("handshake");
+    let mut phase = SessionPhase::Ready;
+    let mut secret_req = exec_payload(
+        "memory.put",
+        serde_json::json!({
+            "namespace": "notes", "memory_id": "sec1",
+            "record": {"k": 1}, "sensitivity": "secret",
+        }),
+    );
+    secret_req.operation_id = "secret-op".to_owned();
+    let secret = exec_resp(&call(&mut child, &mut phase, "s0", "execute", secret_req));
+    assert_eq!(secret.status, "succeeded");
+    let mut downgrade_req = exec_payload(
+        "memory.put",
+        serde_json::json!({
+            "namespace": "notes", "memory_id": "sec1",
+            "record": {"k": 2}, "sensitivity": "public",
+        }),
+    );
+    downgrade_req.operation_id = "downgrade-op".to_owned();
+    let downgrade = exec_resp(&call(
+        &mut child,
+        &mut phase,
+        "s1d",
+        "execute",
+        downgrade_req,
+    ));
+    assert_eq!(downgrade.status, "failed");
+    assert_eq!(downgrade.error_code, "sensitivity_downgrade");
+    let mut raise_req = exec_payload(
+        "memory.put",
+        serde_json::json!({
+            "namespace": "notes", "memory_id": "sec1",
+            "record": {"k": 3}, "sensitivity": "secret",
+        }),
+    );
+    raise_req.operation_id = "raise-op".to_owned();
+    let raise = exec_resp(&call(&mut child, &mut phase, "s1r", "execute", raise_req));
+    assert_eq!(raise.status, "succeeded");
+    let mut bad_ns = exec_payload(
+        "memory.put",
+        serde_json::json!({"namespace": "../escape", "record": {}}),
+    );
+    bad_ns.operation_id = "badns-op".to_owned();
+    let bad = exec_resp(&call(&mut child, &mut phase, "s2", "execute", bad_ns));
+    assert_eq!(bad.status, "failed");
     let _ = terminate(child, Duration::from_millis(300)).await;
 
     // status reconcile across a restart: a fresh process reads the same store.

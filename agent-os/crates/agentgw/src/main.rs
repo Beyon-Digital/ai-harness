@@ -117,11 +117,13 @@ async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> s
         .map_err(|e| std::io::Error::other(format!("{e}")))?;
     let index_path = socket.with_extension("agentgw-index.json");
     let index = load_index(&index_path);
+    let runtime_dir = socket.parent().map(Path::to_path_buf).unwrap_or_default();
     let state = Arc::new(AppState {
         daemon,
         index,
         index_path,
         auth_token,
+        runtime_dir,
     });
 
     let app = Router::new()
@@ -135,12 +137,15 @@ async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> s
         .route("/api/runs", post(api_create_run))
         .route("/api/runs/{run_id}", get(api_get_run))
         .route("/api/runs/{run_id}/decisions", get(api_run_decisions))
+        .route("/api/runs/{run_id}/environment", get(api_run_environment))
         .route("/api/runs/{run_id}/cancel", post(api_cancel_run))
         .route("/api/tasks/{task_id}/graph", get(api_graph))
         .route("/api/effects/{effect_id}", get(api_get_effect))
         .route("/api/effects/{effect_id}/resolve", post(api_resolve_effect))
         .route("/api/adapters", get(api_adapters))
         .route("/api/config", get(api_config))
+        .route("/api/config/generations", get(api_config_generations))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/approvals", get(api_approvals))
         .route("/api/approvals/respond", post(api_respond_approval))
         .route("/api/events/read", get(api_events_read))
@@ -161,6 +166,9 @@ struct AppState {
     index: RwLock<Index>,
     index_path: PathBuf,
     auth_token: Option<String>,
+    /// Daemon runtime dir (socket parent) — kernel.db + events.db are
+    /// opened read-only here for the metrics/environment surface.
+    runtime_dir: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -711,6 +719,295 @@ async fn api_run_decisions(
         }
     }
     Json(json!({"decisions": decisions})).into_response()
+}
+
+/// Opens a daemon DB read-only — the gateway is a reader, never a writer.
+async fn open_db_ro(path: &Path) -> Result<sqlx::SqliteConnection, sqlx::Error> {
+    use sqlx::Connection as _;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false);
+    sqlx::SqliteConnection::connect_with(&options).await
+}
+
+/// SELECT <col>, COUNT(*) grouped rows as `[{state|kind: v, count: n}]`.
+async fn count_by(conn: &mut sqlx::SqliteConnection, sql: &str, key: &str) -> Vec<Value> {
+    use sqlx::Row as _;
+    match sqlx::query(sql).fetch_all(&mut *conn).await {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                let count = r.get::<i64, _>(1);
+                let state = r
+                    .try_get::<i64, _>(0)
+                    .map(Value::from)
+                    .or_else(|_| r.try_get::<String, _>(0).map(Value::from))
+                    .unwrap_or(Value::Null);
+                json!({key: state, "count": count})
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn count_total(conn: &mut sqlx::SqliteConnection, sql: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or_default()
+}
+
+/// `GET /api/metrics` — Phase-15 observability surface: durable-store
+/// counters read from kernel.db/events.db (read-only connections) plus the
+/// gateway's index sizes. All queries are best-effort — a missing table or
+/// locked db yields zeros rather than an error page.
+async fn api_metrics(State(state): State<Arc<AppState>>) -> Response {
+    let kernel_path = state.runtime_dir.join("kernel.db");
+    let events_path = state.runtime_dir.join("events.db");
+    let mut metrics = json!({"index": {
+        "sessions": state.index.read().map(|i| i.sessions.len()).unwrap_or(0),
+        "tasks": state.index.read().map(|i| i.tasks.len()).unwrap_or(0),
+        "runs": state.index.read().map(|i| i.runs.len()).unwrap_or(0),
+        "specs": state.index.read().map(|i| i.specs.len()).unwrap_or(0),
+    }});
+    match open_db_ro(&kernel_path).await {
+        Ok(mut conn) => {
+            metrics["runs_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM runs GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["effects_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM effects GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["approvals_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM approval_requests GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["timers_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM timers GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["decisions_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM decisions").await);
+            metrics["loop_turns_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM loop_turns").await);
+            metrics["adapters_registered"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM adapter_registrations").await);
+            metrics["adapter_instances_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM adapter_instances").await);
+            metrics["conformance_reports_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM conformance_reports").await);
+            metrics["reservations_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM resource_reservations").await);
+            metrics["outbox_depth"] = json!(
+                count_total(
+                    &mut conn,
+                    "SELECT COALESCE(MAX(sequence), 0) FROM outbox_events"
+                )
+                .await
+            );
+            let active: Option<String> = sqlx::query_scalar::<_, String>(
+                "SELECT generation_id FROM active_config_generation LIMIT 1",
+            )
+            .fetch_optional(&mut conn)
+            .await
+            .unwrap_or(None);
+            metrics["active_generation"] = json!(active);
+            let gen_states = count_by(
+                &mut conn,
+                "SELECT state, COUNT(*) FROM config_generations GROUP BY state",
+                "state",
+            )
+            .await;
+            metrics["generations_by_state"] = json!(gen_states);
+        }
+        Err(e) => metrics["kernel_db_error"] = json!(e.to_string()),
+    }
+    match open_db_ro(&events_path).await {
+        Ok(mut conn) => {
+            metrics["journal_events_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM events").await);
+            metrics["journal_max_sequence"] = json!(
+                count_total(&mut conn, "SELECT COALESCE(MAX(sequence), 0) FROM events").await
+            );
+        }
+        Err(e) => metrics["events_db_error"] = json!(e.to_string()),
+    }
+    Json(metrics).into_response()
+}
+
+/// `GET /api/runs/{id}/environment` — the frozen Phase-11 resolved
+/// environment row + adapter bindings for a run, read straight from
+/// kernel.db so historical runs audit without mutable current config.
+async fn api_run_environment(
+    State(state): State<Arc<AppState>>,
+    AxPath(run_id): AxPath<String>,
+) -> Response {
+    use sqlx::Row as _;
+    let mut conn = match open_db_ro(&state.runtime_dir.join("kernel.db")).await {
+        Ok(c) => c,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Unavailable,
+                errors::codes::RetryClass::Safe,
+                format!("kernel.db unreadable: {e}"),
+            ));
+        }
+    };
+    let row = match sqlx::query(
+        "SELECT environment_id, run_id, agent_spec_id, agent_spec_version,
+                agent_spec_digest, agent_loop_id, agent_loop_version,
+                agent_loop_digest, config_generation_id, workspace_uri,
+                workspace_base_revision, workspace_mode, model_provider,
+                model_id, model_parameters, kernel_version, protocol_versions,
+                capability_grant_ids, approval_request_ids, created_at_ms
+         FROM resolved_run_environments WHERE run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_optional(&mut conn)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Internal,
+                errors::codes::RetryClass::Never,
+                format!("environment query failed: {e}"),
+            ));
+        }
+    };
+    let Some(row) = row else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "run has no resolved environment"})),
+        )
+            .into_response();
+    };
+    let env_id: String = row.get("environment_id");
+    let blob_json = |name: &str| -> Value {
+        let raw: Option<Vec<u8>> = row.get(name);
+        raw.and_then(|b| {
+            serde_json::from_slice(&b)
+                .ok()
+                .or_else(|| Some(Value::String(hex_encode(&b))))
+        })
+        .unwrap_or(Value::Null)
+    };
+    let bindings = sqlx::query(
+        "SELECT port_id, adapter_id, adapter_version, adapter_digest, capabilities
+         FROM resolved_bindings WHERE environment_id = ? ORDER BY port_id",
+    )
+    .bind(&env_id)
+    .fetch_all(&mut conn)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|b| {
+        let caps: Vec<u8> = b.get("capabilities");
+        json!({
+            "port_id": b.get::<String, _>("port_id"),
+            "adapter_id": b.get::<String, _>("adapter_id"),
+            "adapter_version": b.get::<String, _>("adapter_version"),
+            "adapter_digest": b.get::<String, _>("adapter_digest"),
+            "capabilities": serde_json::from_slice::<Value>(&caps)
+                .unwrap_or(Value::Null),
+        })
+    })
+    .collect::<Vec<_>>();
+    Json(json!({
+        "environment": {
+            "environment_id": env_id,
+            "run_id": row.get::<String, _>("run_id"),
+            "agent_spec_id": row.get::<String, _>("agent_spec_id"),
+            "agent_spec_version": row.get::<String, _>("agent_spec_version"),
+            "agent_spec_digest": row.get::<String, _>("agent_spec_digest"),
+            "agent_loop_id": row.get::<String, _>("agent_loop_id"),
+            "agent_loop_version": row.get::<String, _>("agent_loop_version"),
+            "agent_loop_digest": row.get::<String, _>("agent_loop_digest"),
+            "config_generation_id": row.get::<String, _>("config_generation_id"),
+            "workspace_uri": row.get::<Option<String>, _>("workspace_uri"),
+            "workspace_base_revision": row.get::<Option<String>, _>("workspace_base_revision"),
+            "workspace_mode": row.get::<i64, _>("workspace_mode"),
+            "model_provider": row.get::<Option<String>, _>("model_provider"),
+            "model_id": row.get::<Option<String>, _>("model_id"),
+            "model_parameters": blob_json("model_parameters"),
+            "kernel_version": row.get::<String, _>("kernel_version"),
+            "protocol_versions": blob_json("protocol_versions"),
+            "capability_grant_ids": blob_json("capability_grant_ids"),
+            "approval_request_ids": blob_json("approval_request_ids"),
+            "created_at_ms": row.get::<i64, _>("created_at_ms"),
+        },
+        "bindings": bindings,
+    }))
+    .into_response()
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `GET /api/config/generations` — the config-generation pipeline state
+/// (proposed → validated → tested → active), read-only from kernel.db.
+async fn api_config_generations(State(state): State<Arc<AppState>>) -> Response {
+    use sqlx::Row as _;
+    let mut conn = match open_db_ro(&state.runtime_dir.join("kernel.db")).await {
+        Ok(c) => c,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Unavailable,
+                errors::codes::RetryClass::Safe,
+                format!("kernel.db unreadable: {e}"),
+            ));
+        }
+    };
+    let active: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT generation_id FROM active_config_generation LIMIT 1",
+    )
+    .fetch_optional(&mut conn)
+    .await
+    .unwrap_or(None);
+    let rows = sqlx::query(
+        "SELECT generation_id, digest, validation_state, test_state,
+                created_by_actor_id, created_at_ms
+         FROM config_generations ORDER BY created_at_ms DESC",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap_or_default();
+    let generations = rows
+        .iter()
+        .map(|r| {
+            let id: String = r.get("generation_id");
+            json!({
+                "generation_id": id,
+                "digest": r.get::<String, _>("digest"),
+                "validation_state": r.get::<String, _>("validation_state"),
+                "test_state": r.get::<String, _>("test_state"),
+                "created_by": r.get::<String, _>("created_by_actor_id"),
+                "created_at_ms": r.get::<i64, _>("created_at_ms"),
+                "active": active.as_deref() == Some(id.as_str()),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({"active": active, "generations": generations})).into_response()
 }
 
 async fn api_graph(

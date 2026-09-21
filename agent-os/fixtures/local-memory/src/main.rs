@@ -4,17 +4,28 @@
 //! `execute`/`status` on `effect.execute`. Each effect payload is a JSON
 //! memory operation:
 //!
-//!   memory.put     {"namespace": N, "memory_id"?: I, "record": R}
+//!   memory.put     {"namespace": N, "memory_id"?: I, "record": R,
+//!                   "sensitivity"?: S}
 //!   memory.get     {"namespace": N, "memory_id": I}
 //!   memory.delete  {"namespace": N, "memory_id": I}
 //!   memory.list    {"namespace": N}
 //!   memory.search  {"namespace": N, "query": {"text": "substr"}}
 //!
-//! Records live in a durable JSON store (`{namespace: {id: record}}` at
+//! Phase-10 provenance + sensitivity: every stored record is wrapped in
+//! `{record, sensitivity, provenance:{effect_id, operation_id,
+//! fencing_token, written_at_ms}}`. `sensitivity` is one of
+//! public|internal|confidential|secret (default `internal`); a put may
+//! raise but never lower a record's class (`sensitivity_downgrade`).
+//! Namespaces are authority-scoped identifiers — `ns` must match
+//! `[a-z0-9][a-z0-9._-]{0,63}` so a caller can't escape into a foreign
+//! namespace via odd characters.
+//!
+//! Records live in a durable JSON store (`{namespace: {id: envelope}}` at
 //! `FIXTURE_STORE`, default `local-memory-store.json`) so memory survives
 //! daemon restarts. Every write is fenced/idempotent on `operation_id`
 //! and committed effects return `memory://<namespace>/<id>` result refs;
-//! reads return a `data:application/json;base64,` payload.
+//! reads return a `data:application/json;base64,` payload carrying the
+//! record plus its provenance/sensitivity envelope.
 //!
 //! Env: `FIXTURE_STORE` — store path (set by the daemon).
 
@@ -164,6 +175,24 @@ fn save_store(path: &str, store: &Store) {
     }
 }
 
+const SENSITIVITY: [&str; 4] = ["public", "internal", "confidential", "secret"];
+
+fn sensitivity_rank(s: &str) -> Option<u8> {
+    SENSITIVITY.iter().position(|&x| x == s).map(|i| i as u8)
+}
+
+/// Namespace authority rule: `[a-z0-9][a-z0-9._-]{0,63}` — keeps each
+/// namespace a clean isolation domain.
+fn valid_namespace(ns: &str) -> bool {
+    !ns.is_empty()
+        && ns.len() <= 64
+        && ns.bytes().enumerate().all(|(i, b)| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || (i > 0 && matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
 fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
     let finish = |status: &str, result_ref: String, code: &str| -> (Vec<u8>, String) {
         (
@@ -199,7 +228,7 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
         .get("namespace")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !op.starts_with("memory.") || namespace.is_empty() {
+    if !op.starts_with("memory.") || !valid_namespace(namespace) {
         return finish("failed", String::new(), "unsupported_operation");
     }
     let ns = store.memory.entry(namespace.to_owned()).or_default();
@@ -214,7 +243,42 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
             let Some(record) = payload.get("record").cloned() else {
                 return finish("failed", String::new(), "invalid_argument");
             };
-            ns.insert(id.clone(), record);
+            let sensitivity = payload
+                .get("sensitivity")
+                .and_then(Value::as_str)
+                .unwrap_or("internal");
+            let Some(rank) = sensitivity_rank(sensitivity) else {
+                return finish("failed", String::new(), "invalid_sensitivity");
+            };
+            // Provenance + sensitivity are an authority: a put may raise
+            // a record's class but never lower it.
+            if let Some(existing) = ns.get(&id) {
+                let existing_rank = existing
+                    .get("sensitivity")
+                    .and_then(Value::as_str)
+                    .and_then(sensitivity_rank)
+                    .unwrap_or(1);
+                if rank < existing_rank {
+                    return finish("failed", String::new(), "sensitivity_downgrade");
+                }
+            }
+            let written_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            ns.insert(
+                id.clone(),
+                serde_json::json!({
+                    "record": record,
+                    "sensitivity": sensitivity,
+                    "provenance": {
+                        "effect_id": req.effect_id,
+                        "operation_id": req.operation_id,
+                        "fencing_token": req.fencing_token,
+                        "written_at_ms": written_at_ms,
+                    },
+                }),
+            );
             ("succeeded", format!("memory://{namespace}/{id}"), "")
         }
         "memory.get" => {
@@ -238,7 +302,17 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
             ("succeeded", format!("memory://{namespace}/{id}"), "")
         }
         "memory.list" => {
-            let ids: Vec<&String> = ns.keys().collect();
+            let ids: Vec<serde_json::Value> = ns
+                .iter()
+                .map(|(id, env)| {
+                    serde_json::json!({
+                        "id": id,
+                        "sensitivity": env.get("sensitivity")
+                            .and_then(Value::as_str)
+                            .unwrap_or("internal"),
+                    })
+                })
+                .collect();
             (
                 "succeeded",
                 format!(
@@ -253,13 +327,20 @@ fn execute(req: EffectExecutionRequest, store_path: &str) -> (Vec<u8>, String) {
                 .as_str()
                 .unwrap_or_default()
                 .to_lowercase();
-            let hits: Vec<&String> = ns
+            let hits: Vec<serde_json::Value> = ns
                 .iter()
                 .filter(|(id, rec)| {
                     id.to_lowercase().contains(&needle)
                         || rec.to_string().to_lowercase().contains(&needle)
                 })
-                .map(|(id, _)| id)
+                .map(|(id, env)| {
+                    serde_json::json!({
+                        "id": id,
+                        "sensitivity": env.get("sensitivity")
+                            .and_then(Value::as_str)
+                            .unwrap_or("internal"),
+                    })
+                })
                 .collect();
             (
                 "succeeded",

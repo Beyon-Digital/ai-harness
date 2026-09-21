@@ -6,6 +6,7 @@
 //! integration tests run the real composition.
 #![forbid(unsafe_code)]
 
+pub mod adapters;
 pub mod api;
 pub mod bootstrap;
 pub mod lock;

@@ -153,6 +153,23 @@ fn gateway_serves_health_index_and_rest() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["decisions"], serde_json::json!([]));
 
+    // Metrics read the durable stores read-only while the daemon runs.
+    let (code, body) = http_get(port, "/api/metrics");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["index"]["runs"].as_u64().unwrap() >= 1, "{v}");
+    assert!(v["kernel_db_error"].is_null(), "{v}");
+
+    // Generation pipeline surface answers (empty — no --config at boot).
+    let (code, body) = http_get(port, "/api/config/generations");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["generations"].as_array().unwrap().is_empty(), "{v}");
+
+    // An unbound run (no spec) has no resolved environment → 404.
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/environment"));
+    assert_eq!(code, 404, "{body}");
+
     drop(agentgw);
     drop(agentd);
 }
@@ -314,6 +331,42 @@ fn gateway_decisions_decodes_run_stream() {
     assert_eq!(
         decisions[0]["detail"]["reason_code"].as_str().unwrap(),
         "script_exhausted"
+    );
+
+    // Bound run → frozen environment row + effect_execute binding.
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/environment"));
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let env = &v["environment"];
+    assert_eq!(env["run_id"], run_id);
+    assert_eq!(
+        env["agent_loop_id"].as_str().unwrap(),
+        "01905c5e-0000-7000-8000-a9e97100f1a1"
+    );
+    assert_eq!(env["config_generation_id"].as_str().unwrap().len(), 36);
+    let bindings = v["bindings"].as_array().unwrap();
+    assert!(
+        bindings.iter().any(|b| b["port_id"] == "effect.execute"),
+        "{bindings:?}"
+    );
+
+    // Boot --config created one generation and activated it.
+    let (code, body) = http_get(port, "/api/config/generations");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let gens = v["generations"].as_array().unwrap();
+    assert_eq!(gens.len(), 1, "{v}");
+    assert_eq!(gens[0]["active"], true);
+    assert_eq!(gens[0]["generation_id"], env["config_generation_id"]);
+
+    // Metrics now see a terminal run + the committed effect rows.
+    let (code, body) = http_get(port, "/api/metrics");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let states = v["runs_by_state"].as_array().unwrap();
+    assert!(
+        states.iter().any(|s| s["state"] == 10 && s["count"] == 1),
+        "{states:?}"
     );
 
     drop(agentgw);
