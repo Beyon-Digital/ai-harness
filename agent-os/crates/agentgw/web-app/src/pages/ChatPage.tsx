@@ -427,8 +427,8 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
                 onCheckedChange={(v) => setToolsOn(v === true)}
               />
               <Label
-                htmlFor="mcp-tools"
-                className="whitespace-nowrap text-xs text-muted-foreground"
+                className="cursor-pointer whitespace-nowrap text-xs text-muted-foreground"
+                onClick={() => setToolsOn((v) => !v)}
               >
                 MCP tools
               </Label>
