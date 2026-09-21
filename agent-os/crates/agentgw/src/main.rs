@@ -1424,25 +1424,19 @@ async fn api_profiles(State(state): State<Arc<AppState>>) -> Response {
     };
     let profiles = parsed
         .profiles
-        .iter()
-        .map(|(name, p)| {
-            let mut bindings = BTreeMap::new();
-            for (slot, v) in [
-                ("extends", &p.extends),
-                ("sandbox", &p.sandbox),
-                ("workspace", &p.workspace),
-                ("artifact_store", &p.artifact_store),
-                ("memory_store", &p.memory_store),
-                ("model_provider", &p.model_provider),
-                ("tool_runtime", &p.tool_runtime),
-                ("agent_loop", &p.agent_loop),
-                ("effect_execute", &p.effect_execute),
-            ] {
-                if let Some(v) = v {
-                    bindings.insert(slot, v.clone());
-                }
-            }
-            json!({"name": name, "bindings": bindings})
+        .keys()
+        .map(|name| {
+            // Resolve the extends chain so GUI pickers see the profile's
+            // effective bindings, not just the overrides it declares.
+            let resolved = config_engine::profile::resolve_profile(&parsed, name);
+            let (bindings, extends) = match resolved {
+                Ok(r) => (
+                    r.bindings,
+                    parsed.profiles.get(name).and_then(|p| p.extends.clone()),
+                ),
+                Err(_) => (BTreeMap::new(), None),
+            };
+            json!({"name": name, "bindings": bindings, "extends": extends})
         })
         .collect::<Vec<_>>();
     Json(json!({"profiles": profiles})).into_response()

@@ -182,7 +182,11 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
           ? JSON.stringify({
               task,
               ...(provider
-                ? { model: provider.model, base_url: provider.baseUrl }
+                ? {
+                    model: provider.model,
+                    base_url: provider.baseUrl,
+                    ...(provider.keyEnv ? { api_key_env: provider.keyEnv } : {}),
+                  }
                 : {}),
               ...(toolsOn ? { tools: true } : {}),
             })

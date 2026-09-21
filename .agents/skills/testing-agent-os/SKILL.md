@@ -122,6 +122,10 @@ commands from `agent-os/`.
 - Theme select sits in the sidebar footer; options open UPWARD in a scrollable list —
   items past ~4 visible are offscreen; scroll inside the list or click the visible
   rows. Choice persists via localStorage; collapsed label shows the theme name.
+- Chat composer has an "MCP tools" switch (span[aria-checked] + hidden checkbox,
+  default ON) — click the knob itself; the text label is not wired to toggle. When
+  ON, the task envelope carries `tools:true` and the loop adapter's system prompt
+  gains an `mcp_call` clause (grep the decision payload for "mcp_call" to confirm).
 - `provider_unreachable` from openrouter-effect can be transient free-tier routing —
   retry before calling it a failure (key auth was 200 while the model call failed).
 - Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to

@@ -174,19 +174,14 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
         .and_then(|v| v.get("tools").or_else(|| v.get("mcp")))
         .map(|v| v.as_bool().unwrap_or(false) || v.as_str() == Some("true"))
         .unwrap_or(false);
-    let mcp_hops = settled_effects(&input.events)
-        .iter()
-        .filter(|e| {
-            e.get("operation")
-                .and_then(Value::as_str)
-                .map(|o| o.starts_with("mcp."))
-                .unwrap_or(false)
-        })
-        .count() as u32;
+    // Run-wide settled `mcp.*` effects — accumulates across steps and
+    // survives daemon restarts, so the hop cap cannot be evaded by
+    // alternating model/tool turns.
+    let mcp_hops = op_count(&input.events, "mcp.");
 
-    // Branch on the NEWEST settled effect only — settled effects persist
-    // in the event feed, so checking "any mcp effect" would re-dispatch
-    // the same tool result forever.
+    // Branch on the NEWEST settled effect only — the feed contains just
+    // the current step's outcomes, so checking "any mcp effect" would
+    // re-dispatch the same tool result forever.
     let latest = settled_effects(&input.events).last().cloned();
     if let Some(effect) = latest
         && effect
@@ -239,6 +234,9 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
         }
         if let Some(url) = get("base_url") {
             request["base_url"] = Value::String(url);
+        }
+        if let Some(ke) = get("api_key_env") {
+            request["api_key_env"] = Value::String(ke);
         }
         return reply(
             Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
@@ -326,6 +324,9 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
     if let Some(url) = get("base_url") {
         request["base_url"] = Value::String(url);
     }
+    if let Some(ke) = get("api_key_env") {
+        request["api_key_env"] = Value::String(ke);
+    }
     reply(
         Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
             operation: MODEL_CHAT_OP.to_owned(),
@@ -341,11 +342,50 @@ fn latest_model_effect(events: &[u8]) -> Option<Value> {
     latest_effect_matching(events, |o| o == MODEL_CHAT_OP)
 }
 
+/// Events payload: `{"settled": [..current-step terminal effects..],
+/// "op_counts": {op: total terminal effects run-wide}}`. A bare array
+/// (older daemons) is treated as just the settled batch.
+fn events_doc(events: &[u8]) -> Value {
+    serde_json::from_slice::<Value>(events).unwrap_or(Value::Null)
+}
+
 fn settled_effects(events: &[u8]) -> Vec<Value> {
-    serde_json::from_slice::<Value>(events)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    match events_doc(events) {
+        Value::Array(a) => a,
+        v => v
+            .get("settled")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// Run-wide terminal-effect count for ops matching `prefix` — durable
+/// across turns and daemon restarts, unlike the per-step `settled`
+/// batch.
+fn op_count(events: &[u8], prefix: &str) -> u32 {
+    events_doc(events)
+        .get("op_counts")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(op, _)| op.starts_with(prefix))
+                .map(|(_, n)| n.as_u64().unwrap_or(0))
+                .sum::<u64>() as u32
+        })
+        .unwrap_or_else(|| {
+            // Legacy bare-array feeds have no counts — degrade to the
+            // current step's matches (old, lossy behavior).
+            settled_effects(events)
+                .iter()
+                .filter(|e| {
+                    e.get("operation")
+                        .and_then(Value::as_str)
+                        .map(|o| o.starts_with(prefix))
+                        .unwrap_or(false)
+                })
+                .count() as u32
+        })
 }
 
 fn latest_effect_matching(events: &[u8], pred: impl Fn(&str) -> bool) -> Option<Value> {

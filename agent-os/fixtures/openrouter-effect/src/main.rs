@@ -269,9 +269,6 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
             Err(code) => fail(&code),
         };
     }
-    if config.api_key.is_empty() {
-        return fail("missing_openrouter_api_key");
-    }
     // Per-request endpoint override: the GUI sends `base_url` when a
     // custom OpenAI-compatible provider is selected. Same guard as the
     // env default — https on openrouter.ai unless the operator opted out
@@ -289,8 +286,31 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         }
         None => config.base_url.clone(),
     };
+    // Per-request credential reference: `api_key_env` names a daemon env
+    // var (allowlisted `PROVIDER_KEY_*` prefix) holding the key — the
+    // secret itself never enters the durable effect payload.
+    let api_key = match payload.get("api_key_env").and_then(Value::as_str) {
+        Some(name) => {
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                || name.is_empty()
+            {
+                return fail("api_key_env_invalid");
+            }
+            match env(name) {
+                Ok(v) if !v.is_empty() => v,
+                _ => return fail(&format!("api_key_env {name} not set")),
+            }
+        }
+        None => config.api_key.clone(),
+    };
+    if api_key.is_empty() {
+        return fail("missing_openrouter_api_key");
+    }
     let mut body = payload.clone();
-    body.as_object_mut().map(|m| m.remove("base_url"));
+    body.as_object_mut()
+        .map(|m| m.remove("base_url").or(m.remove("api_key_env")));
     if body.get("model").is_none() {
         body["model"] = Value::String(config.default_model.clone());
     }
@@ -298,7 +318,7 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         return fail("invalid_argument");
     }
 
-    match call_chat(config, &base_url, &body) {
+    match call_chat(config, &base_url, &api_key, &body) {
         Ok(content) => {
             let result_ref = data_uri(&content);
             store.insert(
@@ -362,7 +382,12 @@ fn endpoint_allowed(url: &str) -> Result<(), String> {
     }
 }
 
-fn call_chat(config: &LlmConfig, base_url: &str, body: &Value) -> Result<String, String> {
+fn call_chat(
+    config: &LlmConfig,
+    base_url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<String, String> {
     let url = format!("{base_url}/chat/completions");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
@@ -370,7 +395,7 @@ fn call_chat(config: &LlmConfig, base_url: &str, body: &Value) -> Result<String,
         .into();
     let mut req = agent
         .post(&url)
-        .header("Authorization", &format!("Bearer {}", config.api_key))
+        .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json");
     if let Some(site) = &config.site {
         req = req.header("HTTP-Referer", site);

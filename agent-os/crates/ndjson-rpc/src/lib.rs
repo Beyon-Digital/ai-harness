@@ -108,10 +108,14 @@ pub struct Spawn {
 }
 
 /// Blocking NDJSON JSON-RPC client holding the spawned child.
+///
+/// A pump thread owns the child's stdout and forwards each complete
+/// line over a channel, so `request` waits with `recv_timeout` and a
+/// silent peer cannot block past the deadline.
 pub struct Client {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
     next_id: u64,
 }
 
@@ -134,10 +138,28 @@ impl Client {
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().ok_or(RpcError::Closed)?;
         let stdout = child.stdout.take().ok_or(RpcError::Closed)?;
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                let r = reader.read_line(&mut line).map(|n| {
+                    if n == 0 {
+                        String::new()
+                    } else {
+                        std::mem::take(&mut line)
+                    }
+                });
+                let eof = matches!(&r, Ok(s) if s.is_empty()) || r.is_err();
+                if tx.send(r).is_err() || eof {
+                    return;
+                }
+            }
+        });
         Ok(Client {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            lines,
             next_id: 1,
         })
     }
@@ -165,14 +187,21 @@ impl Client {
             "jsonrpc": "2.0", "id": id, "method": method, "params": params,
         }))?;
         let until = Instant::now() + deadline;
-        let mut line = String::new();
         loop {
-            if Instant::now() > until {
+            let remaining = until.checked_duration_since(Instant::now());
+            let Some(remaining) = remaining else {
                 return Err(RpcError::Timeout);
-            }
-            line.clear();
-            let n = self.stdout.read_line(&mut line)?;
-            if n == 0 {
+            };
+            let line = match self.lines.recv_timeout(remaining) {
+                Ok(Ok(l)) => l,
+                // EOF arrives as an empty line payload handled below.
+                Ok(Err(e)) => return Err(RpcError::Io(e)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(RpcError::Timeout),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RpcError::Closed);
+                }
+            };
+            if line.is_empty() {
                 return Err(RpcError::Closed);
             }
             let trimmed = line.trim();

@@ -3,7 +3,9 @@ export interface Provider {
   name: string;
   baseUrl: string;
   model: string;
-  apiKey?: string;
+  // Name of a daemon env var holding the key — secrets never live in
+  // localStorage or durable run payloads.
+  keyEnv?: string;
   builtin?: boolean;
 }
 

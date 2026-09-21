@@ -36,7 +36,10 @@ export function RunsPage({
   onConsumed: () => void;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
-  const [selected, setSelected] = useState<Run | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Derive the row from the fresh list so the detail pane tracks state
+  // transitions as polling refreshes `runs`.
+  const selected = runs.find((r) => r.run_id === selectedId) ?? null;
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [env, setEnv] = useState<Environment | null>(null);
   const [envErr, setEnvErr] = useState("");
@@ -60,20 +63,20 @@ export function RunsPage({
     if (focusRunId) {
       const r = runs.find((x) => x.run_id === focusRunId);
       if (r) {
-        setSelected(r);
+        setSelectedId(r.run_id);
         onConsumed();
       }
     }
   }, [focusRunId, runs, onConsumed]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedId) return;
     let live = true;
     const load = async () => {
       try {
         const [d, e] = await Promise.all([
-          getDecisions(selected.run_id),
-          getEnvironment(selected.run_id).catch((err) => {
+          getDecisions(selectedId),
+          getEnvironment(selectedId).catch((err) => {
             if (live) setEnvErr(err.message);
             return null;
           }),
@@ -91,7 +94,7 @@ export function RunsPage({
       live = false;
       clearInterval(t);
     };
-  }, [selected?.run_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   const out = selected ? decodeDataUri(selected.output_ref) : null;
 
@@ -118,7 +121,7 @@ export function RunsPage({
                   selected?.run_id === r.run_id && "bg-accent/50",
                 )}
                 onClick={() => {
-                  setSelected(r);
+                  setSelectedId(r.run_id);
                   setEnv(null);
                   setEnvErr("");
                 }}

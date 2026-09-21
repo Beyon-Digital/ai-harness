@@ -38,7 +38,7 @@ export function SystemPage() {
   );
   const [providers, setProviders] = useState<Provider[]>(loadProviders);
   const [addOpen, setAddOpen] = useState(false);
-  const [np, setNp] = useState({ name: "", baseUrl: "", model: "", apiKey: "" });
+  const [np, setNp] = useState({ name: "", baseUrl: "", model: "", keyEnv: "" });
 
   useEffect(() => {
     const load = () => {
@@ -63,7 +63,7 @@ export function SystemPage() {
       return;
     }
     save([...providers, { ...np, id: crypto.randomUUID() }]);
-    setNp({ name: "", baseUrl: "", model: "", apiKey: "" });
+    setNp({ name: "", baseUrl: "", model: "", keyEnv: "" });
     setAddOpen(false);
     toast.success(`provider "${np.name}" added — pick it in Chat`);
   };
@@ -76,10 +76,10 @@ export function SystemPage() {
         <CardHeader>
           <CardTitle className="text-sm">Inference providers</CardTitle>
           <CardDescription>
-            OpenAI-compatible chat-completions endpoints. Keys stay in this
-            browser; the run payload carries <code>base_url</code>/
-            <code>model</code> to the effect adapter (honored only when the
-            daemon allows non-default base URLs).
+            OpenAI-compatible chat-completions endpoints. Runs carry{" "}
+            <code>base_url</code>/<code>model</code>/<code>api_key_env</code>{" "}
+            to the effect adapter — credentials live in the daemon&apos;s
+            environment, never in the browser or run payloads.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
@@ -93,7 +93,7 @@ export function SystemPage() {
                 <div className="text-sm font-medium">{p.name}</div>
                 <div className="truncate font-mono text-xs text-muted-foreground">
                   {p.baseUrl} · {p.model || "default model"}
-                  {p.apiKey ? " · key stored" : ""}
+                  {p.keyEnv ? ` · key env ${p.keyEnv}` : ""}
                 </div>
               </div>
               {p.builtin ? (
@@ -195,12 +195,16 @@ export function SystemPage() {
               />
             </div>
             <div>
-              <Label>API key (stored in this browser only)</Label>
+              <Label>API key env var (on the daemon host)</Label>
               <Input
-                type="password"
-                value={np.apiKey}
-                onChange={(e) => setNp({ ...np, apiKey: e.target.value })}
+                value={np.keyEnv}
+                onChange={(e) => setNp({ ...np, keyEnv: e.target.value })}
+                placeholder="PROVIDER_KEY_TOGETHER"
               />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                The key itself stays in the daemon&apos;s environment —
+                only the variable name is sent with runs.
+              </p>
             </div>
           </div>
           <DialogFooter>

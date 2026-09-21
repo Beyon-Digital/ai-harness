@@ -738,34 +738,49 @@ impl RunWorker {
                 state.truncate(end);
                 tracing::info!(run = %run_id_str(row.run_id), cap, "loop state truncated");
             }
-            let mut settled: Vec<serde_json::Value> = txn
-                .effects()
-                .list_by_run(row.run_id)
-                .await?
-                .iter()
-                .filter(|e| effects::is_terminal(e.state) && e.step_sequence == row.step_sequence)
-                .map(|e| {
-                    serde_json::json!({
+            let run_effects = txn.effects().list_by_run(row.run_id).await?;
+            // `settled` carries only the current step's terminal effects
+            // (fed exactly once — replay is deliberate). `op_counts`
+            // summarizes ALL terminal effects for the run so loops can
+            // bound per-operation work (e.g. MCP tool hops) without the
+            // feed re-delivering history.
+            let mut op_counts = std::collections::BTreeMap::<String, u64>::new();
+            let mut settled: Vec<serde_json::Value> = Vec::new();
+            for e in &run_effects {
+                if !effects::is_terminal(e.state) {
+                    continue;
+                }
+                *op_counts.entry(e.operation.clone()).or_default() += 1;
+                if e.step_sequence == row.step_sequence {
+                    settled.push(serde_json::json!({
                         "effect_id": e.effect_id.to_string(),
                         "operation": e.operation,
                         "state": format!("{:?}", e.state).to_ascii_lowercase(),
                         "result_ref": e.result_ref,
                         "error_code": e.error_code,
-                    })
-                })
-                .collect();
+                    }));
+                }
+            }
             let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
             if drop_n > 0 {
                 tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
                 settled.drain(..drop_n);
             }
-            let mut events = serde_json::to_vec(&settled).unwrap_or_default();
+            let pack = |settled: &[serde_json::Value],
+                        counts: &std::collections::BTreeMap<String, u64>| {
+                serde_json::to_vec(&serde_json::json!({
+                    "settled": settled,
+                    "op_counts": counts,
+                }))
+                .unwrap_or_default()
+            };
+            let mut events = pack(&settled, &op_counts);
             while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
                 settled.remove(0);
-                events = serde_json::to_vec(&settled).unwrap_or_default();
+                events = pack(&settled, &op_counts);
             }
-            // A cap below 2 bytes can't even hold `[]` — emit the empty
-            // payload (0 bytes) so the configured bound always holds.
+            // A cap too small for the envelope — emit the empty payload
+            // (0 bytes) so the configured bound always holds.
             if events.len() > limits.max_fed_event_bytes as usize {
                 events = Vec::new();
             }
@@ -1259,11 +1274,20 @@ impl RunWorker {
             // MCP tool servers configured for `mcp.*` effect payloads.
             "MCP_SERVERS",
             "MCP_TIMEOUT_MS",
+            "MCP_ALLOW_ANY_URL",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
             {
                 env.push((key.to_owned(), value));
+            }
+        }
+        // `PROVIDER_KEY_*` holds per-provider credentials referenced by
+        // `api_key_env` in model.chat payloads — forwarded by name, so
+        // arbitrary daemon secrets still never reach adapters.
+        for (key, value) in std::env::vars() {
+            if key.starts_with("PROVIDER_KEY_") && !value.is_empty() {
+                env.push((key, value));
             }
         }
         let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());

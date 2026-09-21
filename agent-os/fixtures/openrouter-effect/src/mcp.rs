@@ -104,6 +104,7 @@ fn server_spec(name: &str) -> Result<ServerSpec, String> {
         .get(name)
         .ok_or_else(|| format!("mcp server `{name}` not in MCP_SERVERS"))?;
     if let Some(url) = spec.get("url").and_then(Value::as_str) {
+        mcp_http_url_allowed(url)?;
         let headers = spec
             .get("headers")
             .and_then(Value::as_object)
@@ -148,6 +149,50 @@ fn server_spec(name: &str) -> Result<ServerSpec, String> {
         env,
         cwd,
     })
+}
+
+/// HTTP MCP destinations are SSRF-sensitive: configured headers (e.g.
+/// Authorization) get forwarded to the URL. Allow `https:` to any host
+/// and `http:` only to loopback; `MCP_ALLOW_ANY_URL=1` opts out for
+/// trusted internal networks.
+fn mcp_http_url_allowed(url: &str) -> Result<(), String> {
+    if std::env::var("MCP_ALLOW_ANY_URL").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .map(|r| ("https", r))
+        .or_else(|| url.strip_prefix("http://").map(|r| ("http", r)))
+        .ok_or("mcp server url must be http(s)")?;
+    if rest.0 == "https" {
+        return Ok(());
+    }
+    let host = rest
+        .1
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['[', ']']);
+    let loopback = host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    if loopback {
+        Ok(())
+    } else {
+        Err(format!(
+            "mcp server url {url} refused: plain http is loopback-only \
+             (set MCP_ALLOW_ANY_URL=1 to override)"
+        ))
+    }
 }
 
 fn stdio_call(
@@ -215,6 +260,13 @@ fn http_call(
         },
     });
     let mut resp = req.send_json(&init).map_err(|e| format!("mcp_http: {e}"))?;
+    // Streamable-HTTP servers may mint a session id on initialize;
+    // propagate it on every later request in this call.
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let body = resp
         .body_mut()
         .read_to_string()
@@ -222,23 +274,30 @@ fn http_call(
     if let Some(v) = extract_response(&body, &Value::from(1)) {
         v.map_err(|e| format!("mcp_initialize: {e}"))?;
     }
+    let post = |payload: &Value| -> Result<String, String> {
+        let mut r = agent
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        for (k, v) in headers {
+            r = r.header(k, v);
+        }
+        if let Some(s) = &session {
+            r = r.header("Mcp-Session-Id", s);
+        }
+        r.send_json(payload)
+            .map_err(|e| format!("mcp_http: {e}"))?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("mcp_http_read: {e}"))
+    };
+    let _ = post(&json!({
+        "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
+    }));
     let call = json!({
         "jsonrpc": "2.0", "id": 2, "method": method, "params": params,
     });
-    let mut resp = agent
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream");
-    for (k, v) in headers {
-        resp = resp.header(k, v);
-    }
-    let mut resp = resp
-        .send_json(&call)
-        .map_err(|e| format!("mcp_http: {e}"))?;
-    let body = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("mcp_http_read: {e}"))?;
+    let body = post(&call)?;
     match extract_response(&body, &Value::from(2)) {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(format!("{method}: {e}")),
@@ -319,5 +378,94 @@ mod tests {
         assert!(is_mcp_payload(&json!({"op": "mcp.call_tool"})));
         assert!(!is_mcp_payload(&json!({"model": "x"})));
         assert!(!is_mcp_payload(&json!({"op": "model.chat"})));
+    }
+
+    /// Minimal streamable-HTTP MCP server: initialize mints a
+    /// `Mcp-Session-Id`, the notification gets a 202, and `tools/call`
+    /// answers SSE-framed — asserting the header is propagated.
+    #[test]
+    fn http_call_against_mock_server() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut headers = Vec::new();
+                let mut len = 0usize;
+                while reader.read_line(&mut line).unwrap() > 0 {
+                    let t = line.trim_end().to_owned();
+                    line.clear();
+                    if t.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = t.split_once(':')
+                        && k.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    headers.push(t.clone());
+                }
+                seen2.lock().unwrap().extend(headers);
+                let mut buf = vec![0u8; len];
+                reader.read_exact(&mut buf).unwrap();
+                let req: Value = serde_json::from_slice(&buf).unwrap();
+                let (status, extra, payload) = match req.get("method").and_then(Value::as_str) {
+                    Some("initialize") => (
+                        "200 OK",
+                        "Mcp-Session-Id: sess-1\r\nContent-Type: application/json\r\n",
+                        json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"mock","version":"0"}}}).to_string(),
+                    ),
+                    Some("notifications/initialized") => {
+                        ("202 Accepted", "", String::new())
+                    }
+                    Some("tools/call") => (
+                        "200 OK",
+                        "Content-Type: text/event-stream\r\n",
+                        format!(
+                            "data: {}\n\n",
+                            json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"http-mcp-ok"}]}})
+                        ),
+                    ),
+                    _ => ("400 Bad Request", "", String::new()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\n\r\n{payload}",
+                    payload.len()
+                )
+                .unwrap();
+            }
+        });
+        let out = http_call(
+            &format!("http://127.0.0.1:{port}/mcp"),
+            &[],
+            "tools/call",
+            json!({"name": "echo", "arguments": {}}),
+            Duration::from_secs(10),
+        )
+        .expect("http_call");
+        handle.join().unwrap();
+        assert_eq!(flatten_result(&out), "http-mcp-ok");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("mcp-session-id: sess-1")),
+            "session header must propagate to later requests"
+        );
+    }
+
+    #[test]
+    fn http_url_policy() {
+        assert!(mcp_http_url_allowed("https://mcp.example.com/x").is_ok());
+        assert!(mcp_http_url_allowed("http://127.0.0.1:8080/mcp").is_ok());
+        assert!(mcp_http_url_allowed("http://localhost/mcp").is_ok());
+        assert!(mcp_http_url_allowed("http://169.254.169.254/meta").is_err());
+        assert!(mcp_http_url_allowed("file:///etc/passwd").is_err());
     }
 }
