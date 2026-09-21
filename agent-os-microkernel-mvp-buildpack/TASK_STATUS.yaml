@@ -410,11 +410,18 @@ tasks:
       RunWorker drives Created->Ready->Running->terminal via fixture loop; drain-first
       shutdown releases the singleton lock.
   INT-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 3c8daaf
+    tests:
+    - e2e_parallel_fork_merge
+    - e2e_exclusive_transfer_stale_lease_rejected
+    - e2e_cancel_spawn_race
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-002.md
+    notes: parallel spawn_agent children with base-pinned forks, explicit merges incl.
+      conflict+abort, exclusive lease transfer with stale-token rejection, and a
+      cancel/spawn race consistent under both orderings; fixed agentctl cancel-run
+      sending u64::MAX instead of 0 for an absent --expected-revision.
   INT-003:
     status: pending
     commit: null
