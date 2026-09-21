@@ -37,14 +37,22 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
+mod devices;
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("device") {
+        return ExitCode::from(devices::cli(&args[1..]) as u8);
+    }
     let mut socket = PathBuf::from("/tmp/agentd/control.sock");
     let mut listen = "127.0.0.1:7740".to_owned();
     let mut auth_token = std::env::var("AGENTGW_TOKEN").ok();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut devices_file: Option<PathBuf> = std::env::var("AGENTGW_DEVICES_FILE")
+        .ok()
+        .map(PathBuf::from);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -72,10 +80,20 @@ fn main() -> ExitCode {
                 auth_token = Some(arg[13..].to_owned());
                 i += 1;
             }
+            "--devices-file" if i + 1 < args.len() => {
+                devices_file = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            arg if arg.starts_with("--devices-file=") => {
+                devices_file = Some(PathBuf::from(&arg["--devices-file=".len()..]));
+                i += 1;
+            }
             "-h" | "--help" => {
                 println!(
                     "agentgw --socket <control.sock> [--listen 127.0.0.1:7740] \
-                     [--auth-token T]\n  non-loopback --listen requires AGENTGW_TOKEN or --auth-token"
+                     [--auth-token T] [--devices-file F]\n  \
+                     agentgw device <add|revoke|list> --devices-file F [--label L] [id]\n  \
+                     non-loopback --listen requires AGENTGW_TOKEN/--auth-token or --devices-file"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -85,11 +103,15 @@ fn main() -> ExitCode {
             }
         }
     }
-    if !is_loopback_addr(&listen) && auth_token.is_none() {
-        eprintln!("agentgw: refusing non-loopback --listen without AGENTGW_TOKEN/--auth-token");
+    if !is_loopback_addr(&listen) && auth_token.is_none() && devices_file.is_none() {
+        eprintln!(
+            "agentgw: refusing non-loopback --listen without \
+             AGENTGW_TOKEN/--auth-token/--devices-file"
+        );
         return ExitCode::FAILURE;
     }
-    match serve(socket, listen, auth_token) {
+    let loopback = is_loopback_addr(&listen);
+    match serve(socket, listen, auth_token, devices_file, loopback) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("agentgw: {e}");
@@ -111,17 +133,27 @@ fn is_loopback_addr(listen: &str) -> bool {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> std::io::Result<()> {
+async fn serve(
+    socket: PathBuf,
+    listen: String,
+    auth_token: Option<String>,
+    devices_file: Option<PathBuf>,
+    loopback: bool,
+) -> std::io::Result<()> {
     let daemon = agentctl::connect(&socket)
         .await
         .map_err(|e| std::io::Error::other(format!("{e}")))?;
     let index_path = socket.with_extension("agentgw-index.json");
     let index = load_index(&index_path);
+    let runtime_dir = socket.parent().map(Path::to_path_buf).unwrap_or_default();
     let state = Arc::new(AppState {
         daemon,
         index,
         index_path,
         auth_token,
+        devices_file,
+        runtime_dir,
+        loopback,
     });
 
     let app = Router::new()
@@ -135,12 +167,15 @@ async fn serve(socket: PathBuf, listen: String, auth_token: Option<String>) -> s
         .route("/api/runs", post(api_create_run))
         .route("/api/runs/{run_id}", get(api_get_run))
         .route("/api/runs/{run_id}/decisions", get(api_run_decisions))
+        .route("/api/runs/{run_id}/environment", get(api_run_environment))
         .route("/api/runs/{run_id}/cancel", post(api_cancel_run))
         .route("/api/tasks/{task_id}/graph", get(api_graph))
         .route("/api/effects/{effect_id}", get(api_get_effect))
         .route("/api/effects/{effect_id}/resolve", post(api_resolve_effect))
         .route("/api/adapters", get(api_adapters))
         .route("/api/config", get(api_config))
+        .route("/api/config/generations", get(api_config_generations))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/approvals", get(api_approvals))
         .route("/api/approvals/respond", post(api_respond_approval))
         .route("/api/events/read", get(api_events_read))
@@ -161,7 +196,22 @@ struct AppState {
     index: RwLock<Index>,
     index_path: PathBuf,
     auth_token: Option<String>,
+    /// Per-device credential file (Phase 14); revocations apply per
+    /// request without a restart.
+    devices_file: Option<PathBuf>,
+    /// Daemon runtime dir (socket parent) — kernel.db + events.db are
+    /// opened read-only here for the metrics/environment surface.
+    runtime_dir: PathBuf,
+    /// Whether the listen address is loopback-only — credential-free
+    /// requests are only trusted as "local" on loopback binds.
+    loopback: bool,
 }
+
+/// Inserted into request extensions by `require_auth`: `"admin"` for the
+/// master token, a device id for a device token, `"local"` when the
+/// gateway runs unauthenticated (loopback default).
+#[derive(Clone, Debug)]
+pub struct AuthedCaller(pub String);
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -220,27 +270,73 @@ fn index_push<T>(v: &mut Vec<T>, item: T) {
     }
 }
 
-/// Bearer-token check; enforced only when a token was configured.
+/// Bearer check: master `--auth-token`, then per-device tokens (each
+/// request re-reads the file so `revoke` is immediate). Unauthenticated
+/// loopback mode tags the caller `"local"`.
 async fn require_auth(
     State(state): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if let Some(expected) = &state.auth_token {
-        let ok = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v: &str| v == format!("Bearer {expected}"));
-        if !ok {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "unauthorized" })),
-            )
-                .into_response();
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned));
+    // A registry read error is an outage, not a bad credential — answer
+    // 503 so operators can distinguish it from a 401.
+    #[allow(clippy::result_large_err)]
+    let device_caller = |t: &str| -> Result<Option<AuthedCaller>, Response> {
+        match state.devices_file.as_deref() {
+            Some(f) => match devices::authenticate(f, t) {
+                Ok(Some(id)) => Ok(Some(AuthedCaller(id))),
+                Ok(None) => Ok(None),
+                Err(e) => Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": format!("device registry unavailable: {e}") })),
+                )
+                    .into_response()),
+            },
+            None => Ok(None),
         }
-    }
+    };
+    let caller = if let Some(expected) = &state.auth_token {
+        match bearer.as_deref() {
+            Some(t) if t == expected => AuthedCaller("admin".to_owned()),
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
+            },
+            None => return unauthorized(),
+        }
+    } else if state.devices_file.is_some() {
+        // Devices configured without a master token: a valid device token
+        // identifies the caller. Credential-free requests are only "local"
+        // on a loopback bind — on a remote listener they're unauthorized.
+        match bearer.as_deref() {
+            Some(t) => match device_caller(t) {
+                Ok(Some(c)) => c,
+                Ok(None) => return unauthorized(),
+                Err(r) => return r,
+            },
+            None if state.loopback => AuthedCaller("local".to_owned()),
+            None => return unauthorized(),
+        }
+    } else {
+        AuthedCaller("local".to_owned())
+    };
+    let mut req = req;
+    req.extensions_mut().insert(caller);
     next.run(req).await
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 /// Minimal browser-isolation headers for the privileged dashboard.
@@ -713,6 +809,303 @@ async fn api_run_decisions(
     Json(json!({"decisions": decisions})).into_response()
 }
 
+/// Opens a daemon DB read-only — the gateway is a reader, never a writer.
+async fn open_db_ro(path: &Path) -> Result<sqlx::SqliteConnection, sqlx::Error> {
+    use sqlx::Connection as _;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false);
+    sqlx::SqliteConnection::connect_with(&options).await
+}
+
+/// SELECT <col>, COUNT(*) grouped rows as `[{state|kind: v, count: n}]`.
+async fn count_by(conn: &mut sqlx::SqliteConnection, sql: &str, key: &str) -> Vec<Value> {
+    use sqlx::Row as _;
+    match sqlx::query(sql).fetch_all(&mut *conn).await {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                let count = r.get::<i64, _>(1);
+                let state = r
+                    .try_get::<i64, _>(0)
+                    .map(Value::from)
+                    .or_else(|_| r.try_get::<String, _>(0).map(Value::from))
+                    .unwrap_or(Value::Null);
+                json!({key: state, "count": count})
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn count_total(conn: &mut sqlx::SqliteConnection, sql: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or_default()
+}
+
+/// `GET /api/metrics` — Phase-15 observability surface: durable-store
+/// counters read from kernel.db/events.db (read-only connections) plus the
+/// gateway's index sizes. All queries are best-effort — a missing table or
+/// locked db yields zeros rather than an error page.
+async fn api_metrics(State(state): State<Arc<AppState>>) -> Response {
+    let kernel_path = state.runtime_dir.join("kernel.db");
+    let events_path = state.runtime_dir.join("events.db");
+    let mut metrics = json!({"index": {
+        "sessions": state.index.read().map(|i| i.sessions.len()).unwrap_or(0),
+        "tasks": state.index.read().map(|i| i.tasks.len()).unwrap_or(0),
+        "runs": state.index.read().map(|i| i.runs.len()).unwrap_or(0),
+        "specs": state.index.read().map(|i| i.specs.len()).unwrap_or(0),
+    }});
+    match open_db_ro(&kernel_path).await {
+        Ok(mut conn) => {
+            metrics["runs_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM runs GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["effects_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM effects GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["approvals_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM approval_requests GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["timers_by_state"] = json!(
+                count_by(
+                    &mut conn,
+                    "SELECT state, COUNT(*) FROM timers GROUP BY state",
+                    "state"
+                )
+                .await
+            );
+            metrics["decisions_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM decisions").await);
+            metrics["loop_turns_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM loop_turns").await);
+            metrics["adapters_registered"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM adapter_registrations").await);
+            metrics["adapter_instances_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM adapter_instances").await);
+            metrics["conformance_reports_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM conformance_reports").await);
+            metrics["reservations_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM resource_reservations").await);
+            // Pending = staged but not yet journal-published.
+            metrics["outbox_pending"] = json!(
+                count_total(
+                    &mut conn,
+                    "SELECT COUNT(*) FROM outbox_events WHERE journal_published_at_ms IS NULL"
+                )
+                .await
+            );
+            let active: Option<String> = sqlx::query_scalar::<_, String>(
+                "SELECT generation_id FROM active_config_generation LIMIT 1",
+            )
+            .fetch_optional(&mut conn)
+            .await
+            .unwrap_or(None);
+            metrics["active_generation"] = json!(active);
+            let gen_states = count_by(
+                &mut conn,
+                "SELECT validation_state, COUNT(*) FROM config_generations GROUP BY validation_state",
+                "state",
+            )
+            .await;
+            metrics["generations_by_state"] = json!(gen_states);
+            let gen_tests = count_by(
+                &mut conn,
+                "SELECT test_state, COUNT(*) FROM config_generations GROUP BY test_state",
+                "state",
+            )
+            .await;
+            metrics["generations_by_test_state"] = json!(gen_tests);
+        }
+        Err(e) => metrics["kernel_db_error"] = json!(e.to_string()),
+    }
+    match open_db_ro(&events_path).await {
+        Ok(mut conn) => {
+            metrics["journal_events_total"] =
+                json!(count_total(&mut conn, "SELECT COUNT(*) FROM events").await);
+            metrics["journal_max_sequence"] = json!(
+                count_total(&mut conn, "SELECT COALESCE(MAX(sequence), 0) FROM events").await
+            );
+        }
+        Err(e) => metrics["events_db_error"] = json!(e.to_string()),
+    }
+    Json(metrics).into_response()
+}
+
+/// `GET /api/runs/{id}/environment` — the frozen Phase-11 resolved
+/// environment row + adapter bindings for a run, read straight from
+/// kernel.db so historical runs audit without mutable current config.
+async fn api_run_environment(
+    State(state): State<Arc<AppState>>,
+    AxPath(run_id): AxPath<String>,
+) -> Response {
+    use sqlx::Row as _;
+    let mut conn = match open_db_ro(&state.runtime_dir.join("kernel.db")).await {
+        Ok(c) => c,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Unavailable,
+                errors::codes::RetryClass::Safe,
+                format!("kernel.db unreadable: {e}"),
+            ));
+        }
+    };
+    let row = match sqlx::query(
+        "SELECT environment_id, run_id, agent_spec_id, agent_spec_version,
+                agent_spec_digest, agent_loop_id, agent_loop_version,
+                agent_loop_digest, config_generation_id, workspace_uri,
+                workspace_base_revision, workspace_mode, model_provider,
+                model_id, model_parameters, kernel_version, protocol_versions,
+                capability_grant_ids, approval_request_ids, created_at_ms
+         FROM resolved_run_environments WHERE run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_optional(&mut conn)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Internal,
+                errors::codes::RetryClass::Never,
+                format!("environment query failed: {e}"),
+            ));
+        }
+    };
+    let Some(row) = row else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "run has no resolved environment"})),
+        )
+            .into_response();
+    };
+    let env_id: String = row.get("environment_id");
+    let blob_json = |name: &str| -> Value {
+        let raw: Option<Vec<u8>> = row.get(name);
+        raw.and_then(|b| {
+            serde_json::from_slice(&b)
+                .ok()
+                .or_else(|| Some(Value::String(hex_encode(&b))))
+        })
+        .unwrap_or(Value::Null)
+    };
+    let bindings = sqlx::query(
+        "SELECT port_id, adapter_id, adapter_version, adapter_digest, capabilities
+         FROM resolved_bindings WHERE environment_id = ? ORDER BY port_id",
+    )
+    .bind(&env_id)
+    .fetch_all(&mut conn)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|b| {
+        let caps: Vec<u8> = b.get("capabilities");
+        json!({
+            "port_id": b.get::<String, _>("port_id"),
+            "adapter_id": b.get::<String, _>("adapter_id"),
+            "adapter_version": b.get::<String, _>("adapter_version"),
+            "adapter_digest": b.get::<String, _>("adapter_digest"),
+            "capabilities": serde_json::from_slice::<Value>(&caps)
+                .unwrap_or(Value::Null),
+        })
+    })
+    .collect::<Vec<_>>();
+    Json(json!({
+        "environment": {
+            "environment_id": env_id,
+            "run_id": row.get::<String, _>("run_id"),
+            "agent_spec_id": row.get::<String, _>("agent_spec_id"),
+            "agent_spec_version": row.get::<String, _>("agent_spec_version"),
+            "agent_spec_digest": row.get::<String, _>("agent_spec_digest"),
+            "agent_loop_id": row.get::<String, _>("agent_loop_id"),
+            "agent_loop_version": row.get::<String, _>("agent_loop_version"),
+            "agent_loop_digest": row.get::<String, _>("agent_loop_digest"),
+            "config_generation_id": row.get::<String, _>("config_generation_id"),
+            "workspace_uri": row.get::<Option<String>, _>("workspace_uri"),
+            "workspace_base_revision": row.get::<Option<String>, _>("workspace_base_revision"),
+            "workspace_mode": row.get::<i64, _>("workspace_mode"),
+            "model_provider": row.get::<Option<String>, _>("model_provider"),
+            "model_id": row.get::<Option<String>, _>("model_id"),
+            "model_parameters": blob_json("model_parameters"),
+            "kernel_version": row.get::<String, _>("kernel_version"),
+            "protocol_versions": blob_json("protocol_versions"),
+            "capability_grant_ids": blob_json("capability_grant_ids"),
+            "approval_request_ids": blob_json("approval_request_ids"),
+            "created_at_ms": row.get::<i64, _>("created_at_ms"),
+        },
+        "bindings": bindings,
+    }))
+    .into_response()
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `GET /api/config/generations` — the config-generation pipeline state
+/// (proposed → validated → tested → active), read-only from kernel.db.
+async fn api_config_generations(State(state): State<Arc<AppState>>) -> Response {
+    use sqlx::Row as _;
+    let mut conn = match open_db_ro(&state.runtime_dir.join("kernel.db")).await {
+        Ok(c) => c,
+        Err(e) => {
+            return gw_err(errors::KernelError::new(
+                errors::codes::ErrorCode::Unavailable,
+                errors::codes::RetryClass::Safe,
+                format!("kernel.db unreadable: {e}"),
+            ));
+        }
+    };
+    let active: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT generation_id FROM active_config_generation LIMIT 1",
+    )
+    .fetch_optional(&mut conn)
+    .await
+    .unwrap_or(None);
+    let rows = sqlx::query(
+        "SELECT generation_id, digest, validation_state, test_state,
+                created_by_actor_id, created_at_ms
+         FROM config_generations ORDER BY created_at_ms DESC",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap_or_default();
+    let generations = rows
+        .iter()
+        .map(|r| {
+            let id: String = r.get("generation_id");
+            json!({
+                "generation_id": id,
+                "digest": r.get::<String, _>("digest"),
+                "validation_state": r.get::<String, _>("validation_state"),
+                "test_state": r.get::<String, _>("test_state"),
+                "created_by": r.get::<String, _>("created_by_actor_id"),
+                "created_at_ms": r.get::<i64, _>("created_at_ms"),
+                "active": active.as_deref() == Some(id.as_str()),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({"active": active, "generations": generations})).into_response()
+}
+
 async fn api_graph(
     State(state): State<Arc<AppState>>,
     AxPath(task_id): AxPath<String>,
@@ -920,6 +1313,7 @@ async fn api_approvals(
 
 async fn api_respond_approval(
     State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<AuthedCaller>>,
     Json(body): Json<Value>,
 ) -> Response {
     let request_id = match req_string(&body, "request_id") {
@@ -934,11 +1328,18 @@ async fn api_respond_approval(
         Ok(v) => v.to_owned(),
         Err(r) => return r.into_response(),
     };
+    // A device-authenticated caller's response is bound to that device;
+    // admin/local callers may still pass `device_id` explicitly.
+    let authenticated = caller.map(|axum::Extension(c)| c.0);
+    let device_id = match authenticated.as_deref() {
+        Some("admin") | Some("local") | None => opt_string(&body, "device_id"),
+        Some(id) => id.to_owned(),
+    };
     let request = contract::ApprovalResponseRequest {
         request_id,
         request_digest,
         decision,
-        device_id: opt_string(&body, "device_id"),
+        device_id,
         responder_principal_id: String::new(),
     };
     match state.daemon.control.clone().respond_approval(request).await {

@@ -11,7 +11,7 @@ fa26e397974405182468880c7a2669731da232f1e025bc2028e81d1471d61d3f  ./control-api/
 924c353fccc5ec06be9ef63203051d9b7c512cdb4f7fba2fe3aeb0ef4ed9431c  ./domain/security.proto
 33889aeaec3dcd81bfd6322a263c1a0ee6d5429f702c7027303547bfb95fe94a  ./events/catalog.yaml
 854642416d954dff4a17a15c46ce9bd8c548e847f04a2af53d7143ac91aefc8f  ./events/event.proto
-819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea  ./manifests/extension.schema.json
+ba07a94d9c00a93f6cddefbab8e5aa53b2a217618840a742604c82d90ab0edc8  ./manifests/extension.schema.json
 92c1ee33b0ff529769deee6bd1e1e45ff132c823cd0e4aa24b6a46ed2201abe7  ./ports/agent_loop.proto
 16032eaa667d362b09c382cadb1ae0e9f51f66f7b7bd70dedfd7df93592b3158  ./ports/artifact_store.proto
 a2f02b6baf3a5b0177ba5d65d6db725d7fe589f36c95befe369c0f83aa2386fe  ./ports/common.proto

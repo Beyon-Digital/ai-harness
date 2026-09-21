@@ -156,7 +156,7 @@ async fn e2e_memory_put_get_as_durable_effects() {
     let b64body = result_ref
         .strip_prefix("data:application/json;base64,")
         .expect("json data uri");
-    // The committed get result carries the stored record.
+    // The committed get result carries the stored record envelope.
     let decoded = {
         const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = Vec::new();
@@ -181,7 +181,12 @@ async fn e2e_memory_put_get_as_durable_effects() {
         String::from_utf8(out).unwrap()
     };
     let record: serde_json::Value = serde_json::from_str(&decoded).unwrap();
-    assert_eq!(record["note"], "hello world");
+    assert_eq!(record["record"]["note"], "hello world");
+    // Phase-10 envelope: sensitivity class + write provenance.
+    assert_eq!(record["sensitivity"], "internal");
+    assert!(record["provenance"]["effect_id"].is_string());
+    assert!(record["provenance"]["fencing_token"].is_number());
+    assert!(record["provenance"]["written_at_ms"].is_number());
 
     // The durable store landed on disk under the runtime dir.
     let store: serde_json::Value = serde_json::from_str(
@@ -191,7 +196,11 @@ async fn e2e_memory_put_get_as_durable_effects() {
         .expect("memory store file"),
     )
     .unwrap();
-    assert_eq!(store["memory"]["demo"]["m1"]["note"], "hello world");
+    assert_eq!(
+        store["memory"]["demo"]["m1"]["record"]["note"],
+        "hello world"
+    );
+    assert_eq!(store["memory"]["demo"]["m1"]["sensitivity"], "internal");
 }
 
 /// Regression: a settled effect must be fed to the loop only on the turn

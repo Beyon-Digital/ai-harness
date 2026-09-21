@@ -153,6 +153,143 @@ fn gateway_serves_health_index_and_rest() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["decisions"], serde_json::json!([]));
 
+    // Metrics read the durable stores read-only while the daemon runs.
+    let (code, body) = http_get(port, "/api/metrics");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["index"]["runs"].as_u64().unwrap() >= 1, "{v}");
+    assert!(v["kernel_db_error"].is_null(), "{v}");
+
+    // Generation pipeline surface answers (empty — no --config at boot).
+    let (code, body) = http_get(port, "/api/config/generations");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["generations"].as_array().unwrap().is_empty(), "{v}");
+
+    // An unbound run (no spec) has no resolved environment → 404.
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/environment"));
+    assert_eq!(code, 404, "{body}");
+
+    drop(agentgw);
+    drop(agentd);
+}
+
+/// Phase-14 device auth: a per-device bearer token authenticates against
+/// `--devices-file`, revocation takes effect without a restart, and the
+/// master token keeps working.
+#[test]
+fn gateway_device_auth_and_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let devices = dir.path().join("devices.json");
+
+    // Register a device via the CLI.
+    let out = Command::new(target_bin("agentgw"))
+        .args([
+            "device",
+            "add",
+            "--devices-file",
+            devices.to_str().unwrap(),
+            "--label",
+            "laptop",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let device_id = v["device_id"].as_str().unwrap().to_owned();
+    let device_token = v["token"].as_str().unwrap().to_owned();
+    assert!(device_token.starts_with("gwdev_"));
+
+    // The file stores only the hash.
+    let on_disk = std::fs::read_to_string(&devices).unwrap();
+    assert!(!on_disk.contains(&device_token));
+    assert!(on_disk.contains("sha256:"));
+
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let agentd = Proc(
+        Command::new(target_bin("agentd"))
+            .arg("--runtime-dir")
+            .arg(&runtime)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = runtime.join("control.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "agentd socket never appeared");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    let port = free_port();
+    let agentgw = Proc(
+        Command::new(target_bin("agentgw"))
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--auth-token")
+            .arg("master-secret")
+            .arg("--devices-file")
+            .arg(&devices)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let authed_get = |token: &str| -> u16 {
+        let req = ureq::get(&format!("http://127.0.0.1:{port}/api/health"));
+        let req = if token.is_empty() {
+            req
+        } else {
+            req.header("Authorization", &format!("Bearer {token}"))
+        };
+        match req.call() {
+            Ok(r) => r.status().as_u16(),
+            Err(ureq::Error::StatusCode(c)) => c,
+            Err(_) => 0,
+        }
+    };
+
+    // Poll until up (master token).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if authed_get("master-secret") == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "agentgw never came up");
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+
+    assert_eq!(authed_get(""), 401);
+    assert_eq!(authed_get("wrong-token"), 401);
+    assert_eq!(authed_get(&device_token), 200);
+
+    // Revoke — the next request re-reads the file, no restart.
+    let out = Command::new(target_bin("agentgw"))
+        .args([
+            "device",
+            "revoke",
+            &device_id,
+            "--devices-file",
+            devices.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(authed_get(&device_token), 401);
+
     drop(agentgw);
     drop(agentd);
 }
@@ -314,6 +451,42 @@ fn gateway_decisions_decodes_run_stream() {
     assert_eq!(
         decisions[0]["detail"]["reason_code"].as_str().unwrap(),
         "script_exhausted"
+    );
+
+    // Bound run → frozen environment row + effect_execute binding.
+    let (code, body) = http_get(port, &format!("/api/runs/{run_id}/environment"));
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let env = &v["environment"];
+    assert_eq!(env["run_id"], run_id);
+    assert_eq!(
+        env["agent_loop_id"].as_str().unwrap(),
+        "01905c5e-0000-7000-8000-a9e97100f1a1"
+    );
+    assert_eq!(env["config_generation_id"].as_str().unwrap().len(), 36);
+    let bindings = v["bindings"].as_array().unwrap();
+    assert!(
+        bindings.iter().any(|b| b["port_id"] == "effect.execute"),
+        "{bindings:?}"
+    );
+
+    // Boot --config created one generation and activated it.
+    let (code, body) = http_get(port, "/api/config/generations");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let gens = v["generations"].as_array().unwrap();
+    assert_eq!(gens.len(), 1, "{v}");
+    assert_eq!(gens[0]["active"], true);
+    assert_eq!(gens[0]["generation_id"], env["config_generation_id"]);
+
+    // Metrics now see a terminal run + the committed effect rows.
+    let (code, body) = http_get(port, "/api/metrics");
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let states = v["runs_by_state"].as_array().unwrap();
+    assert!(
+        states.iter().any(|s| s["state"] == 10 && s["count"] == 1),
+        "{states:?}"
     );
 
     drop(agentgw);

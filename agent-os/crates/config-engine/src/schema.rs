@@ -108,6 +108,44 @@ pub struct LimitsSection {
     pub streams: StreamLimits,
     /// Filesystem permission bits.
     pub fs: FsLimits,
+    /// Loop-input context shaping; absent = built-in defaults.
+    #[serde(default)]
+    pub context: ContextLimits,
+}
+
+/// `limits.context` — bounds on what a turn's `LoopInput` may carry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextLimits {
+    /// Max bytes of the opaque run-state snapshot fed to the loop.
+    #[serde(default = "default_max_state_bytes")]
+    pub max_state_bytes: u64,
+    /// Max settled-effect entries fed per turn.
+    #[serde(default = "default_max_fed_events")]
+    pub max_fed_events: u64,
+    /// Max serialized bytes of the fed-events batch.
+    #[serde(default = "default_max_fed_event_bytes")]
+    pub max_fed_event_bytes: u64,
+}
+
+impl Default for ContextLimits {
+    fn default() -> Self {
+        Self {
+            max_state_bytes: default_max_state_bytes(),
+            max_fed_events: default_max_fed_events(),
+            max_fed_event_bytes: default_max_fed_event_bytes(),
+        }
+    }
+}
+
+fn default_max_state_bytes() -> u64 {
+    65_536
+}
+fn default_max_fed_events() -> u64 {
+    64
+}
+fn default_max_fed_event_bytes() -> u64 {
+    65_536
 }
 
 /// `limits.queue`.

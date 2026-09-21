@@ -64,14 +64,22 @@ commands from `agent-os/`.
   panel auto-refreshes with the 3s index poll once selected.
 - The same 3s poll rebuilds the run-detail innerHTML, so any expanded `<details>`
   (e.g. a decisions `payload`) collapses within ~3s while a run is selected — expand and
-  screenshot immediately, or clear the interval to inspect payloads.
+  screenshot immediately, or clear the interval to inspect payloads. (Newer builds skip
+  the rebuild when the run fingerprint is unchanged, so payloads now survive the poll.
+  An env-block "loading…" wedge after live transitions was found and fixed — env
+  populates across waiting_tool→completed without re-clicking; if it regresses,
+  re-clicking the run row repopulates it.)
 - This box's display is 1600x1200 but the computer tool's coordinate space is 1024x768;
   clicks on small top-right targets (nav tabs) can land a few px off. Verify with
   `getBoundingClientRect`/`elementFromPoint` in the console; as a last resort
   `button.click()` works — the tab/summary handlers themselves are fine.
+  Worked mapping this session: nav tabs ≈ (Runs 687, Sessions 783, Approvals 823,
+  Adapters 888, Config 938, System 987) at y≈74; form inputs ≈ x=165.
 - Decisions feature: `GET /api/runs/<id>/decisions` feeds a `decisions` block in run
   detail; `invoke_effect` rows show the operation + expandable payload JSON, other kinds
-  render `key=value` pairs.
+  render `key=value` pairs. The `environment` block comes from
+  `GET /api/runs/<id>/environment` (profile env id, loop adapter, bindings per port —
+  wasm adapter ids show the wasm-bound effect.execute).
 - Health badge text is `running · epoch N · outbox N`; `ok`/`healthy`/`running` map to
   badge-ok, anything else warns.
 - Read the kernel sqlite read-only with python (`sqlite3` CLI may be absent):

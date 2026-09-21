@@ -95,3 +95,12 @@ select {
   width: 100%; margin-top: 3px; background: #0f1115; color: #e8ecf2;
   border: 1px solid #2c3340; border-radius: 5px; padding: 6px 8px; font: inherit;
 }
+
+.env-row { padding: 2px 0; font-size: 13px; }
+.env-row b { display: inline-block; width: 110px; color: #9aa4b5; font-weight: 600; }
+.env-box h4 { margin: 8px 0 2px; color: #9aa4b5; font-size: 12px; text-transform: uppercase; }
+.mini-table { width: 100%; font-size: 13px; }
+.mini-table td { padding: 2px 6px; }
+.mini-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.err { color: #f08a8a; }
+#metrics-view h3 { margin: 12px 0 4px; font-size: 13px; color: #9aa4b5; text-transform: uppercase; }
