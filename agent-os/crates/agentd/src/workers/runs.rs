@@ -74,6 +74,11 @@ pub const CMD_RUN_CANCEL_COMPLETE: &str = "agentos.internal.RunCancelComplete";
 
 const CLAIM_TTL_MS: u64 = 30_000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Loop `next` calls may wait on a model round-trip; keep the deadline
+/// comfortably above the adapters' HTTP timeout (default 55s).
+const LOOP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Model-loop approvals expire this long after the daemon stamps them.
+const APPROVAL_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Adapter bundle a run's frozen environment can spawn from.
 #[derive(Clone, Debug)]
@@ -126,6 +131,10 @@ pub struct RunWorker {
     deps: Arc<RunWorkerDeps>,
     poll: Duration,
     loops: HashMap<RunId, LoopHandle>,
+    /// Per-run consecutive-failure count and earliest retry time — a run
+    /// whose step keeps failing (e.g. a queued run missing its spec
+    /// binding) backs off instead of spinning every poll.
+    retry_after: HashMap<RunId, (u32, Instant)>,
 }
 
 impl RunWorker {
@@ -135,6 +144,7 @@ impl RunWorker {
             deps: Arc::new(deps),
             poll,
             loops: HashMap::new(),
+            retry_after: HashMap::new(),
         }
     }
 
@@ -172,9 +182,37 @@ impl RunWorker {
             let mut txn = self.read_txn().await?;
             txn.runs().list_active().await?
         };
+        let active_ids: std::collections::HashSet<RunId> =
+            active.iter().map(|r| r.run_id).collect();
+        self.retry_after.retain(|id, _| active_ids.contains(id));
+        let now = Instant::now();
         for row in active {
-            if let Err(error) = self.step(&row).await {
-                tracing::warn!(run = %row.run_id, error = %error, "run step failed");
+            if self
+                .retry_after
+                .get(&row.run_id)
+                .is_some_and(|(_, next)| *next > now)
+            {
+                continue;
+            }
+            match self.step(&row).await {
+                Ok(()) => {
+                    self.retry_after.remove(&row.run_id);
+                }
+                Err(error) => {
+                    let fails = self
+                        .retry_after
+                        .get(&row.run_id)
+                        .map(|(n, _)| n.saturating_add(1))
+                        .unwrap_or(1);
+                    // Exponential backoff: poll * 2^(fails-1), capped at 5s.
+                    let backoff = self
+                        .poll
+                        .saturating_mul(1u32 << fails.saturating_sub(1).min(7))
+                        .min(Duration::from_secs(5));
+                    self.retry_after
+                        .insert(row.run_id, (fails, Instant::now() + backoff));
+                    tracing::warn!(run = %row.run_id, %fails, error = %error, "run step failed");
+                }
             }
         }
         Ok(())
@@ -596,13 +634,23 @@ impl RunWorker {
         }
         let script = self.deps.loop_scripts.get(&row.run_id).cloned();
         let _ = script; // scripts are passed through the spawn env, not per turn.
-        let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
         let ctx = TxContext {
             daemon_epoch: self.deps.epoch.epoch(),
             principal_id: self.deps.principal,
             command_id: CommandId::new(self.deps.ids.as_ref()),
             correlation_id: None,
         };
+        // The opaque run-state snapshot carries the task payload so real
+        // loop adapters (LLM) can see what the run is doing.
+        let state = {
+            let mut txn = self.read_txn().await?;
+            txn.tasks()
+                .get(row.task_id)
+                .await?
+                .map(|task| task.payload)
+                .unwrap_or_default()
+        };
+        let handle = self.loops.get_mut(&row.run_id).expect("loop handle");
         let outcome = loops::drive_turn(
             self.deps.store.as_ref(),
             self.deps.ids.as_ref(),
@@ -611,9 +659,9 @@ impl RunWorker {
             &mut handle.child,
             &mut handle.phase,
             row.run_id,
+            state,
             Vec::new(),
-            Vec::new(),
-            CALL_TIMEOUT,
+            LOOP_CALL_TIMEOUT,
             self.deps.clock.now_unix_ms(),
         )
         .await;
@@ -674,9 +722,19 @@ impl RunWorker {
                 .await
             }
             DecisionInstruction::RequestApproval { approval_draft } => {
+                let mut draft = contract::CreateApprovalRequest::decode(approval_draft.as_slice())
+                    .map_err(|_| {
+                        worker_error(
+                            ErrorCode::InvalidArgument,
+                            "approval draft is not a CreateApprovalRequest",
+                        )
+                    })?;
+                if draft.expires_at_ms == 0 {
+                    draft.expires_at_ms = self.deps.clock.now_unix_ms() + APPROVAL_TTL_MS;
+                }
                 self.submit(
                     approvals::CMD_CREATE_APPROVAL_REQUEST,
-                    approval_draft,
+                    draft.encode_to_vec(),
                     format!("approval.{}.{}", row.run_id, row.step_sequence),
                 )
                 .await
@@ -1241,9 +1299,27 @@ impl RunWorker {
             ("FIXTURE_LOOP_ADAPTER_ID".to_owned(), adapter_id.clone()),
             ("FIXTURE_LOOP_ADAPTER_VERSION".to_owned(), version.clone()),
             ("FIXTURE_LOOP_SCRIPT".to_owned(), script),
+            ("AGENTOS_ADAPTER_ID".to_owned(), adapter_id.clone()),
+            ("AGENTOS_ADAPTER_VERSION".to_owned(), version.clone()),
         ];
         if let Ok(level) = std::env::var("RUST_LOG") {
             env.push(("RUST_LOG".to_owned(), level));
+        }
+        // LLM loop adapters read their credentials/config from these
+        // daemon env vars; propagate only this allowlist.
+        for key in [
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_SITE",
+            "OPENROUTER_APP_NAME",
+            "OPENROUTER_TIMEOUT_MS",
+        ] {
+            if let Ok(value) = std::env::var(key)
+                && !value.is_empty()
+            {
+                env.push((key.to_owned(), value));
+            }
         }
         let mut child = spawn::spawn(&SpawnSpec {
             adapter_id: adapter_uuid,

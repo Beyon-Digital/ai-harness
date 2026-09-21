@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent OS — Control Surface</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Agent OS</h1>
+  <span id="health" class="badge badge-down">connecting…</span>
+  <nav>
+    <button class="tab active" data-tab="runs">Runs</button>
+    <button class="tab" data-tab="sessions">Sessions &amp; Tasks</button>
+    <button class="tab" data-tab="approvals">Approvals <span id="pending-count" class="pill"></span></button>
+    <button class="tab" data-tab="adapters">Adapters</button>
+    <button class="tab" data-tab="config">Config</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-runs" class="panel active">
+    <div class="columns">
+      <div class="col">
+        <h2>Runs</h2>
+        <form id="form-create-run" class="card">
+          <h3>Create run</h3>
+          <label>Session <input name="session_id" required placeholder="uuidv7"></label>
+          <label>Task id <input name="task_id" placeholder="uuidv7 or auto"></label>
+          <label>Run id <input name="run_id" placeholder="uuidv7 or auto"></label>
+          <label>Agent spec <select name="spec_pick"><option value="">— pick a submitted spec —</option></select></label>
+          <label>Agent spec id <input name="agent_spec_id" placeholder="uuidv7"></label>
+          <label>Spec version <input name="spec_version" placeholder="v1"></label>
+          <label>Spec digest <input name="spec_digest" placeholder="sha256 of body"></label>
+          <label>Profile <input name="requested_profile" value="local-trusted"></label>
+          <label>Capabilities <input name="capabilities" placeholder="comma-separated, optional"></label>
+          <label>Prompt / task payload <textarea name="task_payload" rows="3" placeholder="what the agent should do"></textarea></label>
+          <label>Parent run <input name="parent_run_id" placeholder="optional"></label>
+          <button type="submit">Create</button>
+        </form>
+        <table id="runs-table">
+          <thead><tr><th>Run</th><th>State</th><th>Rev</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="col grow">
+        <h2>Run detail</h2>
+        <div id="run-detail" class="card"><em>Select a run</em></div>
+        <h2>Events</h2>
+        <div class="card">
+          <div class="row">
+            <input id="stream-key" placeholder="stream key (e.g. run/&lt;id&gt;)">
+            <button id="btn-stream">Follow</button>
+            <button id="btn-stream-stop" disabled>Stop</button>
+          </div>
+          <pre id="events-log" class="log"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-sessions" class="panel">
+    <div class="columns">
+      <div class="col">
+        <h2>Sessions</h2>
+        <form id="form-create-session" class="card">
+          <h3>Create session</h3>
+          <label>Session id <input name="session_id" placeholder="auto"></label>
+          <label>Metadata <input name="metadata" placeholder="optional"></label>
+          <button type="submit">Create</button>
+        </form>
+        <table id="sessions-table"><thead><tr><th>Session id</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="col">
+        <h2>Tasks</h2>
+        <div class="card row">
+          <input id="graph-task-id" placeholder="task id">
+          <button id="btn-graph">Load graph</button>
+        </div>
+        <table id="tasks-table"><thead><tr><th>Task</th><th>Session</th></tr></thead><tbody></tbody></table>
+        <pre id="graph-view" class="log"></pre>
+      </div>
+      <div class="col">
+        <h2>Agent specs</h2>
+        <form id="form-put-spec" class="card">
+          <h3>Put spec revision</h3>
+          <label>Spec id <input name="agent_spec_id" required placeholder="uuidv7"></label>
+          <label>Version <input name="version" required></label>
+          <label>Body <textarea name="body" rows="4">{"runtime_profile_name":"local-trusted"}</textarea></label>
+          <button type="submit">Submit</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-approvals" class="panel">
+    <div class="card row">
+      <input id="approvals-run-id" placeholder="run id">
+      <button id="btn-approvals">Refresh</button>
+    </div>
+    <table id="approvals-table">
+      <thead><tr><th>Request</th><th>Run</th><th>Operation</th><th>State</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-adapters" class="panel">
+    <button id="btn-adapters" class="card row">Refresh</button>
+    <table id="adapters-table">
+      <thead><tr><th>Adapter</th><th>Version</th><th>Status</th><th>Ports</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-config" class="panel">
+    <button id="btn-config" class="card row">Refresh</button>
+    <pre id="config-view" class="log"></pre>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>
