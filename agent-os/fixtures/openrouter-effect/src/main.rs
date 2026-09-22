@@ -397,6 +397,9 @@ fn call_chat(
     let url = format!("{base_url}/chat/completions");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
+        // Never follow redirects — a 3xx to an attacker host would
+        // otherwise forward the provider Authorization header.
+        .max_redirects(0)
         .build()
         .into();
     let mut req = agent

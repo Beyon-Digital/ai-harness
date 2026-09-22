@@ -215,6 +215,16 @@ impl MessageQueuePort for InMemoryQueue {
                 },
             );
         }
+        // Don't retain per-channel state once the queue drains — the
+        // map is keyed by unbounded stream names.
+        if state
+            .pending
+            .get(channel)
+            .map(VecDeque::is_empty)
+            .unwrap_or(false)
+        {
+            state.pending.remove(channel);
+        }
         Ok(out)
     }
 

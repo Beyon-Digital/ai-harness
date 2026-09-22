@@ -768,22 +768,14 @@ async fn api_create_run(State(state): State<Arc<AppState>>, Json(body): Json<Val
                 // wedge the run on `profile '' not defined`.
                 let explicit = opt_string(&body, "requested_profile");
                 if explicit.is_empty() {
-                    state
-                        .index
-                        .read()
-                        .ok()
-                        .and_then(|i| {
-                            let spec_id = body.get("agent_spec_id").and_then(|v| v.as_str());
-                            let spec_ver = body.get("spec_version").and_then(|v| v.as_str());
-                            i.specs
-                                .iter()
-                                .find(|s| {
-                                    Some(s.agent_spec_id.as_str()) == spec_id
-                                        && Some(s.version.as_str()) == spec_ver
-                                })
-                                .map(|s| s.profile.clone())
-                        })
-                        .unwrap_or_default()
+                    let spec_id = body.get("agent_spec_id").and_then(|v| v.as_str());
+                    let spec_ver = body.get("spec_version").and_then(|v| v.as_str());
+                    match (spec_id, spec_ver) {
+                        (Some(id), Some(ver)) => hydrate_spec_profile(&state, id, ver)
+                            .await
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    }
                 } else {
                     explicit
                 }
@@ -977,6 +969,65 @@ async fn open_db_ro(path: &Path) -> Result<sqlx::SqliteConnection, sqlx::Error> 
         .read_only(true)
         .create_if_missing(false);
     sqlx::SqliteConnection::connect_with(&options).await
+}
+
+/// The spec's `runtime_profile_name` — read from the in-memory index,
+/// hydrated from the durable `agent_specs` body for index entries
+/// written before the field existed (they carry an empty `profile`).
+/// The hydrated value is written back so the DB is only read once.
+async fn hydrate_spec_profile(
+    state: &Arc<AppState>,
+    spec_id: &str,
+    version: &str,
+) -> Option<String> {
+    if let Some(spec) = state
+        .index
+        .read()
+        .ok()
+        .and_then(|i| {
+            i.specs
+                .iter()
+                .find(|s| s.agent_spec_id == spec_id && s.version == version)
+                .cloned()
+        })
+        .filter(|s| !s.profile.is_empty())
+    {
+        return Some(spec.profile);
+    }
+    let kernel_path = state.runtime_dir.join("kernel.db");
+    let mut conn = open_db_ro(&kernel_path).await.ok()?;
+    let body: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT body FROM agent_specs WHERE agent_spec_id = ?1 AND version = ?2",
+    )
+    .bind(spec_id)
+    .bind(version)
+    .fetch_optional(&mut conn)
+    .await
+    .ok()
+    .flatten();
+    let profile: String = body
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|doc| {
+            doc.get("runtime_profile_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if profile.is_empty() {
+        return None;
+    }
+    // Persist the hydrated value back into the index entry.
+    let cloned = profile.clone();
+    remember(state, |i| {
+        if let Some(s) = i
+            .specs
+            .iter_mut()
+            .find(|s| s.agent_spec_id == spec_id && s.version == version)
+        {
+            s.profile = cloned.clone();
+        }
+    });
+    Some(profile)
 }
 
 /// SELECT <col>, COUNT(*) grouped rows as `[{state|kind: v, count: n}]`.
@@ -1498,6 +1549,12 @@ async fn api_proposals_create(
     let write = tokio::task::spawn_blocking(move || -> std::io::Result<i64> {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&path_for_write, &document_for_write)?;
+        // Proposal documents can carry provider endpoints/keys — owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path_for_write, std::fs::Permissions::from_mode(0o600))?;
+        }
         prune_proposals(&dir)?;
         Ok(std::fs::metadata(&path_for_write)
             .and_then(|m| m.modified())

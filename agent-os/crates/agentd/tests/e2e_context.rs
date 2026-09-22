@@ -145,7 +145,7 @@ async fn e2e_context_limits_shape_loop_input() {
     assert_eq!(state.len(), 40, "state should be capped: {state:?}");
 
     // Turn 2's fed-effects batch serializes to >20 bytes → dropped
-    // entirely (the `{"settled":..,"op_counts":..}` envelope can't fit).
+    // entirely (even the bare `[{settled}]` array can't fit).
     let turn2: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(inputs_dir.join("turn-2.json")).expect("turn-2.json"),
     )

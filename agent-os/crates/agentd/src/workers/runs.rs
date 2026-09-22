@@ -743,14 +743,21 @@ impl RunWorker {
             // (fed exactly once — replay is deliberate). `op_counts`
             // summarizes ALL terminal effects for the run so loops can
             // bound per-operation work (e.g. MCP tool hops) without the
-            // feed re-delivering history.
+            // feed re-delivering history. `events` stays the version-1
+            // ARRAY of settled-effect objects; the counts ride in a
+            // leading marker element (`kernel.op_counts`) that parses
+            // like any other settled entry so v1 loops stay compatible.
+            // At most 64 distinct operation names are counted — beyond
+            // that the counts are advisory anyway.
             let mut op_counts = std::collections::BTreeMap::<String, u64>::new();
             let mut settled: Vec<serde_json::Value> = Vec::new();
             for e in &run_effects {
                 if !effects::is_terminal(e.state) {
                     continue;
                 }
-                *op_counts.entry(e.operation.clone()).or_default() += 1;
+                if op_counts.len() < 64 || op_counts.contains_key(&e.operation) {
+                    *op_counts.entry(e.operation.clone()).or_default() += 1;
+                }
                 if e.step_sequence == row.step_sequence {
                     settled.push(serde_json::json!({
                         "effect_id": e.effect_id.to_string(),
@@ -766,21 +773,37 @@ impl RunWorker {
                 tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
                 settled.drain(..drop_n);
             }
-            let pack = |settled: &[serde_json::Value],
-                        counts: &std::collections::BTreeMap<String, u64>| {
-                serde_json::to_vec(&serde_json::json!({
-                    "settled": settled,
+            let marker = |counts: &std::collections::BTreeMap<String, u64>| {
+                serde_json::json!({
+                    "effect_id": "",
+                    "operation": "kernel.op_counts",
+                    "state": "committed",
+                    "result_ref": "",
+                    "error_code": "",
                     "op_counts": counts,
-                }))
-                .unwrap_or_default()
+                })
             };
-            let mut events = pack(&settled, &op_counts);
+            let pack = |settled: &[serde_json::Value], counts: Option<&serde_json::Value>| {
+                let mut v = Vec::with_capacity(settled.len() + 1);
+                if let Some(m) = counts {
+                    v.push(m.clone());
+                }
+                v.extend_from_slice(settled);
+                serde_json::to_vec(&v).unwrap_or_default()
+            };
+            let marker_value = marker(&op_counts);
+            let mut events = pack(&settled, Some(&marker_value));
+            // Shrink order: oldest settled entries first, then the
+            // marker itself, so the newest result never silently drops.
             while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
                 settled.remove(0);
-                events = pack(&settled, &op_counts);
+                events = pack(&settled, Some(&marker_value));
             }
-            // A cap too small for the envelope — emit the empty payload
-            // (0 bytes) so the configured bound always holds.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                events = pack(&settled, None);
+            }
+            // A cap too small even for the settled batch — emit the
+            // empty payload (0 bytes) so the configured bound holds.
             if events.len() > limits.max_fed_event_bytes as usize {
                 events = Vec::new();
             }

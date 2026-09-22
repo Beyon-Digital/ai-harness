@@ -122,21 +122,30 @@ jobs:
         run: |
           cargo build --release \
             -p agentd -p agentctl -p agentgw -p wasm-host \
-            -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop
+            -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop \
+            -p fixture-agent-loop -p fixture-effect-adapter
           cargo build --release -p wasm-echo --target wasm32-wasip1
       - name: Stage archive
         run: |
           set -euo pipefail
           pkg="agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}"
-          mkdir -p "dist/$pkg/bin" "dist/$pkg/share/manifests"
-          cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop} \
+          mkdir -p "dist/$pkg/bin" "dist/$pkg/share/manifests" "dist/$pkg/share/bundles"
+          cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop,fixture-agent-loop,fixture-effect-adapter} \
              "dist/$pkg/bin/"
           cp agent-os/target/wasm32-wasip1/release/wasm-echo.wasm "dist/$pkg/bin/"
           cp agent-os/scripts/make-adapter-bundle.sh "dist/$pkg/bin/"
           cp agent-os/config/*.yaml "dist/$pkg/share/"
+          # Ship ready-to-install bundle directories (manifest + binary +
+          # bundle.lock) under share/bundles/<adapter>/ — `agentd adapter
+          # install` consumes them directly.
           for m in agent-os/fixtures/*/adapter.manifest.json; do
             name=$(basename "$(dirname "$m")")
             cp "$m" "dist/$pkg/share/manifests/$name.manifest.json"
+            entrypoint=$(sed -n 's/.*"entrypoint" *: *"\([^"]*\)".*/\1/p' "$m" | head -1)
+            src="agent-os/target/release/$entrypoint"
+            [ -f "$src" ] || src="agent-os/target/wasm32-wasip1/release/$entrypoint"
+            [ -f "$src" ] || { echo "missing entrypoint binary for $name: $entrypoint"; exit 1; }
+            agent-os/scripts/make-adapter-bundle.sh "$src" "$m" "dist/$pkg/share/bundles/$name"
           done
           cp docs/guides/web-gui-and-llm-adapter.md "dist/$pkg/share/"
           cd dist && tar -czf "$pkg.tar.gz" "$pkg" && mv "$pkg.tar.gz" ..

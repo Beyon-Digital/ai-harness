@@ -338,30 +338,48 @@ fn latest_model_effect(events: &[u8]) -> Option<Value> {
     latest_effect_matching(events, |o| o == MODEL_CHAT_OP)
 }
 
-/// Events payload: `{"settled": [..current-step terminal effects..],
-/// "op_counts": {op: total terminal effects run-wide}}`. A bare array
-/// (older daemons) is treated as just the settled batch.
+/// Marker operation that carries run-wide `op_counts` as the first
+/// element of the `events` array — keeps the version-1 array shape.
+const OP_COUNTS_MARKER: &str = "kernel.op_counts";
+
+/// Events payload: a version-1 array of settled-effect objects whose
+/// first element may be the `kernel.op_counts` marker carrying run-wide
+/// counts. An object form (`{"settled": [..], "op_counts": {..}}`)
+/// produced by transitional daemons is read the same way.
 fn events_doc(events: &[u8]) -> Value {
     serde_json::from_slice::<Value>(events).unwrap_or(Value::Null)
 }
 
+fn is_marker(e: &Value) -> bool {
+    e.get("operation").and_then(Value::as_str) == Some(OP_COUNTS_MARKER)
+}
+
 fn settled_effects(events: &[u8]) -> Vec<Value> {
-    match events_doc(events) {
+    let batch = match events_doc(events) {
         Value::Array(a) => a,
         v => v
             .get("settled")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
-    }
+    };
+    batch.into_iter().filter(|e| !is_marker(e)).collect()
 }
 
 /// Run-wide terminal-effect count for ops matching `prefix` — durable
 /// across turns and daemon restarts, unlike the per-step `settled`
 /// batch.
 fn op_count(events: &[u8], prefix: &str) -> u32 {
-    events_doc(events)
-        .get("op_counts")
+    let counts = match events_doc(events) {
+        // Marker element carries `{.., "op_counts": {op: n}}`.
+        Value::Array(a) => a
+            .iter()
+            .find(|e| is_marker(e))
+            .and_then(|e| e.get("op_counts").cloned()),
+        v => v.get("op_counts").cloned(),
+    };
+    counts
+        .as_ref()
         .and_then(Value::as_object)
         .map(|m| {
             m.iter()
@@ -370,8 +388,8 @@ fn op_count(events: &[u8], prefix: &str) -> u32 {
                 .sum::<u64>() as u32
         })
         .unwrap_or_else(|| {
-            // Legacy bare-array feeds have no counts — degrade to the
-            // current step's matches (old, lossy behavior).
+            // Feeds without a counts marker — degrade to the current
+            // step's matches (old, lossy behavior).
             settled_effects(events)
                 .iter()
                 .filter(|e| {

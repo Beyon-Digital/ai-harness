@@ -311,22 +311,28 @@ async fn e2e_settled_effects_are_fed_once_not_replayed() {
                 .unwrap_or_else(|e| panic!("missing turn-{step}.json: {e}")),
         )
         .unwrap();
-        let doc: serde_json::Value = serde_json::from_str(file["events"].as_str().unwrap_or("{}"))
+        let doc: serde_json::Value = serde_json::from_str(file["events"].as_str().unwrap_or("[]"))
             .unwrap_or_else(|_| panic!("turn-{step} events not JSON"));
-        doc.get("settled")
-            .and_then(|v| v.as_array())
+        doc.as_array()
             .cloned()
             .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e["operation"].as_str() != Some("kernel.op_counts"))
+            .collect()
     };
     let fed_counts = |step: u32| -> serde_json::Value {
         let file: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(inputs_dir.join(format!("turn-{step}.json"))).unwrap(),
         )
         .unwrap();
-        serde_json::from_str::<serde_json::Value>(file["events"].as_str().unwrap_or("{}"))
+        serde_json::from_str::<serde_json::Value>(file["events"].as_str().unwrap_or("[]"))
             .unwrap()
-            .get("op_counts")
+            .as_array()
             .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e["operation"].as_str() == Some("kernel.op_counts"))
+            .and_then(|m| m.get("op_counts").cloned())
             .unwrap_or_default()
     };
     // Step 1's invoke_effect committed ⇒ fed to the step-2 turn.
