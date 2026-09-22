@@ -16,7 +16,7 @@ use crate::repos::SharedConn;
 
 /// SQLite view over the `effects` table.
 pub(crate) struct SqliteEffectRepo {
-    conn: SharedConn,
+    pub(crate) conn: SharedConn,
 }
 
 impl SqliteEffectRepo {
@@ -157,6 +157,25 @@ impl EffectRepo for SqliteEffectRepo {
         .await
         .map_err(mapping::from_sqlx)?;
         Ok(())
+    }
+
+    async fn claim(
+        &mut self,
+        id: EffectId,
+        executor_id: &str,
+        daemon_epoch: u64,
+        lease_expires_ms: i64,
+        now_ms: i64,
+    ) -> errors::Result<Option<u64>> {
+        SqliteEffectRepo::claim(
+            self,
+            id,
+            executor_id,
+            daemon_epoch,
+            lease_expires_ms,
+            now_ms,
+        )
+        .await
     }
 
     async fn cas_transition(

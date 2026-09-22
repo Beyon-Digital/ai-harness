@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS runs (
   input_event_cursor TEXT NOT NULL DEFAULT '',
   cancellation_epoch INTEGER NOT NULL DEFAULT 0,
   resolved_environment_id TEXT,
+  -- Binding inputs captured at creation (immutable): exact AgentSpec ref,
+  -- requested profile, and optional pre-provisioned workspace URI.
+  agent_spec_id TEXT,
+  agent_spec_version TEXT,
+  agent_spec_digest TEXT,
+  requested_profile TEXT NOT NULL DEFAULT '',
+  workspace_uri TEXT,
   output_ref TEXT,
   current_turn_id TEXT,
   claim_owner TEXT,

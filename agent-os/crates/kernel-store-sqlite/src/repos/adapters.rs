@@ -9,8 +9,8 @@ use domain::ids::{AdapterId, AdapterInstanceId};
 use domain::run::UnknownStateValue;
 use domain::security::{ConformanceState, TrustState};
 use kernel_store::models::{
-    AdapterInstanceStatePatch, AdapterRegistrationRow, ConformanceReportRow, NewAdapterInstance,
-    NewAdapterRegistration, NewConformanceReport,
+    AdapterInstanceRow, AdapterInstanceStatePatch, AdapterRegistrationRow, ConformanceReportRow,
+    NewAdapterInstance, NewAdapterRegistration, NewConformanceReport,
 };
 use kernel_store::repositories::{AdapterRead, AdapterRepo};
 use sqlx::sqlite::SqliteRow;
@@ -124,6 +124,16 @@ impl AdapterRead for SqliteAdapterRepo {
         row.as_ref().map(decode_registration).transpose()
     }
 
+    async fn list_registrations(&mut self) -> errors::Result<Vec<AdapterRegistrationRow>> {
+        let mut guard = self.conn.lock().await;
+        let query = format!("{SELECT_REGISTRATION} ORDER BY adapter_id, version, bundle_digest");
+        let rows = sqlx::query(&query)
+            .fetch_all(guard.connection()?)
+            .await
+            .map_err(mapping::from_sqlx)?;
+        rows.iter().map(decode_registration).collect()
+    }
+
     async fn get_conformance_report(
         &mut self,
         adapter_id: AdapterId,
@@ -144,6 +154,56 @@ impl AdapterRead for SqliteAdapterRepo {
         .map_err(mapping::from_sqlx)?;
         row.as_ref().map(decode_conformance_report).transpose()
     }
+
+    async fn get_instance(
+        &mut self,
+        adapter_instance_id: AdapterInstanceId,
+    ) -> errors::Result<Option<AdapterInstanceRow>> {
+        let mut guard = self.conn.lock().await;
+        let row = sqlx::query(&format!(
+            "SELECT {SELECT_INSTANCE_COLS} FROM adapter_instances \
+             WHERE adapter_instance_id = ?1"
+        ))
+        .bind(adapter_instance_id.to_string())
+        .fetch_optional(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        row.as_ref().map(decode_instance).transpose()
+    }
+}
+
+const SELECT_INSTANCE_COLS: &str = "adapter_instance_id, adapter_id, adapter_version, \
+     bundle_digest, daemon_instance_id, pid, process_start_identity, state, exit_reason, \
+     last_heartbeat_ms, started_at_ms, ended_at_ms";
+
+fn decode_instance(row: &SqliteRow) -> errors::Result<AdapterInstanceRow> {
+    Ok(AdapterInstanceRow {
+        adapter_instance_id: mapping::decode_id(
+            "adapter_instances.adapter_instance_id",
+            &mapping::text(row, "adapter_instance_id")?,
+        )?,
+        adapter_id: mapping::decode_id(
+            "adapter_instances.adapter_id",
+            &mapping::text(row, "adapter_id")?,
+        )?,
+        adapter_version: mapping::text(row, "adapter_version")?,
+        bundle_digest: mapping::text(row, "bundle_digest")?,
+        daemon_instance_id: mapping::decode_id(
+            "adapter_instances.daemon_instance_id",
+            &mapping::text(row, "daemon_instance_id")?,
+        )?,
+        pid: mapping::opt_int(row, "pid")?,
+        process_start_identity: mapping::opt_text(row, "process_start_identity")?,
+        state: mapping::decode_state(
+            "adapter_instances.state",
+            &mapping::text(row, "state")?,
+            instance_state_from_state,
+        )?,
+        exit_reason: mapping::opt_text(row, "exit_reason")?,
+        last_heartbeat_ms: mapping::opt_int(row, "last_heartbeat_ms")?,
+        started_at_ms: mapping::int(row, "started_at_ms")?,
+        ended_at_ms: mapping::opt_int(row, "ended_at_ms")?,
+    })
 }
 
 #[async_trait]
@@ -168,6 +228,28 @@ impl AdapterRepo for SqliteAdapterRepo {
         .bind(registration.trust_state.as_str())
         .bind(registration.conformance_state.as_str())
         .bind(registration.created_at_ms)
+        .execute(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_conformance_state(
+        &mut self,
+        adapter_id: AdapterId,
+        version: &str,
+        bundle_digest: &str,
+        state: domain::security::ConformanceState,
+    ) -> errors::Result<()> {
+        let mut guard = self.conn.lock().await;
+        sqlx::query(
+            "UPDATE adapter_registrations SET conformance_state = ?4 \
+             WHERE adapter_id = ?1 AND version = ?2 AND bundle_digest = ?3",
+        )
+        .bind(adapter_id.to_string())
+        .bind(version)
+        .bind(bundle_digest)
+        .bind(state.as_str())
         .execute(guard.connection()?)
         .await
         .map_err(mapping::from_sqlx)?;

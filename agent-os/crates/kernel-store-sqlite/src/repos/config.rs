@@ -108,6 +108,22 @@ impl ConfigRead for SqliteConfigRepo {
         row.as_ref().map(decode_generation).transpose()
     }
 
+    async fn get_generation_by_digest(
+        &mut self,
+        digest: &str,
+    ) -> errors::Result<Option<ConfigGenerationRow>> {
+        let mut guard = self.conn.lock().await;
+        let row = sqlx::query(
+            "SELECT generation_id, digest, document, validation_state, test_state, \
+             created_by_actor_id, created_at_ms FROM config_generations WHERE digest = ?1",
+        )
+        .bind(digest.to_owned())
+        .fetch_optional(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        row.as_ref().map(decode_generation).transpose()
+    }
+
     async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>> {
         let mut guard = self.conn.lock().await;
         let row = sqlx::query(
@@ -139,6 +155,32 @@ impl ConfigRepo for SqliteConfigRepo {
         .execute(guard.connection()?)
         .await
         .map_err(mapping::from_sqlx)?;
+        Ok(())
+    }
+
+    async fn set_generation_states(
+        &mut self,
+        id: ConfigGenerationId,
+        validation_state: Option<&str>,
+        test_state: Option<&str>,
+    ) -> errors::Result<()> {
+        let mut guard = self.conn.lock().await;
+        let result = sqlx::query(
+            "UPDATE config_generations SET                validation_state = COALESCE(?1, validation_state),                test_state = COALESCE(?2, test_state)              WHERE generation_id = ?3",
+        )
+        .bind(validation_state)
+        .bind(test_state)
+        .bind(id.to_string())
+        .execute(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(KernelError::new(
+                ErrorCode::NotFound,
+                RetryClass::Never,
+                "config generation not found",
+            ));
+        }
         Ok(())
     }
 

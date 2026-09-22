@@ -25,8 +25,8 @@
     },
     {
       "path": "OPEN_QUESTIONS.md",
-      "bytes": 243,
-      "sha256": "5fa65946130f228ec1174d384fb3854f261a48a0ae0772e318bbfda515c3281b"
+      "bytes": 694,
+      "sha256": "994ba1af3d622755540966ae5971fe78cca25658fbdca8c8d9c027e5c4e07272"
     },
     {
       "path": "PLAN.md",
@@ -50,8 +50,8 @@
     },
     {
       "path": "TASK_STATUS.yaml",
-      "bytes": 5515,
-      "sha256": "7becb848d7985f20221135ccf1c42e32452a9ec57077e8b57806363c3dc35ede"
+      "bytes": 15831,
+      "sha256": "06b60d03f436ac613289d2d87d7156dcbbcb0df40d3379d6719ef05c9a5f5d5e"
     },
     {
       "path": "architecture/README.md",
@@ -111,7 +111,7 @@
     {
       "path": "contracts/contract-lock.sha256",
       "bytes": 2954,
-      "sha256": "1afa7c848a36f8e1f350e1334989778b8cc1cd46fcbd03354f3f4502b45c89fa"
+      "sha256": "d61864ba10b6303b62a74aaa95fdd8e7a62d0d819287d7cd5af01f0f026a43a9"
     },
     {
       "path": "contracts/control-api/commands.proto",
@@ -120,8 +120,8 @@
     },
     {
       "path": "contracts/control-api/mvp_control.proto",
-      "bytes": 2994,
-      "sha256": "89019fe1ba7eca2b5b739d5cb2e543ca8dcd8104f215374927c853ab0c75a60e"
+      "bytes": 3633,
+      "sha256": "0e473c5782ebc204628a8449a2c9e40eee1878ec22807e78152d901fdd77d890"
     },
     {
       "path": "contracts/domain/core.proto",
@@ -155,8 +155,8 @@
     },
     {
       "path": "contracts/manifests/extension.schema.json",
-      "bytes": 1501,
-      "sha256": "819dd54a5b91395ddcab8a8766a9110388f3225fa158bc8c7022ef5e4c6430ea"
+      "bytes": 1639,
+      "sha256": "ba07a94d9c00a93f6cddefbab8e5aa53b2a217618840a742604c82d90ab0edc8"
     },
     {
       "path": "contracts/ports/agent_loop.proto",

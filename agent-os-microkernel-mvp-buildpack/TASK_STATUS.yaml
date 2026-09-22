@@ -1,356 +1,504 @@
 schema_version: 1
 tasks:
   FND-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 52a09e3
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   FND-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 0e4b01f
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   FND-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 4bb0221
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   FND-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 80ec174
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   FND-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 0f4ac8e
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   FND-006:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: c43a6e6
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   PST-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '8514563'
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   PST-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 7b3a52a
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   PST-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: b0ee13c
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   PST-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 33bd799
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   PST-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 949feef
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   CMD-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: '4455507'
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   EVT-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 584cc63
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   EVT-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 7150dea
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   EVT-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: c07edd0
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   EVT-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: b8bf062
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   RUN-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: c36dc27
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   RUN-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 41e42da
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   RUN-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: a42144a
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   RUN-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: bcb9e4a
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   RUN-005:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 2228e86
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   EFF-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: b4c0b31
+    tests:
+    - cargo test -p effects
+    - cargo test --workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-EFF-001.md
+    notes: Conservative resolver; claims contribute only when Trusted+Passed.
   EFF-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: b4c0b31
+    tests:
+    - cargo test -p effects
+    - cargo test --workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-EFF-002.md
+    notes: Dedupe by logical identity; no dispatch without committed Prepared.
   EFF-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: b4c0b31
+    tests:
+    - cargo test -p effects
+    - cargo test --workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-EFF-003.md
+    notes: Atomic claim + monotonic fencing token + daemon epoch + lease checks.
   EFF-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: b4c0b31,65e987a
+    tests:
+    - cargo test -p runtime
+    - cargo test --workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-EFF-004.md
+    notes: Reconcile by stable operation id; Unknown never auto-retried.
   RES-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: d9a9434
+    tests:
+    - cargo test -p resources
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-RES-001.md
+    notes: Fenced reservations; transactional parent budget check counts Unknown as
+      active; recover_unknown re-fences.
   SCH-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: db62fe7
+    tests:
+    - cargo test -p scheduler
+    - cargo test -p runtime
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-SCH-001.md
+    notes: Durable CAS timers; restart-safe claim re-fencing; worker fires via coordinator
+      with timer.fire.<id> keys.
   SEC-001:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 0fdfe38
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   SEC-002:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: f1999ba
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   SEC-003:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: d33c591
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   SEC-004:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 2101de0
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.
   ADP-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 8cb7b9d
+    tests:
+    - cargo test -p process-supervisor
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-001.md
+    notes: fd-0 socketpair IPC, digest-bound handshake, process-group termination,
+      durable instance rows.
   ADP-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: bbc141e
+    tests:
+    - cargo test -p adapter-protocol
+    - cargo test -p process-supervisor
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-002.md
+    notes: Length-prefixed frames, identity-pinned handshake, request/response/cancel/deadline
+      session semantics; supervisor shares it.
   ADP-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 23365a9
+    tests:
+    - cargo test -p adapter-registry
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-003.md
+    notes: Manifest v1 + sha256 bundle lock; digest-bound (id,version,digest) identity;
+      re-verify immediately before spawn.
   ADP-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 0eb071a
+    tests:
+    - cargo test -p adapter-registry
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-004.md
+    notes: Exact-major port resolution, capability+trust+sandbox-tier gates, deterministic
+      tie-break.
   ADP-005:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: c273829
+    tests:
+    - cargo test -p fixture-effect-adapter
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-005.md
+    notes: Idempotent counter keyed by operation_id; status reconcile; crash/delay/fence
+      flags; bundled manifest+lock.
   WRK-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: d5bb548
+    tests:
+    - cargo test -p resource-uri
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-WRK-001.md
+    notes: Strict canonical parser (8 schemes, traversal-proof); capability-gated
+      resolver; secret -> opaque ref.
   WRK-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 9e7b4b1
+    tests:
+    - cargo test -p workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-WRK-002.md
+    notes: Local adapter + git worktree fork pinned to parent recorded base_revision;
+      copy-fork labeled; traversal denied.
   WRK-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: f279d15
+    tests:
+    - cargo test -p workspace
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-WRK-003.md
+    notes: Epoch CAS lease transfer, isolated forks, git merge surfacing conflicts,
+      capability-gated shared write.
   SBOX-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 7c35f89
+    tests:
+    - cargo test -p sandbox
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-SBOX-001.md
+    notes: T0 local exec with env allowlist/deadline/cancel; T1+ fail closed; coordinator-gated
+      workspace access.
   ART-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 372e50a
+    tests:
+    - cargo test -p artifacts
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ART-001.md
+    notes: 'Content-addressed artifact store: atomic writes, digest verification,
+      retention-gated delete.'
   CFG-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 3ae98b8
+    tests:
+    - cargo test -p config-engine
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-CFG-001.md
+    notes: v1 schema with deny-unknown sensitive sections, profile cycle validation,
+      bootstrap/runtime separation.
   CFG-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 1afca96
+    tests:
+    - cargo test -p config-engine
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-CFG-002.md
+    notes: Generation propose/validate/smoke pipeline; CAS activation; DAEMON_RESTART_REQUIRED
+      on service rebinding; rollback.
   CFG-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 9ed5c82
+    tests:
+    - cargo test -p runtime --test resolved_environment
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-CFG-003.md
+    notes: Environment resolution freezes exact adapter bindings per run; immutable
+      after creation.
   LOOP-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: c273829
+    tests:
+    - cargo test -p fixture-agent-loop
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-LOOP-001.md
+    notes: Scripted deterministic loop fixture echoing fenced step fields; no spawn/privileged
+      capability.
   LOOP-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 0eb0497
+    tests:
+    - cargo test -p runtime --test loop_decision
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-LOOP-002.md
+    notes: Durable fenced turns; idempotent decision accept; stale rejection; loop_epoch
+      restart bump.
   API-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: '8022973'
+    tests:
+    - cargo test -p control-api
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-API-001.md
+    notes: UDS 0600 under daemon lock; peer-cred principal mapping; handlers see coordinator
+      only.
   API-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 394c321
+    tests:
+    - cargo test -p control-api --test queries
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-API-002.md
+    notes: Queries via read txns only; mutations only via coordinator dispatch
   API-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: d75c7d8
+    tests:
+    - cargo test -p control-api --test events_api
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-API-003.md
+    notes: Subscribe attaches live before replay; lag yields journal-servable cursor
   API-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 2090901
+    tests:
+    - cargo test -p agentctl
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-API-004.md
+    notes: agentctl create-run/get-run/events read/resolve-effect/approvals +
+      config lifecycle commands; ListApprovals RPC mirrored in f592868; status
+      entry backfilled (work landed in wave D)
   INT-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 3ae38c2
+    tests:
+    - e2e_complete_run_via_daemon_api
+    - e2e_restart_after_completed_run_retains_audit_data
+    - e2e_idle_shutdown
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-001.md
+    notes: agentd composes store/fence/recovery/coordinator/events/workers/UDS API;
+      RunWorker drives Created->Ready->Running->terminal via fixture loop; drain-first
+      shutdown releases the singleton lock.
   INT-002:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 3c8daaf
+    tests:
+    - e2e_parallel_fork_merge
+    - e2e_exclusive_transfer_stale_lease_rejected
+    - e2e_cancel_spawn_race
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-002.md
+    notes: parallel spawn_agent children with base-pinned forks, explicit merges incl.
+      conflict+abort, exclusive lease transfer with stale-token rejection, and a
+      cancel/spawn race consistent under both orderings; fixed agentctl cancel-run
+      sending u64::MAX instead of 0 for an absent --expected-revision.
   INT-003:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 39edab0
+    tests:
+      - cargo test -p agentd --test e2e_effect_recovery
+      - cargo test -p agentd --test e2e_children_workspace
+      - cargo test --workspace
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo fmt --check
+    evidence:
+      - .spec/agentd-microkernel-mvp/reports/task-INT-003.md
+    notes: real daemon abort/restart under higher epoch; fixture crash flag
+      forces Dispatched-after-side-effect; reconciles by operation_id
+      (exactly-once); unreconcilable contract -> Unknown +
+      BLOCKED_UNKNOWN_EFFECT until resolve-effect. Also restakes dead-epoch
+      claims on waiting runs (WaitingTool/WaitingChild were unreclaimable).
   INT-004:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 6386d77
+    tests:
+    - cargo test -p agentd --test concurrency
+    - cargo test -p agentd --test property
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-004.md
+    notes: 7 barrier-synced races + 8 seeded proptest properties (512 cases);
+      single-winner, acyclicity, budget, fencing, contiguity invariants verified
   INT-005:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: fdb22bb
+    tests:
+    - cargo test -p agentd --test security
+    - cargo test -p resource-uri
+    - cargo test -p secrets -p identity -p permissions
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-INT-005.md
+    notes: 10 boundary checks; parser hardened so secret:// tokens reject
+      decoded separators (%2e%2e%2f traversal)
   REL-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: 7d382c4
+    tests:
+    - bash scripts/release_gate.sh --fast (clean worktree checkout)
+    evidence:
+    - docs/verification-report-template.md
+    - scripts/release_gate.sh
+    notes: gate PASS on clean checkout — 12 checks green (validators, contract
+      lock, fmt, clippy -D warnings, workspace tests, concurrency/security/
+      property/e2e suites, BLOCKING_MVP + sleep-hygiene sweeps); JSON +
+      Markdown reports carry git SHA/toolchain/platform and map all 24
+      MVP_EXIT_CRITERIA rows to passing evidence
   QUE-001:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: ce2cd5a
+    tests:
+    - cargo test -p message-queue
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-QUE-001.md
+    notes: 'In-memory adapter: dedupe/conflict/capacity, in-flight consume, ack/nack;
+      durable=false honestly reported.'
   ADP-006:
-    status: pending
-    commit: null
-    tests: []
-    evidence: []
-    notes: ''
+    status: done
+    commit: c273829
+    tests:
+    - cargo test -p fixture-effect-adapter
+    - cargo test -p testkit
+    evidence:
+    - .spec/agentd-microkernel-mvp/reports/task-ADP-006.md
+    notes: Behavioral packs in testkit; digest-bound ConformanceReport persists state
+      in one txn; resolver gate.
   RUN-000:
-    status: pending
-    commit: null
-    tests: []
+    status: done
+    commit: 5b4e2ab
+    tests:
+    - cargo test --workspace
     evidence: []
-    notes: ''
+    notes: Recorded retroactively; implementation commits predate status tracking.

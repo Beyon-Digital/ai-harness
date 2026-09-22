@@ -13,20 +13,22 @@ use domain::ids::{
     TimerId, TurnId, WorkspaceId,
 };
 use domain::resource::{ReservationState, TimerState};
+use domain::security::ConformanceState;
 use errors::Result;
 
 use crate::models::{
-    ActiveConfigGenerationRow, AdapterInstanceStatePatch, AdapterRegistrationRow, AgentSpecRow,
-    ApprovalRequestRow, ApprovalResponseRow, ArtifactRow, CapabilityGrantRow, ConfigGenerationRow,
-    ConformanceReportRow, DecisionRow, DelegationHopRow, EffectPatch, EffectRow,
-    IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow, NewAdapterInstance,
-    NewAdapterRegistration, NewAgentSpec, NewApprovalRequest, NewApprovalResponse, NewArtifact,
-    NewCapabilityGrant, NewConfigGeneration, NewConformanceReport, NewDecision, NewDelegationHop,
-    NewEffect, NewIdempotencyRecord, NewLoopTurn, NewOutboxEvent, NewReservation,
-    NewResolvedBinding, NewResolvedEnvironment, NewRun, NewRunDependency, NewSession, NewTask,
-    NewTimer, NewWorkspace, NewWorkspaceLease, OutboxEventRow, ReservationPatch, ReservationRow,
-    ResolvedBindingRow, ResolvedEnvironmentRow, RunCas, RunDependencyRow, RunGraphHeadRow,
-    RunPatch, RunRow, SessionRow, TaskRow, TimerPatch, TimerRow, WorkspaceLeaseRow, WorkspaceRow,
+    ActiveConfigGenerationRow, AdapterInstanceRow, AdapterInstanceStatePatch,
+    AdapterRegistrationRow, AgentSpecRow, ApprovalRequestRow, ApprovalResponseRow, ArtifactRow,
+    CapabilityGrantRow, ConfigGenerationRow, ConformanceReportRow, DecisionRow, DelegationHopRow,
+    EffectPatch, EffectRow, IdempotencyRecordRow, LeasePatch, LoopTurnPatch, LoopTurnRow,
+    NewAdapterInstance, NewAdapterRegistration, NewAgentSpec, NewApprovalRequest,
+    NewApprovalResponse, NewArtifact, NewCapabilityGrant, NewConfigGeneration,
+    NewConformanceReport, NewDecision, NewDelegationHop, NewEffect, NewIdempotencyRecord,
+    NewLoopTurn, NewOutboxEvent, NewReservation, NewResolvedBinding, NewResolvedEnvironment,
+    NewRun, NewRunDependency, NewSession, NewTask, NewTimer, NewWorkspace, NewWorkspaceLease,
+    OutboxEventRow, ReservationPatch, ReservationRow, ResolvedBindingRow, ResolvedEnvironmentRow,
+    RunCas, RunDependencyRow, RunGraphHeadRow, RunPatch, RunRow, SessionRow, TaskRow, TimerPatch,
+    TimerRow, WorkspaceLeaseRow, WorkspaceRow,
 };
 
 /// Publication phase observed by [`StreamRepo::mark_published`].
@@ -141,6 +143,19 @@ pub trait EffectRead: Send + Sync {
 #[async_trait]
 pub trait EffectRepo: EffectRead {
     async fn insert(&mut self, effect: NewEffect) -> Result<()>;
+    /// Atomically claims an effect eligible for execution: `Prepared`, or
+    /// `Claimed` with an expired lease. On success the executor identity,
+    /// daemon fencing epoch, lease expiry, and a monotonically increasing
+    /// fencing token are stamped; returns the new token. `None` means the
+    /// effect is held by a live claim or has left the claimable states.
+    async fn claim(
+        &mut self,
+        id: EffectId,
+        executor_id: &str,
+        daemon_epoch: u64,
+        lease_expires_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<u64>>;
     async fn cas_transition(
         &mut self,
         id: EffectId,
@@ -154,6 +169,8 @@ pub trait EffectRepo: EffectRead {
 pub trait ResourceRead: Send + Sync {
     async fn get(&mut self, id: ReservationId) -> Result<Option<ReservationRow>>;
     async fn list_by_run(&mut self, run: RunId) -> Result<Vec<ReservationRow>>;
+    /// Direct children of `parent`, ordered by id (delegation accounting).
+    async fn list_children(&mut self, parent: ReservationId) -> Result<Vec<ReservationRow>>;
 }
 
 #[async_trait]
@@ -200,6 +217,8 @@ pub trait SecurityRead: Send + Sync {
     ) -> Result<Option<ApprovalRequestRow>>;
     /// Approval requests owned by `run_id`, ordered oldest first.
     async fn list_approvals_by_run(&mut self, run_id: RunId) -> Result<Vec<ApprovalRequestRow>>;
+    /// Every approval request, ordered oldest first.
+    async fn list_approvals(&mut self) -> Result<Vec<ApprovalRequestRow>>;
     async fn list_approval_responses(
         &mut self,
         request: ApprovalRequestId,
@@ -220,12 +239,25 @@ pub trait ConfigRead: Send + Sync {
         &mut self,
         id: ConfigGenerationId,
     ) -> Result<Option<ConfigGenerationRow>>;
+    async fn get_generation_by_digest(
+        &mut self,
+        digest: &str,
+    ) -> Result<Option<ConfigGenerationRow>>;
     async fn get_active(&mut self) -> Result<Option<ActiveConfigGenerationRow>>;
 }
 
 #[async_trait]
 pub trait ConfigRepo: ConfigRead {
     async fn insert_generation(&mut self, generation: NewConfigGeneration) -> Result<()>;
+    /// Advances the generation pipeline markers; each column moves
+    /// forward only (`proposed -> validated|rejected`, `untested ->
+    /// passed|failed`). A backwards transition is rejected by the store.
+    async fn set_generation_states(
+        &mut self,
+        id: ConfigGenerationId,
+        validation_state: Option<&str>,
+        test_state: Option<&str>,
+    ) -> Result<()>;
     async fn cas_active(
         &mut self,
         expected_revision: u64,
@@ -266,11 +298,27 @@ pub trait AdapterRead: Send + Sync {
         version: &str,
         bundle_digest: &str,
     ) -> Result<Option<ConformanceReportRow>>;
+    async fn get_instance(
+        &mut self,
+        adapter_instance_id: AdapterInstanceId,
+    ) -> Result<Option<AdapterInstanceRow>>;
+    /// Every registered adapter row — port resolution enumerates
+    /// candidates; the hot path stays per-identity `get_registration`.
+    async fn list_registrations(&mut self) -> Result<Vec<AdapterRegistrationRow>>;
 }
 
 #[async_trait]
 pub trait AdapterRepo: AdapterRead {
     async fn insert_registration(&mut self, registration: NewAdapterRegistration) -> Result<()>;
+    /// Reflects a conformance report outcome on the registration's
+    /// `conformance_state` (the only mutable field on the row).
+    async fn set_conformance_state(
+        &mut self,
+        adapter_id: AdapterId,
+        version: &str,
+        bundle_digest: &str,
+        state: ConformanceState,
+    ) -> Result<()>;
     async fn insert_instance(&mut self, instance: NewAdapterInstance) -> Result<()>;
     async fn cas_instance_state(
         &mut self,
@@ -285,6 +333,7 @@ pub trait AdapterRepo: AdapterRead {
 pub trait ArtifactRead: Send + Sync {
     async fn get_by_id(&mut self, id: ArtifactId) -> Result<Option<ArtifactRow>>;
     async fn get_by_uri(&mut self, uri: &str) -> Result<Option<ArtifactRow>>;
+    async fn list_by_run(&mut self, run: RunId) -> Result<Vec<ArtifactRow>>;
 }
 
 #[async_trait]

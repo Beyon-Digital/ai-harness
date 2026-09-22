@@ -11,6 +11,7 @@ pub(crate) mod adapters;
 pub(crate) mod agent_specs;
 pub(crate) mod artifacts;
 pub(crate) mod config;
+pub(crate) mod effect_claims;
 pub(crate) mod effects;
 pub(crate) mod environments;
 pub(crate) mod graph;
@@ -23,6 +24,7 @@ pub(crate) mod sessions;
 pub(crate) mod streams;
 pub(crate) mod tasks;
 pub(crate) mod timers;
+pub(crate) mod workspace_leases;
 pub(crate) mod workspaces;
 
 use std::sync::Arc;

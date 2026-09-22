@@ -159,6 +159,11 @@ impl Harness {
                 input_event_cursor: cursor,
                 cancellation_epoch: 0,
                 resolved_environment_id: None,
+                agent_spec_id: None,
+                agent_spec_version: None,
+                agent_spec_digest: None,
+                requested_profile: String::new(),
+                workspace_uri: None,
                 created_at_ms: SEED_MS,
             })
             .await
@@ -759,6 +764,10 @@ fn register_handlers_registers_claim_ready_run() {
         },
     )
     .expect("runtime handlers register");
-    assert_eq!(registry.len(), 5);
+    assert_eq!(registry.len(), 9);
     assert!(registry.get(CMD_CLAIM_READY_RUN).is_some());
+    assert!(registry.get(runtime::CMD_BIND_RUN).is_some());
+    assert!(registry.get(runtime::CMD_RESOLVE_UNKNOWN_EFFECT).is_some());
+    assert!(registry.get(runtime::CMD_SCHEDULE_TIMER).is_some());
+    assert!(registry.get(runtime::CMD_CANCEL_TIMER).is_some());
 }

@@ -145,6 +145,11 @@ async fn seed_run(store: &SqliteKernelStore, provider: &DeterministicIds, epoch:
             input_event_cursor: cursor(run),
             cancellation_epoch: 0,
             resolved_environment_id: None,
+            agent_spec_id: None,
+            agent_spec_version: None,
+            agent_spec_digest: None,
+            requested_profile: String::new(),
+            workspace_uri: None,
             created_at_ms: 10,
         })
         .await

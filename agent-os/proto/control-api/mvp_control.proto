@@ -15,6 +15,7 @@ service MvpControlApi {
   rpc GetActiveConfig(GetActiveConfigRequest) returns (GetActiveConfigResponse);
   rpc ListAdapters(ListAdaptersRequest) returns (ListAdaptersResponse);
   rpc RespondApproval(ApprovalResponseRequest) returns (ApprovalResponseResult);
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 
@@ -59,6 +60,15 @@ message ApprovalResponseRequest {
   string responder_principal_id = 5;
 }
 message ApprovalResponseResult { string status = 1; }
+message ListApprovalsRequest { string run_id = 1; }
+message ApprovalRequestView {
+  string request_id = 1; string request_digest = 2; string principal_id = 3; string actor_id = 4;
+  string run_id = 5; string operation = 6; string target_resource = 7;
+  repeated string capability_ids = 8; string extension_bundle_digest = 9;
+  string config_generation_digest = 10; int64 expires_at_ms = 11; string nonce = 12;
+  string state = 13; int64 created_at_ms = 14; int64 resolved_at_ms = 15;
+}
+message ListApprovalsResponse { repeated ApprovalRequestView approvals = 1; }
 
 message HealthRequest {}
 message HealthResponse {

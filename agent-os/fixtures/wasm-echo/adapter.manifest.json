@@ -1,0 +1,19 @@
+{
+  "manifest_version": 1,
+  "id": "01905c5e-0000-7000-8000-00000000e001",
+  "version": "0.1.0",
+  "kind": "adapter",
+  "runtime": {
+    "type": "wasm",
+    "entrypoint": "wasm-echo.wasm",
+    "language": "rust"
+  },
+  "implements": [
+    "effect.execute@1"
+  ],
+  "requested_capabilities": {
+    "effect": [
+      "provider_idempotency"
+    ]
+  }
+}
