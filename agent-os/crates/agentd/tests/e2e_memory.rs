@@ -342,15 +342,11 @@ async fn e2e_settled_effects_are_fed_once_not_replayed() {
     // op_counts summarizes all run history and travels alongside real
     // settled entries — step 3's feed is empty (step 2 was `wait`), so
     // it carries no marker; step 4's feed shows both ops counted.
-    let raw3: serde_json::Value = serde_json::from_str(
-        &serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(inputs_dir.join("turn-3.json")).unwrap(),
-        )
-        .unwrap()["events"]
-            .as_str()
-            .unwrap_or("[]"),
-    )
-    .unwrap();
+    let turn3_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(inputs_dir.join("turn-3.json")).unwrap())
+            .unwrap();
+    let raw3: serde_json::Value =
+        serde_json::from_str(turn3_doc["events"].as_str().unwrap_or("[]")).unwrap();
     assert_eq!(raw3, serde_json::json!([]), "empty feed stays a bare []");
     // Step 2 was `wait` — its outcome must not replay to the step-3 turn.
     assert_eq!(fed_events(3), Vec::<serde_json::Value>::new());

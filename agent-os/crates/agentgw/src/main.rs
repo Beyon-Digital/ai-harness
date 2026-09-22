@@ -341,13 +341,18 @@ async fn require_auth(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned))
-        // EventSource can't set headers — accept `?token=` on the SSE
-        // endpoint (and any path) as a bearer fallback.
+        // EventSource can't set headers — accept `?token=` as a bearer
+        // fallback, but only on the SSE endpoint so ordinary API URLs
+        // can't carry the credential into logs/history.
         .or_else(|| {
-            req.uri().query().and_then(|q| {
-                q.split('&')
-                    .find_map(|kv| kv.strip_prefix("token=").map(str::to_owned))
-            })
+            (req.uri().path() == "/api/events/subscribe")
+                .then(|| {
+                    req.uri().query().and_then(|q| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix("token=").map(str::to_owned))
+                    })
+                })
+                .flatten()
         });
     // A registry read error is an outage, not a bad credential — answer
     // 503 so operators can distinguish it from a 401.
@@ -859,16 +864,22 @@ async fn api_runs_list(State(state): State<Arc<AppState>>) -> Response {
     let mut runs = Vec::with_capacity(run_ids.len());
     for run_id in run_ids {
         // A run the daemon forgot (e.g. wiped runtime under a live
-        // index) is skipped rather than 502ing the whole list.
-        if let Ok(r) = state
+        // index) is skipped; transient failures propagate so the UI can
+        // tell an outage from an empty history.
+        match state
             .daemon
             .control
             .clone()
             .get_run(contract::GetRunRequest { run_id })
             .await
-            && let Some(run) = r.into_inner().run
         {
-            runs.push(run_json(&run));
+            Ok(r) => {
+                if let Some(run) = r.into_inner().run {
+                    runs.push(run_json(&run));
+                }
+            }
+            Err(e) if e.code() == tonic::Code::NotFound => {}
+            Err(e) => return gw_err(e),
         }
     }
     Json(json!({"runs": runs})).into_response()

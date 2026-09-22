@@ -117,6 +117,36 @@ async fn e2e_restart_after_completed_run_retains_audit_data() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_restart_with_changed_config_activates_new_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = make_fixture_bundle(tmp.path());
+    let runtime_dir = tmp.path().join("runtime");
+
+    let daemon = boot_daemon(&runtime_dir, vec![bundle.clone()]).await;
+    daemon.initiate_shutdown();
+    daemon.wait().await.expect("clean shutdown");
+
+    // A document whose bytes differ must propose+activate a fresh
+    // generation on restart rather than conflicting on the boot
+    // idempotency key — a trailing comment suffices for a new digest.
+    let mut doc = std::fs::read_to_string(CONFIG_YAML).unwrap();
+    doc.push_str("\n# restarted with a changed document\n");
+    let alt = tmp.path().join("config-alt.yaml");
+    std::fs::write(&alt, doc).unwrap();
+
+    let daemon = boot_daemon_with(
+        &runtime_dir,
+        vec![bundle],
+        HashMap::new(),
+        HashMap::new(),
+        alt.to_str().unwrap(),
+    )
+    .await;
+    daemon.initiate_shutdown();
+    daemon.wait().await.expect("clean shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_approved_run_resumes_and_completes() {
     let tmp = tempfile::tempdir().unwrap();
     let bundle = make_fixture_bundle(tmp.path());

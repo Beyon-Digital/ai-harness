@@ -577,10 +577,12 @@ async fn bootstrap_config(
         contract::ProposeConfigGeneration {
             generation_id: String::new(),
             document_bytes: document,
-            digest,
+            digest: digest.clone(),
         }
         .encode_to_vec(),
-        "config.propose.boot".to_owned(),
+        // Digest-scoped key: booting with a different document must not
+        // collide with an earlier boot's idempotency record.
+        format!("config.propose.boot.{digest}"),
     )
     .await?;
     let generation_id = String::from_utf8(outcome.payload)
