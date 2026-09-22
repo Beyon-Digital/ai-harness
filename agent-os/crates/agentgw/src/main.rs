@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 use axum::Router;
@@ -154,9 +155,18 @@ async fn serve(
         index_path,
         auth_token,
         devices_file,
-        runtime_dir,
+        runtime_dir: runtime_dir.clone(),
         loopback,
+        local_device_id: local_device_id(&runtime_dir),
     });
+    if !loopback {
+        // Bearer tokens and control-plane traffic over plaintext HTTP are
+        // interceptable — remote binds belong behind a TLS terminator.
+        tracing::warn!(
+            %listen,
+            "agentgw serving plaintext HTTP on a non-loopback address; put a TLS terminator in front"
+        );
+    }
 
     let app = Router::new()
         .route("/", get(serve_index))
@@ -210,6 +220,31 @@ struct AppState {
     /// Whether the listen address is loopback-only — credential-free
     /// requests are only trusted as "local" on loopback binds.
     loopback: bool,
+    /// Stable device identity attached to approval responses from
+    /// credential-free ("local") and master-token ("admin") callers —
+    /// persisted under the runtime dir so restarts keep the same id.
+    local_device_id: String,
+}
+
+/// Reads or mints the gateway's local device id at
+/// `<runtime-dir>/agentgw-device-id` (0600).
+fn local_device_id(runtime_dir: &Path) -> String {
+    let path = runtime_dir.join("agentgw-device-id");
+    if let Ok(id) = std::fs::read_to_string(&path)
+        && domain::ids::DeviceId::from_str(id.trim()).is_ok()
+    {
+        return id.trim().to_owned();
+    }
+    let id = new_uuid7();
+    if let Err(e) = std::fs::write(&path, &id) {
+        tracing::warn!("agentgw-device-id persist failed: {e}");
+    } else if let Err(e) = std::fs::set_permissions(
+        &path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    ) {
+        tracing::warn!("agentgw-device-id chmod failed: {e}");
+    }
+    id
 }
 
 /// Inserted into request extensions by `require_auth`: `"admin"` for the
@@ -1455,77 +1490,117 @@ async fn api_proposals_create(
         Err(r) => return r.into_response(),
     };
     let dir = state.runtime_dir.join("proposed");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return gw_err(format!("proposals dir: {e}"));
-    }
     let id = new_uuid7();
     let path = dir.join(format!("{id}.yaml"));
-    let (valid, error) = match config_engine::parse_document(&document) {
-        Ok(_) => (true, String::new()),
-        Err(e) => (false, e.to_string()),
-    };
-    if let Err(e) = std::fs::write(&path, &document) {
-        return gw_err(format!("write proposal: {e}"));
-    }
-    Json(json!({
-        "proposal_id": id,
-        "path": path.to_string_lossy(),
-        "created_at_ms": std::fs::metadata(&path)
+    let path_for_write = path.clone();
+    let document_for_write = document.clone();
+    // Filesystem I/O off the async executor; failures surface as 500s.
+    let write = tokio::task::spawn_blocking(move || -> std::io::Result<i64> {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path_for_write, &document_for_write)?;
+        prune_proposals(&dir)?;
+        Ok(std::fs::metadata(&path_for_write)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
-            .unwrap_or_default(),
+            .unwrap_or_default())
+    })
+    .await;
+    let (valid, error) = match config_engine::parse_document(&document) {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+    let created_at_ms = match write {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return gw_err(format!("write proposal: {e}")),
+        Err(e) => return gw_err(format!("proposal worker: {e}")),
+    };
+    Json(json!({
+        "proposal_id": id,
+        "path": path.to_string_lossy(),
+        "created_at_ms": created_at_ms,
         "valid": valid,
         "error": error,
     }))
     .into_response()
 }
 
+/// Proposals retained on disk — the oldest staged documents are deleted
+/// past this bound so repeated proposals cannot fill the runtime volume.
+const MAX_PROPOSALS: usize = 64;
+
+fn prune_proposals(dir: &Path) -> std::io::Result<()> {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("yaml"))
+        .filter_map(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| (t, e.path()))
+        })
+        .collect();
+    files.sort_by_key(|(t, _)| *t);
+    let excess = files.len().saturating_sub(MAX_PROPOSALS);
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 /// `GET /api/config/proposals` — list staged proposals, re-validating
 /// each so a doc that became invalid after an engine upgrade shows it.
 async fn api_proposals_list(State(state): State<Arc<AppState>>) -> Response {
     let dir = state.runtime_dir.join("proposed");
-    let mut proposals = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Json(json!({"proposals": proposals})).into_response();
-        }
-        Err(e) => return gw_err(format!("proposals dir: {e}")),
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-            continue;
-        }
-        let document = match std::fs::read_to_string(&path) {
-            Ok(d) => d,
-            Err(_) => continue,
+    let scanned = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<Value>> {
+        let mut proposals = Vec::new();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(proposals),
+            Err(e) => return Err(e),
         };
-        let (valid, error) = match config_engine::parse_document(&document) {
-            Ok(_) => (true, String::new()),
-            Err(e) => (false, e.to_string()),
-        };
-        proposals.push(json!({
-            "proposal_id": path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default(),
-            "path": path.to_string_lossy(),
-            "created_at_ms": entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or_default(),
-            "valid": valid,
-            "error": error,
-        }));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let document = match std::fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let (valid, error) = match config_engine::parse_document(&document) {
+                Ok(_) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            proposals.push(json!({
+                "proposal_id": path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default(),
+                "path": path.to_string_lossy(),
+                "created_at_ms": entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_default(),
+                "valid": valid,
+                "error": error,
+            }));
+        }
+        Ok(proposals)
+    })
+    .await;
+    match scanned {
+        Ok(Ok(mut proposals)) => {
+            proposals.sort_by_key(|p| p["created_at_ms"].as_i64().unwrap_or_default());
+            Json(json!({"proposals": proposals})).into_response()
+        }
+        Ok(Err(e)) => gw_err(format!("proposals dir: {e}")),
+        Err(e) => gw_err(format!("proposal worker: {e}")),
     }
-    proposals.sort_by_key(|p| p["created_at_ms"].as_i64().unwrap_or_default());
-    Json(json!({"proposals": proposals})).into_response()
 }
 
 async fn api_approvals(
@@ -1579,11 +1654,13 @@ async fn api_respond_approval(
         Ok(v) => v.to_owned(),
         Err(r) => return r.into_response(),
     };
-    // A device-authenticated caller's response is bound to that device;
-    // admin/local callers may still pass `device_id` explicitly.
+    // The responding device is never caller-asserted: a device-token
+    // caller's response is bound to that authenticated device, and
+    // admin/local callers are recorded under the gateway's own stable
+    // device identity. A body-supplied `device_id` is ignored.
     let authenticated = caller.map(|axum::Extension(c)| c.0);
     let device_id = match authenticated.as_deref() {
-        Some("admin") | Some("local") | None => opt_string(&body, "device_id"),
+        Some("admin") | Some("local") | None => state.local_device_id.clone(),
         Some(id) => id.to_owned(),
     };
     let request = contract::ApprovalResponseRequest {

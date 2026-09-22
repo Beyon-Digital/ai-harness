@@ -310,7 +310,9 @@ export function decodeDataUri(uri: string): string | null {
   const m = /^data:[^;,]*;base64,(.*)$/.exec(uri || "");
   if (!m) return null;
   try {
-    return atob(m[1]);
+    const binary = atob(m[1]);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
   } catch {
     return null;
   }

@@ -194,14 +194,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
             .get("state")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if mcp_hops >= MAX_MCP_HOPS {
-            return reply(
-                Some(loop_decision::Decision::Fail(Fail {
-                    reason_code: "mcp_hop_limit".to_owned(),
-                })),
-                String::new(),
-            );
-        }
+        // The hop cap bounds NEW tool dispatches, not result delivery: a
+        // settled result still feeds one final model call with tools off
+        // so the run can complete with an answer.
+        let final_only = mcp_hops >= MAX_MCP_HOPS;
         let note = match state {
             "committed" => {
                 let result = effect
@@ -228,7 +224,7 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
             }
         };
         let model = get("model").unwrap_or_else(|| model.to_owned());
-        let mut request = chat_request(&model, &task, tools_enabled);
+        let mut request = chat_request(&model, &task, tools_enabled && !final_only);
         if let Some(m) = request["messages"].as_array_mut() {
             m.push(json!({"role": "user", "content": note}));
         }

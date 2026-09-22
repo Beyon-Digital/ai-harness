@@ -291,10 +291,14 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
     // secret itself never enters the durable effect payload.
     let api_key = match payload.get("api_key_env").and_then(Value::as_str) {
         Some(name) => {
-            if !name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                || name.is_empty()
+            // Only PROVIDER_KEY_*-prefixed daemon env vars may be named as
+            // credential holders — an unrestricted selector could repurpose
+            // any adapter env var as a model credential.
+            if !name.starts_with("PROVIDER_KEY_")
+                || name.len() == "PROVIDER_KEY_".len()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             {
                 return fail("api_key_env_invalid");
             }
@@ -309,8 +313,10 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         return fail("missing_openrouter_api_key");
     }
     let mut body = payload.clone();
-    body.as_object_mut()
-        .map(|m| m.remove("base_url").or(m.remove("api_key_env")));
+    if let Some(map) = body.as_object_mut() {
+        map.remove("base_url");
+        map.remove("api_key_env");
+    }
     if body.get("model").is_none() {
         body["model"] = Value::String(config.default_model.clone());
     }
