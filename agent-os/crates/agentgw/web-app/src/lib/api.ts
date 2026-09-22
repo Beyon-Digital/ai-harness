@@ -8,9 +8,29 @@ export class ApiError extends Error {
   }
 }
 
+/** LocalStorage key for the gateway bearer token (remote gateways). */
+export const TOKEN_KEY = "agentos_gw_token";
+
+// Bootstrap from `?token=` once, then strip it from the URL.
+if (typeof window !== "undefined") {
+  const url = new URL(window.location.href);
+  const t = url.searchParams.get("token");
+  if (t) {
+    localStorage.setItem(TOKEN_KEY, t);
+    url.searchParams.delete("token");
+    window.history.replaceState({}, "", url.toString());
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const headers: Record<string, string> = {
+    ...(init?.body ? { "content-type": "application/json" } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...((init?.headers as Record<string, string> | undefined) ?? {}),
+  };
   const res = await fetch(path, {
-    headers: init?.body ? { "content-type": "application/json" } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     ...init,
   });
   if (!res.ok) {
@@ -275,8 +295,10 @@ export function subscribeEvents(
   streamKey: string,
   onEvent: (eventType: string, data: unknown) => void,
 ): () => void {
+  const token = localStorage.getItem(TOKEN_KEY);
   const es = new EventSource(
-    `/api/events/subscribe?stream_key=${encodeURIComponent(streamKey)}`,
+    `/api/events/subscribe?stream_key=${encodeURIComponent(streamKey)}` +
+      (token ? `&token=${encodeURIComponent(token)}` : ""),
   );
   es.onmessage = (m) => {
     try {

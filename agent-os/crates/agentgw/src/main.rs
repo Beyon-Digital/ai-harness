@@ -236,13 +236,24 @@ fn local_device_id(runtime_dir: &Path) -> String {
         return id.trim().to_owned();
     }
     let id = new_uuid7();
-    if let Err(e) = std::fs::write(&path, &id) {
+    // Create with mode 0600 atomically — no permissive window between
+    // write and chmod.
+    #[cfg(unix)]
+    let write = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(id.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let write = std::fs::write(&path, &id);
+    if let Err(e) = write {
         tracing::warn!("agentgw-device-id persist failed: {e}");
-    } else if let Err(e) = std::fs::set_permissions(
-        &path,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-    ) {
-        tracing::warn!("agentgw-device-id chmod failed: {e}");
     }
     id
 }
@@ -329,7 +340,15 @@ async fn require_auth(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned));
+        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned))
+        // EventSource can't set headers — accept `?token=` on the SSE
+        // endpoint (and any path) as a bearer fallback.
+        .or_else(|| {
+            req.uri().query().and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("token=").map(str::to_owned))
+            })
+        });
     // A registry read error is an outage, not a bad credential — answer
     // 503 so operators can distinguish it from a 401.
     #[allow(clippy::result_large_err)]
@@ -370,8 +389,19 @@ async fn require_auth(
             None if state.loopback => AuthedCaller("local".to_owned()),
             None => return unauthorized(),
         }
-    } else {
+    } else if state.loopback {
+        // Loopback with no configured credentials: the OS uid boundary
+        // is the trust domain.
         AuthedCaller("local".to_owned())
+    } else {
+        // A remote listener with NO credentials must fail closed — a
+        // bound bearer token or device registry is required, otherwise
+        // every remote request would act as `local` (full control plane).
+        tracing::warn!(
+            "agentgw: non-loopback bind with no credentials — all requests rejected; \
+             set AGENTGW_TOKEN/--auth-token or --devices-file"
+        );
+        return unauthorized();
     };
     let mut req = req;
     req.extensions_mut().insert(caller);

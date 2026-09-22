@@ -125,6 +125,9 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
           getRun(runId),
           getDecisions(runId).catch(() => [] as Decision[]),
         ]);
+        const decoded = decodeDataUri(run.output_ref);
+        const lastDecision = decisions.at(-1);
+        const reason = lastDecision ? describeDecision(lastDecision) : undefined;
         setMessages((ms) =>
           ms.map((m) =>
             m.id === msgId
@@ -132,11 +135,18 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
                   ...m,
                   state: run.state_name,
                   decisions,
+                  error: run.state === 10 || run.state === 11,
+                  // Every terminal state resolves the placeholder —
+                  // failed/cancelled runs never ship an output_ref.
                   text:
-                    decodeDataUri(run.output_ref) ||
-                    (run.state_name === "completed"
+                    decoded ||
+                    (run.state === 9
                       ? "(no text output)"
-                      : m.text),
+                      : run.state === 10
+                        ? `(run failed${reason ? `: ${reason}` : ""})`
+                        : run.state === 11
+                          ? "(run cancelled)"
+                          : m.text),
                 }
               : m,
           ),

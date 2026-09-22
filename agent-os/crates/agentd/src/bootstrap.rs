@@ -520,8 +520,11 @@ fn compute_digest(dir: &Path) -> errors::Result<String> {
     adapter_registry::registry::compute_bundle_digest(dir, &manifest_digest)
 }
 
-/// Proposes, smoke-tests, and activates `path` as the config generation
-/// when the store has no active generation.
+/// Proposes, smoke-tests, and activates `path` as the config
+/// generation. With no active generation the file seeds the runtime;
+/// with one, a *different* document activates as a new generation —
+/// a restarted `--config` is a deliberate operator transition, while
+/// an identical file is an idempotent no-op.
 async fn bootstrap_config(
     store: Arc<SqliteKernelStore>,
     coordinator: Arc<CommandCoordinator>,
@@ -531,9 +534,6 @@ async fn bootstrap_config(
     actor: ActorId,
     path: &Path,
 ) -> errors::Result<Option<String>> {
-    if let Some(active) = read_active_generation(store.clone()).await? {
-        return Ok(Some(active));
-    }
     let document = std::fs::read(path).map_err(|e| io("read config doc", &e))?;
     let digest = format!(
         "sha256:{}",
@@ -542,6 +542,32 @@ async fn bootstrap_config(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
+    let mut expected_revision = 0u64;
+    if let Some(active_id) = read_active_generation(store.clone()).await? {
+        let mut txn = store.begin_read().await?;
+        let active = txn
+            .config()
+            .get_generation(
+                domain::ids::ConfigGenerationId::from_str(&active_id)
+                    .map_err(|_| boot_error("active generation id malformed"))?,
+            )
+            .await?;
+        let pointer = txn.config().get_active().await?;
+        if let Some(gen_row) = &active
+            && gen_row.digest == digest
+        {
+            tracing::info!(
+                generation_id = active_id,
+                "config document unchanged — keeping active generation"
+            );
+            return Ok(Some(active_id));
+        }
+        expected_revision = pointer.map(|p| p.revision).unwrap_or(0);
+        tracing::info!(
+            generation_id = active_id,
+            "config document changed — proposing a new generation"
+        );
+    }
     let outcome = submit(
         &coordinator,
         ids.as_ref(),
@@ -583,14 +609,14 @@ async fn bootstrap_config(
         config_engine::commands::CMD_ACTIVATE_CONFIG,
         contract::ActivateConfigGeneration {
             generation_id: generation_id.clone(),
-            expected_active_revision: 0,
+            expected_active_revision: expected_revision,
         }
         .encode_to_vec(),
         format!("config.activate.{generation_id}"),
     )
     .await?;
     let _ = clock;
-    tracing::info!(generation_id, "initial config generation activated");
+    tracing::info!(generation_id, "config generation activated");
     Ok(Some(generation_id))
 }
 

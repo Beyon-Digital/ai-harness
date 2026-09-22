@@ -791,13 +791,17 @@ impl RunWorker {
                 v.extend_from_slice(settled);
                 serde_json::to_vec(&v).unwrap_or_default()
             };
+            // The marker only accompanies real settled entries — an
+            // empty feed must remain `[]` so v1 loops that scan the
+            // array never see a synthetic "effect" on idle turns.
             let marker_value = marker(&op_counts);
-            let mut events = pack(&settled, Some(&marker_value));
+            let marker_opt = (!settled.is_empty()).then_some(&marker_value);
+            let mut events = pack(&settled, marker_opt);
             // Shrink order: oldest settled entries first, then the
             // marker itself, so the newest result never silently drops.
             while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
                 settled.remove(0);
-                events = pack(&settled, Some(&marker_value));
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
             if events.len() > limits.max_fed_event_bytes as usize {
                 events = pack(&settled, None);

@@ -20,6 +20,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  TOKEN_KEY,
   flattenMetrics,
   getHealth,
   getMetrics,
@@ -39,6 +40,9 @@ export function SystemPage() {
   const [providers, setProviders] = useState<Provider[]>(loadProviders);
   const [addOpen, setAddOpen] = useState(false);
   const [np, setNp] = useState({ name: "", baseUrl: "", model: "", keyEnv: "" });
+  const [gwToken, setGwToken] = useState(
+    () => localStorage.getItem(TOKEN_KEY) ?? "",
+  );
 
   useEffect(() => {
     const load = () => {
@@ -117,6 +121,43 @@ export function SystemPage() {
             onClick={() => setAddOpen(true)}
           >
             <Plus className="mr-1.5 size-3.5" /> Add OpenAI-compatible provider
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Gateway access token</CardTitle>
+          <CardDescription>
+            Bearer token for a gateway bound with{" "}
+            <code>--auth-token</code>/<code>AGENTGW_TOKEN</code> — needed
+            when pointing this UI (or the desktop app) at a remote{" "}
+            <code>agentgw</code>. You can also open{" "}
+            <code>?token=…</code> once to store it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center gap-2">
+          <Input
+            type="password"
+            className="max-w-sm font-mono"
+            placeholder="leave empty for loopback/local"
+            value={gwToken}
+            onChange={(e) => setGwToken(e.target.value)}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              if (gwToken.trim()) {
+                localStorage.setItem(TOKEN_KEY, gwToken.trim());
+              } else {
+                localStorage.removeItem(TOKEN_KEY);
+              }
+              toast.success("gateway token saved — reloading");
+              setTimeout(() => window.location.reload(), 400);
+            }}
+          >
+            Save
           </Button>
         </CardContent>
       </Card>
