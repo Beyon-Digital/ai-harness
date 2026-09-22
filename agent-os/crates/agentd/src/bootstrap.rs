@@ -314,6 +314,7 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
             actor,
             path,
             journal.clone(),
+            epoch,
         )
         .await?
     } else {
@@ -536,6 +537,7 @@ async fn bootstrap_config(
     actor: ActorId,
     path: &Path,
     journal: Arc<dyn events::journal::EventJournalPort>,
+    epoch: u64,
 ) -> errors::Result<Option<String>> {
     let document = std::fs::read(path).map_err(|e| io("read config doc", &e))?;
     let digest = format!(
@@ -586,7 +588,10 @@ async fn bootstrap_config(
     // proposed/tested generation taking the pointer for the first time is
     // an ordinary activation.
     let is_rollback = match &reactivate {
-        Some(id) => generation_previously_active(&journal, id).await?,
+        Some(id) => {
+            generation_previously_active(&store, ids.as_ref(), epoch, principal, &journal, id)
+                .await?
+        }
         None => false,
     };
     let generation_id = match reactivate {
@@ -670,30 +675,58 @@ async fn bootstrap_config(
     Ok(Some(generation_id))
 }
 
-/// Scans the durable `config/global` journal for a `ConfigActivated` or
-/// `ConfigRolledBack` event naming `generation_id` — proof the pointer
-/// previously referenced it (distinguishes a true rollback from the
-/// first activation of a CLI-proposed generation).
+/// Decides whether `generation_id` ever held the active pointer —
+/// distinguishing a true rollback (emit `ConfigRolledBack`) from the
+/// first activation of a proposed/tested generation (emit
+/// `ConfigActivated`). Committed-but-unpublished outbox rows are
+/// authoritative (the journal is an async projection that can lag a
+/// shutdown), so both are scanned.
 async fn generation_previously_active(
+    store: &Arc<SqliteKernelStore>,
+    ids: &dyn IdProvider,
+    epoch: u64,
+    principal: PrincipalId,
     journal: &Arc<dyn events::journal::EventJournalPort>,
     generation_id: &str,
 ) -> errors::Result<bool> {
-    let key = events::stream::StreamKey::config_global();
+    let names_activation = |event_type: &str| {
+        event_type.ends_with("ConfigActivated") || event_type.ends_with("ConfigRolledBack")
+    };
+    let payload_names = |payload: &[u8]| {
+        contract::ConfigGeneration::decode(payload)
+            .map(|g| g.generation_id == generation_id)
+            .unwrap_or(false)
+    };
+    let config_key = events::stream::StreamKey::config_global();
+    {
+        let mut txn = store
+            .begin_write(TxContext {
+                daemon_epoch: epoch,
+                principal_id: principal,
+                command_id: domain::ids::CommandId::new(ids),
+                correlation_id: None,
+            })
+            .await?;
+        let pending = txn.streams().scan_unpublished(u32::MAX).await?;
+        txn.rollback().await?;
+        for row in &pending {
+            if row.stream_key.as_str() == config_key.as_str()
+                && names_activation(&row.event_type)
+                && payload_names(&row.payload)
+            {
+                return Ok(true);
+            }
+        }
+    }
     let mut from = 0u64;
     loop {
-        let page = journal.read_stream(&key, from, 512).await?;
+        let page = journal.read_stream(&config_key, from, 512).await?;
         if page.events.is_empty() {
             return Ok(false);
         }
         for event in &page.events {
             from = event.sequence;
-            let is_activation = event.event_type.ends_with("ConfigActivated")
-                || event.event_type.ends_with("ConfigRolledBack");
-            if is_activation
-                && contract::ConfigGeneration::decode(event.payload.as_slice())
-                    .map(|g| g.generation_id == generation_id)
-                    .unwrap_or(false)
-            {
+            if names_activation(&event.event_type) && payload_names(&event.payload) {
                 return Ok(true);
             }
         }
