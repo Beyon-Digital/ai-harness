@@ -698,31 +698,14 @@ async fn generation_previously_active(
             .unwrap_or(false)
     };
     let config_key = events::stream::StreamKey::config_global();
-    {
-        let mut txn = store
-            .begin_write(TxContext {
-                daemon_epoch: epoch,
-                principal_id: principal,
-                command_id: domain::ids::CommandId::new(ids),
-                correlation_id: None,
-            })
-            .await?;
-        let pending = txn.streams().scan_unpublished(u32::MAX).await?;
-        txn.rollback().await?;
-        for row in &pending {
-            if row.stream_key.as_str() == config_key.as_str()
-                && names_activation(&row.event_type)
-                && payload_names(&row.payload)
-            {
-                return Ok(true);
-            }
-        }
-    }
+    // Journal first: a prior activation is normally already published
+    // (drained during that uptime), so the fast path avoids touching the
+    // outbox at all.
     let mut from = 0u64;
     loop {
         let page = journal.read_stream(&config_key, from, 512).await?;
         if page.events.is_empty() {
-            return Ok(false);
+            break;
         }
         for event in &page.events {
             from = event.sequence;
@@ -731,6 +714,28 @@ async fn generation_previously_active(
             }
         }
     }
+    // Outbox second — only reached when the journal shows nothing, which
+    // is the crash/immediate-shutdown path where a committed activation
+    // event may still be staged. Read-only scan, rolled back after.
+    let mut txn = store
+        .begin_write(TxContext {
+            daemon_epoch: epoch,
+            principal_id: principal,
+            command_id: domain::ids::CommandId::new(ids),
+            correlation_id: None,
+        })
+        .await?;
+    let pending = txn.streams().scan_unpublished(u32::MAX).await?;
+    txn.rollback().await?;
+    for row in &pending {
+        if row.stream_key.as_str() == config_key.as_str()
+            && names_activation(&row.event_type)
+            && payload_names(&row.payload)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Reads the active generation id, when one is set.
