@@ -577,6 +577,7 @@ async fn bootstrap_config(
             "config document changed"
         );
     }
+    let was_reactivate = reactivate.is_some();
     let generation_id = match reactivate {
         Some(existing) => existing,
         None => {
@@ -617,23 +618,42 @@ async fn bootstrap_config(
         format!("config.test.{generation_id}"),
     )
     .await?;
-    submit(
-        &coordinator,
-        ids.as_ref(),
-        principal,
-        actor,
-        config_engine::commands::CMD_ACTIVATE_CONFIG,
-        contract::ActivateConfigGeneration {
-            generation_id: generation_id.clone(),
-            expected_active_revision: expected_revision,
-        }
-        .encode_to_vec(),
-        // Revision-scoped: reactivating a generation after a later
-        // transition (rollback) carries a new expected revision and needs
-        // a fresh key; retries within one transition still replay.
-        format!("config.activate.{generation_id}.{expected_revision}"),
-    )
-    .await?;
+    if was_reactivate {
+        // Moving the pointer back to a previously-active generation is a
+        // rollback — emit `ConfigRolledBack`, not `ConfigActivated`.
+        submit(
+            &coordinator,
+            ids.as_ref(),
+            principal,
+            actor,
+            config_engine::commands::CMD_ROLLBACK_CONFIG,
+            contract::RollbackConfigGeneration {
+                generation_id: generation_id.clone(),
+                expected_active_revision: expected_revision,
+                reason: "boot --config restore".to_owned(),
+            }
+            .encode_to_vec(),
+            format!("config.rollback.{generation_id}.{expected_revision}"),
+        )
+        .await?;
+    } else {
+        submit(
+            &coordinator,
+            ids.as_ref(),
+            principal,
+            actor,
+            config_engine::commands::CMD_ACTIVATE_CONFIG,
+            contract::ActivateConfigGeneration {
+                generation_id: generation_id.clone(),
+                expected_active_revision: expected_revision,
+            }
+            .encode_to_vec(),
+            // Revision-scoped: retries within one transition replay, a
+            // later transition gets a fresh key.
+            format!("config.activate.{generation_id}.{expected_revision}"),
+        )
+        .await?;
+    }
     let _ = clock;
     tracing::info!(generation_id, "config generation activated");
     Ok(Some(generation_id))

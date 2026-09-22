@@ -145,10 +145,33 @@ async fn e2e_restart_with_changed_config_activates_new_generation() {
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 
-    // Rollback: restoring the original document must mint a fresh
-    // generation, not replay the retired one through the same
-    // idempotency records.
+    // Rollback: restoring the original document reactivates its existing
+    // generation via `ConfigRolledBack` — no new generation, no
+    // idempotency conflict.
     let daemon = boot_daemon(&runtime_dir, vec![bundle]).await;
+    let socket = daemon.socket_path().to_path_buf();
+    let deadline = Instant::now() + std::time::Duration::from_millis(30_000);
+    loop {
+        let events = cli(
+            &socket,
+            &["events", "read", "--stream-key", "config/global"],
+        )
+        .await;
+        let types: Vec<String> = events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["event_type"].as_str().map(str::to_owned))
+            .collect();
+        if types.iter().any(|t| t.contains("ConfigRolledBack")) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "config rollback event never journaled: {types:?}"
+        );
+        tokio::task::yield_now().await;
+    }
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 }
