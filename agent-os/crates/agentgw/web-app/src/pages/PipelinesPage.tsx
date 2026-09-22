@@ -214,6 +214,18 @@ export function PipelinesPage() {
     ]);
   };
 
+  // A slot only accepts the adapter port that implements it
+  // (`agent_loop` ← "agent_loop", `effect_execute` ← "effect.execute") —
+  // otherwise the generated binding names an adapter that can't serve
+  // the slot and run planning rejects it.
+  const isValidConnection = useCallback(
+    (conn: Connection | Edge) => {
+      const slot = SLOTS.find((s) => s.key === conn.targetHandle);
+      return !!slot && conn.sourceHandle === slot.adapterPort;
+    },
+    [],
+  );
+
   const onConnect = useCallback(
     (conn: Connection) =>
       setEdges((es) => {
@@ -235,6 +247,9 @@ export function PipelinesPage() {
     const bindings = edges
       .filter((e) => e.target === "profile")
       .map((e) => {
+        // Revalidate: a stale edge must never emit a mismatched binding.
+        const slot = SLOTS.find((s) => s.key === e.targetHandle);
+        if (!slot || e.sourceHandle !== slot.adapterPort) return null;
         const node = nodes.find((n) => n.id === e.source);
         const a = (node?.data as AdapterData | undefined)?.adapter;
         if (!a?.adapter) return null;
@@ -409,6 +424,7 @@ export function PipelinesPage() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          isValidConnection={isValidConnection}
           colorMode={theme.mode}
           fitView
           snapToGrid

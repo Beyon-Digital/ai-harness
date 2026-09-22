@@ -24,6 +24,8 @@
 //! - `MCP_SERVERS` — JSON map of MCP server name → stdio/HTTP spec;
 //!   enables `mcp.list_tools`/`mcp.call_tool`/`mcp.read_resource`
 //!   payloads (`{"op": "mcp.*", "server": <name>, ...}`).
+//! - `MCP_TIMEOUT_MS` — per-call MCP timeout (default 30000), kept
+//!   separate from the model timeout.
 //! - `FIXTURE_STORE` — durable store path (default `openrouter-effect-store.json`).
 
 mod mcp;
@@ -64,6 +66,10 @@ struct LlmConfig {
     site: Option<String>,
     app_name: Option<String>,
     timeout: Duration,
+    /// Timeout for `mcp.*` effect calls — distinct from the model
+    /// timeout so a hung tool server doesn't hold a turn as long as
+    /// a slow completion may legitimately take.
+    mcp_timeout: Duration,
 }
 
 fn run() -> std::io::Result<()> {
@@ -116,6 +122,11 @@ fn run() -> std::io::Result<()> {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(55_000)),
+        mcp_timeout: env("MCP_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(30_000)),
     };
     let store_path =
         env("FIXTURE_STORE").unwrap_or_else(|_| "openrouter-effect-store.json".to_owned());
@@ -242,7 +253,7 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
     // `mcp.*` payloads dispatch to the MCP client — they don't touch
     // the model provider and don't need its API key.
     if mcp::is_mcp_payload(&payload) {
-        return match mcp::call(&payload, config.timeout) {
+        return match mcp::call(&payload, config.mcp_timeout) {
             Ok(text) => {
                 let result_ref = data_uri(&text);
                 store.insert(

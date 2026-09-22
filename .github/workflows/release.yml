@@ -63,32 +63,9 @@ jobs:
             librsvg2-dev patchelf libxdo-dev libssl-dev libfuse2 file
       - name: Install JS deps
         run: npm ci
-      - name: Build bundles (build-only run)
-        if: ${{ !env.IS_RELEASE }}
+      - name: Build bundles
         run: npm run build
-      - name: Build bundles and attach to release (tagged run)
-        if: ${{ env.IS_RELEASE }}
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          tagName: ${{ env.RELEASE_NAME }}
-          releaseName: "Agent OS ${{ env.RELEASE_NAME }}"
-          releaseBody: |
-            Desktop installers for the Agent OS gateway shell plus CLI
-            binaries (agentd / agentctl / agentgw / agentos-wasm-host and
-            the bundled adapters). The desktop app connects to a running
-            gateway — start `agentd` + `agentgw` first (see
-            docs/guides/web-gui-and-llm-adapter.md), or set
-            AGENTOS_GATEWAY to a reachable gateway URL.
-
-            Binaries are unsigned: macOS Gatekeeper and Windows
-            SmartScreen will warn on first launch.
-          releaseDraft: true
-          prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
-      - name: Upload bundles as workflow artifacts (non-release runs)
-        if: ${{ !env.IS_RELEASE }}
+      - name: Upload bundles as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.label }}
@@ -149,15 +126,41 @@ jobs:
           done
           cp docs/guides/web-gui-and-llm-adapter.md "dist/$pkg/share/"
           cd dist && tar -czf "$pkg.tar.gz" "$pkg" && mv "$pkg.tar.gz" ..
-      - name: Publish to release
-        if: ${{ env.IS_RELEASE }}
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}.tar.gz
-      - name: Upload as workflow artifacts (non-release runs)
-        if: ${{ !env.IS_RELEASE }}
+      - name: Upload as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.label }}
           path: agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}.tar.gz
+
+  # One publish job owns the draft release — parallel matrix jobs calling
+  # a release action can race on release creation and attach subsets.
+  publish:
+    name: Publish draft release
+    if: ${{ env.IS_RELEASE }}
+    needs: [desktop, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_NAME }}
+          name: "Agent OS ${{ env.RELEASE_NAME }}"
+          draft: true
+          prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
+          files: artifacts/**/*
+          body: |
+            Desktop installers for the Agent OS gateway shell plus CLI
+            binaries (agentd / agentctl / agentgw / agentos-wasm-host and
+            the bundled adapters). The desktop app connects to a running
+            gateway — start `agentd` + `agentgw` first (see
+            docs/guides/web-gui-and-llm-adapter.md), or set
+            AGENTOS_GATEWAY to a reachable gateway URL.
+
+            Binaries are unsigned: macOS Gatekeeper and Windows
+            SmartScreen will warn on first launch.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -136,8 +136,10 @@ impl SchedulerWorker {
                     .map(|(n, _)| *n)
                     .unwrap_or(0)
                     .saturating_add(1);
-                // 2s, 4s, 8s, ... capped at 60s — a deterministic retry
-                // schedule so restart behavior stays explainable.
+                // 2s, 4s, 8s, ... capped at 60s. The map is
+                // intentionally per-epoch: a restart resets claims via
+                // the epoch guard anyway, and a fresh attempt-1 retry
+                // after boot is both bounded and explainable.
                 let shift = attempts.saturating_sub(1).min(5);
                 let delay_ms = 2_000i64.saturating_mul(1i64 << shift).min(60_000);
                 self.backoff

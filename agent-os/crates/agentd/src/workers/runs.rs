@@ -544,10 +544,10 @@ impl RunWorker {
         let agent_loop = resolve(
             &PortRequirement {
                 port_id: LOOP_PORT_ID.to_owned(),
-                port_version: 1,
+                port_version: loop_pin.map(|(_, v)| v).unwrap_or(1),
                 required_capabilities: Vec::new(),
                 sandbox_tier: SandboxTier::T0,
-                pin_adapter_id: loop_pin,
+                pin_adapter_id: loop_pin.map(|(id, _)| id),
                 require_conformance_passed: false,
             },
             &candidates,
@@ -1393,14 +1393,16 @@ impl RunWorker {
     }
 
     /// Read the requested profile's `agent_loop` binding under the
-    /// active generation and turn it into an adapter pin for `resolve`.
-    /// `Ok(None)` for builtin names (e.g. `fixture-loop`) which carry no
-    /// adapter id; errors surface before any execution side effect.
+    /// active generation and turn it into an adapter pin for `resolve`:
+    /// `(adapter_id, port_version)` parsed the same way
+    /// `plan_environment` parses profile bindings (`<id>@<version>`,
+    /// version defaulting to 1). `Ok(None)` for builtin names (e.g.
+    /// `fixture-loop`) which carry no adapter id.
     async fn profile_loop_pin(
         &self,
         txn: &mut dyn KernelTxn,
         profile_name: &str,
-    ) -> errors::Result<Option<AdapterId>> {
+    ) -> errors::Result<Option<(AdapterId, u32)>> {
         let Some(active) = txn.config().get_active().await? else {
             return Ok(None);
         };
@@ -1415,16 +1417,20 @@ impl RunWorker {
         let Some(binding) = profile.bindings.get(LOOP_PORT_ID) else {
             return Ok(None);
         };
-        let name = binding.split('@').next().unwrap_or(binding);
+        let (name, version) = binding
+            .split_once('@')
+            .map(|(n, v)| (n, v.parse::<u32>().unwrap_or(1)))
+            .unwrap_or((binding.as_str(), 1));
         if config_engine::generations::BUILTIN_ADAPTERS.contains(&name) {
             return Ok(None);
         }
-        name.parse::<AdapterId>().map(Some).map_err(|_| {
+        let id = name.parse::<AdapterId>().map_err(|_| {
             worker_error(
                 ErrorCode::InvalidArgument,
                 "profile agent_loop binding is not an adapter id",
             )
-        })
+        })?;
+        Ok(Some((id, version)))
     }
 
     /// The executor identity this worker claims effects under.
