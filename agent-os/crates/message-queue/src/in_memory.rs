@@ -1,12 +1,14 @@
 //! In-memory `MessageQueuePort` adapter: generation-global, non-durable.
 //!
-//! Semantics: a single FIFO pending queue. `consume(subscription)` moves the
-//! next pending messages into that subscription's in-flight set under unique
-//! `delivery_id`s; `ack` removes permanently, `nack` returns to the front of
-//! pending. Bounded by [`QUEUE_CAPACITY_MESSAGES`] counting pending plus
-//! in-flight messages; overflow fails `ResourceExhausted` — the publisher
-//! applies backpressure, nothing is silently dropped.
-use std::collections::{HashMap, VecDeque};
+//! Semantics: channels keyed by stream — `consume(subscription)` drains the
+//! channel named by `subscription` (one channel per stream). A delivery
+//! moves into that channel's in-flight set under a unique `delivery_id`;
+//! `ack` removes permanently, `nack` returns to the front of its channel.
+//! Bounded by [`QUEUE_CAPACITY_MESSAGES`] counting pending plus in-flight
+//! messages; overflow fails `ResourceExhausted` — the publisher applies
+//! backpressure, nothing is silently dropped. Dedupe survives `ack` via a
+//! bounded tombstone set, so a producer retry cannot redeliver.
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use domain::generated::contract::{
@@ -18,23 +20,34 @@ use errors::{KernelError, Result};
 
 use crate::{MessageQueuePort, QUEUE_CAPACITY_MESSAGES, QueueCapabilities};
 
+/// How many acked `(stream, message_id)` dedupe tombstones are retained.
+/// Bounded like the rest of the adapter: beyond this, the oldest tombstone
+/// is forgotten and a retry would re-enqueue (documented non-durable edge).
+const TOMBSTONE_CAP: usize = QUEUE_CAPACITY_MESSAGES * 4;
+
 struct Stored {
-    stream: String,
     payload: Vec<u8>,
 }
 
 struct InFlight {
-    stream: String,
-    message_id: String,
+    /// Channel the delivery was consumed under.
+    channel: String,
+    /// The `(stream, message_id)` dedupe key.
+    key: (String, String),
     payload: Vec<u8>,
 }
 
 struct State {
-    /// Payload identity dedupe: `(stream, message_id)` -> stored payload hash.
+    /// Payload identity dedupe: `(stream, message_id)` -> stored payload.
+    /// Entries persist after `ack` (tombstones) so retries stay idempotent.
     live_ids: HashMap<(String, String), Vec<u8>>,
-    /// FIFO of `(stream, message_id)` awaiting a consumer.
-    pending: VecDeque<(String, String)>,
-    /// Payloads keyed by `(stream, message_id)`.
+    /// Insertion order for tombstone eviction.
+    live_order: VecDeque<(String, String)>,
+    /// Channel -> FIFO of `(stream, message_id)` awaiting a consumer.
+    pending: HashMap<String, VecDeque<(String, String)>>,
+    /// Keys currently sitting on a channel's pending queue.
+    queued: HashSet<(String, String)>,
+    /// Pending payloads keyed by `(stream, message_id)`.
     messages: HashMap<(String, String), Stored>,
     /// `delivery_id` -> in-flight delivery.
     in_flight: HashMap<String, InFlight>,
@@ -42,8 +55,28 @@ struct State {
 }
 
 impl State {
+    /// Total live messages occupying capacity: pending plus in-flight.
     fn occupied(&self) -> usize {
-        self.pending.len() + self.in_flight.len()
+        self.queued.len() + self.in_flight.len()
+    }
+
+    /// Evict tombstones (acked ids) once the dedupe map outgrows the cap.
+    /// Keys still queued or in-flight are never evicted.
+    fn evict_tombstones(&mut self) {
+        let mut scanned = 0;
+        while self.live_ids.len() > TOMBSTONE_CAP && scanned < self.live_order.len() {
+            scanned += 1;
+            let Some(key) = self.live_order.pop_front() else {
+                break;
+            };
+            let active =
+                self.queued.contains(&key) || self.in_flight.values().any(|f| f.key == key);
+            if active {
+                self.live_order.push_back(key);
+            } else {
+                self.live_ids.remove(&key);
+            }
+        }
     }
 }
 
@@ -66,7 +99,9 @@ impl InMemoryQueue {
         Self {
             state: Mutex::new(State {
                 live_ids: HashMap::new(),
-                pending: VecDeque::new(),
+                live_order: VecDeque::new(),
+                pending: HashMap::new(),
+                queued: HashSet::new(),
                 messages: HashMap::new(),
                 in_flight: HashMap::new(),
                 next_delivery: 1,
@@ -125,14 +160,20 @@ impl MessageQueuePort for InMemoryQueue {
             ));
         }
         state.live_ids.insert(key.clone(), request.payload.clone());
-        state.pending.push_back(key.clone());
+        state.live_order.push_back(key.clone());
+        state
+            .pending
+            .entry(request.stream.clone())
+            .or_default()
+            .push_back(key.clone());
+        state.queued.insert(key.clone());
         state.messages.insert(
             key,
             Stored {
-                stream: request.stream,
                 payload: request.payload,
             },
         );
+        state.evict_tombstones();
         Ok(QueuePublishResult {
             message_id: request.message_id,
         })
@@ -141,13 +182,20 @@ impl MessageQueuePort for InMemoryQueue {
     async fn consume(&self, request: &QueueConsumeRequest) -> Result<Vec<QueueDelivery>> {
         let max = Self::parse_max(&request.options_json).max(1);
         let mut state = self.state.lock().expect("queue mutex");
+        // The subscription names its channel — subscribers never take
+        // messages published to a different stream.
+        let channel = &request.subscription;
         let mut out = Vec::new();
         for _ in 0..max {
-            let Some(key) = state.pending.pop_front() else {
+            let Some(queue) = state.pending.get_mut(channel) else {
                 break;
             };
-            // The payload migrates into the in-flight entry; `live_ids` keeps
-            // the dedupe key so the slot stays occupied until `ack`.
+            let Some(key) = queue.pop_front() else {
+                break;
+            };
+            state.queued.remove(&key);
+            // The payload migrates into the in-flight entry; `live_ids`
+            // keeps the dedupe key so the slot stays occupied until `ack`.
             let Some(stored) = state.messages.remove(&key) else {
                 continue;
             };
@@ -161,8 +209,8 @@ impl MessageQueuePort for InMemoryQueue {
             state.in_flight.insert(
                 delivery_id,
                 InFlight {
-                    stream: stored.stream.clone(),
-                    message_id: key.1,
+                    channel: channel.clone(),
+                    key,
                     payload: stored.payload,
                 },
             );
@@ -172,17 +220,16 @@ impl MessageQueuePort for InMemoryQueue {
 
     async fn ack(&self, request: &QueueAckRequest) -> Result<GenericResult> {
         let mut state = self.state.lock().expect("queue mutex");
-        let Some(flight) = state.in_flight.remove(&request.delivery_id) else {
+        let Some(_flight) = state.in_flight.remove(&request.delivery_id) else {
             return Err(KernelError::new(
                 ErrorCode::NotFound,
                 RetryClass::Never,
                 "unknown delivery_id",
             ));
         };
-        state
-            .messages
-            .remove(&(flight.stream.clone(), flight.message_id.clone()));
-        state.live_ids.remove(&(flight.stream, flight.message_id));
+        // The dedupe entry is retained as a tombstone: a producer retry
+        // after ack must replay, not redeliver.
+        state.evict_tombstones();
         Ok(GenericResult::default())
     }
 
@@ -195,15 +242,18 @@ impl MessageQueuePort for InMemoryQueue {
                 "unknown delivery_id",
             ));
         };
-        let key = (flight.stream, flight.message_id);
+        state
+            .pending
+            .entry(flight.channel)
+            .or_default()
+            .push_front(flight.key.clone());
+        state.queued.insert(flight.key.clone());
         state.messages.insert(
-            key.clone(),
+            flight.key,
             Stored {
-                stream: key.0.clone(),
                 payload: flight.payload,
             },
         );
-        state.pending.push_front(key);
         Ok(GenericResult::default())
     }
 }

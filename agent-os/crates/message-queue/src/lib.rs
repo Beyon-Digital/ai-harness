@@ -42,8 +42,9 @@ pub trait MessageQueuePort: Send + Sync {
     /// payload is idempotent; a different payload conflicts.
     async fn publish(&self, request: QueuePublishRequest) -> Result<QueuePublishResult>;
     /// Take up to `max` pending deliveries into `subscription`, marking them
-    /// in-flight until [`Self::ack`] or [`Self::nack`]. `options_json` may carry
-    /// `{"max": n}`; default is 1.
+    /// in-flight until [`Self::ack`] or [`Self::nack`]. `subscription` names
+    /// the channel — a consumer only drains messages published to the stream
+    /// of the same name. `options_json` may carry `{"max": n}`; default is 1.
     async fn consume(&self, request: &QueueConsumeRequest) -> Result<Vec<QueueDelivery>>;
     /// Permanently remove the in-flight delivery.
     async fn ack(&self, request: &QueueAckRequest) -> Result<GenericResult>;

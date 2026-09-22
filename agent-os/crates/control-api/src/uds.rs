@@ -17,6 +17,13 @@ use tokio::net::{UnixListener, UnixStream};
 /// Name of the control-plane socket inside the runtime directory.
 pub const SOCKET_FILE_NAME: &str = "control.sock";
 
+/// Proof the caller holds the daemon singleton lock.
+///
+/// Marker trait rather than `impl Debug`: only lock types (the daemon's
+/// `DaemonLock`, or a test fake that explicitly implements this) satisfy
+/// the bound, so `bind` cannot be called with an arbitrary value.
+pub trait DaemonLockHeld: std::fmt::Debug {}
+
 /// A bound control-plane socket; unlinking on drop keeps restarts clean.
 #[derive(Debug)]
 pub struct ControlSocket {
@@ -28,9 +35,10 @@ impl ControlSocket {
     /// Binds the socket, removing a stale file only after probing it: an
     /// answerable endpoint means another daemon holds the socket and we fail
     /// instead of stealing it. `daemon_lock` is proof the caller holds the
-    /// singleton lock — pass `&agentd::lock::DaemonLock`; the type is kept
-    /// generic here to keep `control-api` free of `agentd` dependencies.
-    pub fn bind(runtime_dir: &Path, daemon_lock: &impl std::fmt::Debug) -> errors::Result<Self> {
+    /// singleton lock — pass `&agentd::lock::DaemonLock` (or a test type
+    /// implementing [`DaemonLockHeld`]); the bound keeps `control-api` free
+    /// of `agentd` dependencies without accepting arbitrary `Debug` values.
+    pub fn bind(runtime_dir: &Path, daemon_lock: &impl DaemonLockHeld) -> errors::Result<Self> {
         let _lock_is_held = daemon_lock; // the lock's existence is the proof
         let path = runtime_dir.join(SOCKET_FILE_NAME);
         fs::create_dir_all(runtime_dir).map_err(|e| io("create runtime dir", e))?;

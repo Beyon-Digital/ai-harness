@@ -22,6 +22,8 @@ const SEED: i64 = 1_700_000_000_000;
 #[derive(Debug)]
 struct FakeLock;
 
+impl control_api::uds::DaemonLockHeld for FakeLock {}
+
 struct Rig {
     _dir: TempDir,
     socket_path: std::path::PathBuf,

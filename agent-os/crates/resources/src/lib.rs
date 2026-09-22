@@ -213,15 +213,26 @@ async fn check_parent_budget(
             "child unit differs from the parent reservation's unit",
         ));
     }
+    // Checked arithmetic: an overflowing sum cannot prove the delegation
+    // stays within the parent's budget, so it is rejected as exhausted.
     let delegated: i64 = txn
         .resources()
         .list_children(parent_id)
         .await?
         .iter()
         .filter(|child| ACTIVE.contains(&child.state) && child.unit == unit.as_str())
-        .map(|child| child.amount)
-        .sum();
-    if delegated + amount > parent.amount {
+        .try_fold(0i64, |acc, child| acc.checked_add(child.amount))
+        .ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::ResourceExhausted,
+                RetryClass::Safe,
+                "delegated budget sum overflows i64",
+            )
+        })?;
+    if delegated
+        .checked_add(amount)
+        .is_none_or(|total| total > parent.amount)
+    {
         return Err(KernelError::new(
             ErrorCode::ResourceExhausted,
             RetryClass::Safe,
@@ -332,6 +343,15 @@ pub async fn recover_unknown(
     new_fencing_token: u64,
 ) -> errors::Result<ReservationRow> {
     let row = txn.resources().get(id).await?.ok_or_else(|| missing(id))?;
+    // Re-fencing only moves forward: an equal or lower token could name
+    // the same external owner that left the row uncertain.
+    if new_fencing_token <= row.fencing_token {
+        return Err(KernelError::new(
+            ErrorCode::FailedPrecondition,
+            RetryClass::Never,
+            "recovery fencing token must exceed the previous owner",
+        ));
+    }
     let won = txn
         .resources()
         .cas_transition(

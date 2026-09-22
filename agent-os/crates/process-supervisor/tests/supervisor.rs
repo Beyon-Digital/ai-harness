@@ -194,6 +194,38 @@ async fn descendants_are_killed_with_the_process_group() {
 }
 
 #[tokio::test]
+async fn descendants_are_reaped_when_the_leader_exits_first() {
+    // The leader spawns a descendant, reports its pid, and exits
+    // cooperatively — the group still holds the descendant and must be
+    // swept after the leader's exit.
+    let mut child = spawn(&spec("/bin/sh", "sleep 600 & echo $! >&2; exit 0")).expect("spawn");
+    let mut pid_text = String::new();
+    loop {
+        let mut byte = [0u8; 1];
+        child
+            .stderr
+            .as_mut()
+            .expect("stderr pipe")
+            .read_exact(&mut byte)
+            .expect("read pid");
+        if byte[0] == b'\n' {
+            break;
+        }
+        pid_text.push(byte[0] as char);
+    }
+    let descendant: i32 = pid_text.trim().parse().expect("descendant pid");
+    let reason = terminate(child, Duration::from_millis(300)).await;
+    assert!(matches!(reason, ExitReason::Exited(0)));
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(descendant.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(!alive, "descendant {descendant} outlived terminate");
+}
+
+#[tokio::test]
 async fn handshake_verifies_identity_and_digest() {
     // A fixture that ignores the bootstrap and writes a canned Hello frame.
     let ids = DeterministicIds::new(SEED);

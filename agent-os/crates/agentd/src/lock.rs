@@ -55,6 +55,8 @@ pub struct DaemonLock {
     path: PathBuf,
 }
 
+impl control_api::uds::DaemonLockHeld for DaemonLock {}
+
 impl DaemonLock {
     /// Acquires the exclusive lock on `<runtime_dir>/agentd.lock`.
     ///

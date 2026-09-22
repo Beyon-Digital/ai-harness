@@ -46,7 +46,10 @@ async fn publish_consume_ack_happy_path() {
         .expect("publish");
     assert_eq!(result.message_id, "m-1");
 
-    let deliveries = queue.consume(&consume("worker", 1)).await.expect("consume");
+    let deliveries = queue
+        .consume(&consume("stream-a", 1))
+        .await
+        .expect("consume");
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].message_id, "m-1");
     assert_eq!(deliveries[0].payload, b"payload-1");
@@ -56,7 +59,7 @@ async fn publish_consume_ack_happy_path() {
         .await
         .expect("ack");
     // Acked messages are gone; nothing redelivers.
-    let again = queue.consume(&consume("worker", 1)).await.expect("empty");
+    let again = queue.consume(&consume("stream-a", 1)).await.expect("empty");
     assert!(again.is_empty());
 }
 
@@ -67,12 +70,12 @@ async fn nack_redelivers_the_message() {
         .publish(publish("s", "m-1", b"x"))
         .await
         .expect("publish");
-    let first = queue.consume(&consume("w", 1)).await.expect("consume");
+    let first = queue.consume(&consume("s", 1)).await.expect("consume");
     queue
         .nack(&nack(&first[0].delivery_id))
         .await
         .expect("nack");
-    let second = queue.consume(&consume("w", 1)).await.expect("reconsume");
+    let second = queue.consume(&consume("s", 1)).await.expect("reconsume");
     assert_eq!(second[0].message_id, "m-1");
     assert_ne!(second[0].delivery_id, first[0].delivery_id);
     queue.ack(&ack(&second[0].delivery_id)).await.expect("ack");
@@ -93,7 +96,7 @@ async fn bounded_capacity_applies_backpressure() {
         .expect_err("capacity");
     assert_eq!(err.code(), ErrorCode::ResourceExhausted);
     // Space frees once an in-flight delivery is acked.
-    let d = queue.consume(&consume("w", 1)).await.expect("consume");
+    let d = queue.consume(&consume("s", 1)).await.expect("consume");
     queue.ack(&ack(&d[0].delivery_id)).await.expect("ack");
     queue
         .publish(publish("s", "m-overflow", b"x"))
@@ -136,4 +139,57 @@ async fn capabilities_truthfully_report_non_durable() {
     assert!(!caps.durable);
     assert!(!caps.replay);
     assert!(!caps.cross_restart);
+}
+
+#[tokio::test]
+async fn subscriptions_only_drain_their_own_channel() {
+    let queue = InMemoryQueue::default();
+    queue
+        .publish(publish("stream-a", "m-a", b"a"))
+        .await
+        .expect("a");
+    queue
+        .publish(publish("stream-b", "m-b", b"b"))
+        .await
+        .expect("b");
+    // A consumer on stream-b never sees stream-a's message.
+    let deliveries = queue
+        .consume(&consume("stream-b", 2))
+        .await
+        .expect("consume");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].message_id, "m-b");
+    let rest = queue.consume(&consume("stream-b", 2)).await.expect("empty");
+    assert!(rest.is_empty());
+    // stream-a's message is still pending for its own consumer.
+    let deliveries = queue
+        .consume(&consume("stream-a", 1))
+        .await
+        .expect("consume");
+    assert_eq!(deliveries[0].message_id, "m-a");
+}
+
+#[tokio::test]
+async fn republish_after_ack_replays_without_redelivery() {
+    let queue = InMemoryQueue::default();
+    queue
+        .publish(publish("s", "m-1", b"x"))
+        .await
+        .expect("publish");
+    let d = queue.consume(&consume("s", 1)).await.expect("consume");
+    queue.ack(&ack(&d[0].delivery_id)).await.expect("ack");
+    // Producer retry after ack: idempotent replay, no redelivery.
+    let replay = queue
+        .publish(publish("s", "m-1", b"x"))
+        .await
+        .expect("replay");
+    assert_eq!(replay.message_id, "m-1");
+    let deliveries = queue.consume(&consume("s", 1)).await.expect("empty");
+    assert!(deliveries.is_empty(), "acked message must not redeliver");
+    // Same id with a different payload still conflicts after ack.
+    let err = queue
+        .publish(publish("s", "m-1", b"changed"))
+        .await
+        .expect_err("conflict");
+    assert_eq!(err.code(), ErrorCode::Conflict);
 }

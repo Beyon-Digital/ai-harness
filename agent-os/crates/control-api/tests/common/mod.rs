@@ -175,6 +175,8 @@ pub async fn wait_ready(path: &std::path::Path) {
 #[derive(Debug)]
 pub struct FakeLock;
 
+impl control_api::uds::DaemonLockHeld for FakeLock {}
+
 pub fn counted_envelope(rig: &Rig, key: &str, payload: Vec<u8>) -> CommandRequest {
     CommandRequest {
         command_id: CommandId::new(rig.ids.as_ref()).to_string(),

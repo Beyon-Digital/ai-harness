@@ -19,13 +19,14 @@ use command_coordinator::CommandCoordinator;
 use command_coordinator::envelope::CommandEnvelope;
 use command_coordinator::envelope::RequestDigest;
 use domain::ids::{
-    CommandId, DelegationChainId, DeviceId, EffectId, IdempotencyKey, PrincipalId, RunId, TaskId,
+    CommandId, DelegationChainId, EffectId, IdempotencyKey, PrincipalId, RunId, TaskId,
 };
 use domain::provider::IdProvider;
 use errors::KernelError;
 use errors::codes::{ErrorCode, RetryClass};
 use kernel_store::KernelStore;
 use prost::Message;
+use sha2::{Digest, Sha256};
 use tokio::net::UnixStream;
 use tonic::transport::server::Connected;
 use tonic::{Code, Request, Response, Status};
@@ -263,15 +264,11 @@ impl MvpControlApi for ControlApiService {
             idempotency_key: IdempotencyKey::from_str(&req.idempotency_key)
                 .map_err(|_| Status::invalid_argument("idempotency_key is malformed"))?,
             principal_id: actor.principal_id,
-            actor_id: parse_id("actor_id", &req.actor_id)?,
-            device_id: if req.device_id.is_empty() {
-                None
-            } else {
-                Some(
-                    DeviceId::from_str(&req.device_id)
-                        .map_err(|_| Status::invalid_argument("device_id is malformed"))?,
-                )
-            },
+            // Identity is never caller-asserted: the actor is minted
+            // server-side per command and the device is unset — a local
+            // peer cannot act under another actor's or device's identity.
+            actor_id: domain::ids::ActorId::new(self.ids.as_ref()),
+            device_id: None,
             // The operator self-chain is granted only to commands that
             // declare an operator capability (`effect.resolve_unknown`) —
             // attaching it to every command would widen what a mapped uid
@@ -536,8 +533,21 @@ impl MvpControlApi for ControlApiService {
         &self,
         request: Request<ApprovalResponseRequest>,
     ) -> Result<Response<ApprovalResponseResult>, Status> {
-        let actor = self.actor_for(&request, "")?;
+        let actor = self.actor_for(&request, &request.get_ref().responder_principal_id)?;
         let req = request.into_inner();
+        // The responder principal is transport-derived, not caller-claimed:
+        // `responder_principal_id` comes from `actor_for` (peer creds). The
+        // `device_id` is audit metadata the domain requires — recorded as
+        // the claimed responding device, carried identically in payload and
+        // envelope so the handler's consistency check holds.
+        let device_id = if req.device_id.is_empty() {
+            None
+        } else {
+            Some(parse_id::<domain::ids::DeviceId>(
+                "device_id",
+                &req.device_id,
+            )?)
+        };
         let payload = domain::generated::contract::RespondApproval {
             request_id: req.request_id.clone(),
             request_digest: req.request_digest.clone(),
@@ -545,8 +555,17 @@ impl MvpControlApi for ControlApiService {
             device_id: req.device_id.clone(),
             responder_principal_id: actor.principal_id.to_string(),
         };
+        let encoded = payload.encode_to_vec();
         let request_id = parse_id::<domain::ids::ApprovalRequestId>("request_id", &req.request_id)?;
+        // The idempotency key stays stable per approval request, but the
+        // envelope digest binds the full response payload — an identical
+        // retry replays, a changed decision/device conflicts instead of
+        // replaying the first outcome.
         let digest_hex = req.request_digest.clone();
+        let response_digest: String = Sha256::digest(&encoded)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let envelope = CommandEnvelope {
             command_id: CommandId::new(self.ids.as_ref()),
             idempotency_key: IdempotencyKey::new(format!(
@@ -555,19 +574,15 @@ impl MvpControlApi for ControlApiService {
             .map_err(|_| Status::invalid_argument("idempotency key invalid"))?,
             principal_id: actor.principal_id,
             actor_id: domain::ids::ActorId::new(self.ids.as_ref()),
-            device_id: if req.device_id.is_empty() {
-                None
-            } else {
-                Some(parse_id("device_id", &req.device_id)?)
-            },
+            device_id,
             delegation_chain_id: None,
-            request_digest: RequestDigest::from_str(&digest_hex)
+            request_digest: RequestDigest::from_str(&response_digest)
                 .map_err(|_| Status::invalid_argument("request_digest is malformed"))?,
             correlation_id: None,
             causation_id: None,
             deadline_unix_ms: None,
             command_type: "agentos.spec.v1.RespondApproval".to_owned(),
-            payload: payload.encode_to_vec(),
+            payload: encoded,
         };
         self.coordinator
             .execute(envelope)

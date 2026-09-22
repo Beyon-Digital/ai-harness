@@ -428,3 +428,32 @@ async fn replay_with_different_fencing_token_conflicts() {
     txn.rollback().await.expect("rollback");
     assert_eq!(err.code(), ErrorCode::Conflict);
 }
+
+#[tokio::test]
+async fn recover_unknown_requires_a_higher_fencing_token() {
+    let h = Harness::new().await;
+    let run = h.seed_run().await;
+    let child = h
+        .reserve(run, ResourceUnit::SandboxSlots, 1, None, 7)
+        .await
+        .expect("reserve");
+    let mut txn = h.write().await;
+    resources::mark_unknown(txn.as_mut(), &h.env(), child.reservation_id)
+        .await
+        .expect("unknown");
+    txn.commit().await.expect("commit");
+    // Equal or lower tokens could re-arm the same stale owner — rejected.
+    for token in [7u64, 3] {
+        let mut txn = h.write().await;
+        let err = resources::recover_unknown(txn.as_mut(), &h.env(), child.reservation_id, token)
+            .await
+            .expect_err("stale token must not recover");
+        assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+        txn.rollback().await.expect("rollback");
+    }
+    let mut txn = h.write().await;
+    resources::recover_unknown(txn.as_mut(), &h.env(), child.reservation_id, 8)
+        .await
+        .expect("higher token recovers");
+    txn.commit().await.expect("commit");
+}

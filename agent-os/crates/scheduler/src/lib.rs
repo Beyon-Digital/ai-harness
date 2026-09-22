@@ -242,6 +242,10 @@ pub async fn claim(
 /// or a `Claimed` row left behind by a dead daemon epoch (reclaimed via
 /// `Claimed -> Claimed` CAS, which bumps `version` and re-fences).
 ///
+/// `exclude` skips timer ids the caller has already deferred this epoch —
+/// a permanently failing claim otherwise stays the earliest due row and
+/// would starve every later timer.
+///
 /// Returns the owned `Claimed` row ready to fire, or `None` when nothing
 /// due can be claimed this pass.
 pub async fn claim_next_due(
@@ -250,8 +254,12 @@ pub async fn claim_next_due(
     now_ms: i64,
     owner: &str,
     daemon_epoch: u64,
+    exclude: &std::collections::HashSet<TimerId>,
 ) -> errors::Result<Option<TimerRow>> {
     for row in txn.timers().list_due(now_ms).await? {
+        if exclude.contains(&row.timer_id) {
+            continue;
+        }
         match row.state {
             TimerState::Claimed
                 if row.claim_owner.as_deref() == Some(owner)
@@ -259,6 +267,16 @@ pub async fn claim_next_due(
             {
                 // We hold this claim already; fire is pending.
                 return Ok(Some(row));
+            }
+            TimerState::Claimed
+                if row
+                    .claim_daemon_epoch
+                    .is_some_and(|epoch| epoch >= daemon_epoch) =>
+            {
+                // A live claim: another worker under our epoch, or a newer
+                // epoch (in which case *we* are the stale side — fencing
+                // never moves backwards). Skip it rather than stealing.
+                continue;
             }
             TimerState::Claimed => {
                 // Stale claim from a dead epoch: re-fence to us.
