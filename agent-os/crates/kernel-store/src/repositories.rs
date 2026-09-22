@@ -239,6 +239,10 @@ pub trait ConfigRead: Send + Sync {
         &mut self,
         id: ConfigGenerationId,
     ) -> Result<Option<ConfigGenerationRow>>;
+    async fn get_generation_by_digest(
+        &mut self,
+        digest: &str,
+    ) -> Result<Option<ConfigGenerationRow>>;
     async fn get_active(&mut self) -> Result<Option<ActiveConfigGenerationRow>>;
 }
 

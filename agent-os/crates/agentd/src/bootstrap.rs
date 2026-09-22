@@ -543,6 +543,7 @@ async fn bootstrap_config(
             .collect::<String>()
     );
     let mut expected_revision = 0u64;
+    let mut reactivate: Option<String> = None;
     if let Some(active_id) = read_active_generation(store.clone()).await? {
         let mut txn = store.begin_read().await?;
         let active = txn
@@ -563,30 +564,43 @@ async fn bootstrap_config(
             return Ok(Some(active_id));
         }
         expected_revision = pointer.map(|p| p.revision).unwrap_or(0);
+        // Identical bytes already have a generation row (digests are
+        // unique) — reactivating it is a rollback, not a new proposal.
+        reactivate = txn
+            .config()
+            .get_generation_by_digest(&digest)
+            .await?
+            .map(|g| g.generation_id.to_string());
         tracing::info!(
             generation_id = active_id,
-            "config document changed — proposing a new generation"
+            reactivate = reactivate.is_some(),
+            "config document changed"
         );
     }
-    let outcome = submit(
-        &coordinator,
-        ids.as_ref(),
-        principal,
-        actor,
-        config_engine::commands::CMD_PROPOSE_CONFIG,
-        contract::ProposeConfigGeneration {
-            generation_id: String::new(),
-            document_bytes: document,
-            digest: digest.clone(),
+    let generation_id = match reactivate {
+        Some(existing) => existing,
+        None => {
+            let outcome = submit(
+                &coordinator,
+                ids.as_ref(),
+                principal,
+                actor,
+                config_engine::commands::CMD_PROPOSE_CONFIG,
+                contract::ProposeConfigGeneration {
+                    generation_id: String::new(),
+                    document_bytes: document,
+                    digest: digest.clone(),
+                }
+                .encode_to_vec(),
+                // Digest+revision scoped key: a different document must not
+                // collide with an earlier boot's idempotency record.
+                format!("config.propose.boot.{digest}.{expected_revision}"),
+            )
+            .await?;
+            String::from_utf8(outcome.payload)
+                .map_err(|_| boot_error("propose outcome is not a generation id"))?
         }
-        .encode_to_vec(),
-        // Digest-scoped key: booting with a different document must not
-        // collide with an earlier boot's idempotency record.
-        format!("config.propose.boot.{digest}"),
-    )
-    .await?;
-    let generation_id = String::from_utf8(outcome.payload)
-        .map_err(|_| boot_error("propose outcome is not a generation id"))?;
+    };
     submit(
         &coordinator,
         ids.as_ref(),
@@ -614,7 +628,10 @@ async fn bootstrap_config(
             expected_active_revision: expected_revision,
         }
         .encode_to_vec(),
-        format!("config.activate.{generation_id}"),
+        // Revision-scoped: reactivating a generation after a later
+        // transition (rollback) carries a new expected revision and needs
+        // a fresh key; retries within one transition still replay.
+        format!("config.activate.{generation_id}.{expected_revision}"),
     )
     .await?;
     let _ = clock;

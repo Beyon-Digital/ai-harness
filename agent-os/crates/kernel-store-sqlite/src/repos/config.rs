@@ -108,6 +108,22 @@ impl ConfigRead for SqliteConfigRepo {
         row.as_ref().map(decode_generation).transpose()
     }
 
+    async fn get_generation_by_digest(
+        &mut self,
+        digest: &str,
+    ) -> errors::Result<Option<ConfigGenerationRow>> {
+        let mut guard = self.conn.lock().await;
+        let row = sqlx::query(
+            "SELECT generation_id, digest, document, validation_state, test_state, \
+             created_by_actor_id, created_at_ms FROM config_generations WHERE digest = ?1",
+        )
+        .bind(digest.to_owned())
+        .fetch_optional(guard.connection()?)
+        .await
+        .map_err(mapping::from_sqlx)?;
+        row.as_ref().map(decode_generation).transpose()
+    }
+
     async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>> {
         let mut guard = self.conn.lock().await;
         let row = sqlx::query(

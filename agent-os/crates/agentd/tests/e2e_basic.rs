@@ -136,12 +136,19 @@ async fn e2e_restart_with_changed_config_activates_new_generation() {
 
     let daemon = boot_daemon_with(
         &runtime_dir,
-        vec![bundle],
+        vec![bundle.clone()],
         HashMap::new(),
         HashMap::new(),
         alt.to_str().unwrap(),
     )
     .await;
+    daemon.initiate_shutdown();
+    daemon.wait().await.expect("clean shutdown");
+
+    // Rollback: restoring the original document must mint a fresh
+    // generation, not replay the retired one through the same
+    // idempotency records.
+    let daemon = boot_daemon(&runtime_dir, vec![bundle]).await;
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 }
