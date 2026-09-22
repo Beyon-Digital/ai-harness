@@ -112,6 +112,8 @@ impl Rig {
 #[derive(Debug)]
 struct FakeLock;
 
+impl control_api::uds::DaemonLockHeld for FakeLock {}
+
 fn digest_hex(tag: &str) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(tag.as_bytes())

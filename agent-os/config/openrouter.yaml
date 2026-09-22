@@ -39,6 +39,26 @@ profiles:
     agent_loop: fixture-loop
     effect_execute: 01905c5e-0000-7000-8000-00000000e001@1
 
+  # ACP agent loop: the run task is forwarded as `session/prompt` to an
+  # ACP-compatible agent CLI (ACP_COMMAND/ACP_ARGS on the daemon), e.g.
+  # `gemini --acp`, `claude-code acp`, or the echo-acp fixture.
+  acp-local:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90003@1
+    effect_execute: 01905c5e-0000-7000-8000-11a7c3d90002@1
+
+  # MCP-enabled agent: same OpenRouter loop, but the task envelope's
+  # `tools: true` unlocks `{"mcp_call": ...}` replies routed through the
+  # Effect Coordinator to MCP_SERVERS-configured tool servers.
+  mcp-enabled:
+    sandbox: local-process-t0
+    workspace: local-workspace
+    artifact_store: local-artifacts
+    agent_loop: 01905c5e-0000-7000-8000-11a7c3d90001@1
+    effect_execute: 01905c5e-0000-7000-8000-11a7c3d90002@1
+
 policies:
   sandbox:
     minimum_untrusted_tier: T2_UNTRUSTED

@@ -21,7 +21,14 @@
 //!   only sent to OpenRouter. `OPENROUTER_ALLOW_ANY_BASE_URL=1` opts out.
 //! - `OPENROUTER_SITE`, `OPENROUTER_APP_NAME` — optional referer headers.
 //! - `OPENROUTER_TIMEOUT_MS` — HTTP timeout (default 55000).
+//! - `MCP_SERVERS` — JSON map of MCP server name → stdio/HTTP spec;
+//!   enables `mcp.list_tools`/`mcp.call_tool`/`mcp.read_resource`
+//!   payloads (`{"op": "mcp.*", "server": <name>, ...}`).
+//! - `MCP_TIMEOUT_MS` — per-call MCP timeout (default 30000), kept
+//!   separate from the model timeout.
 //! - `FIXTURE_STORE` — durable store path (default `openrouter-effect-store.json`).
+
+mod mcp;
 
 use std::collections::BTreeMap;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -55,9 +62,14 @@ struct LlmConfig {
     api_key: String,
     default_model: String,
     base_url: String,
+    allow_any: bool,
     site: Option<String>,
     app_name: Option<String>,
     timeout: Duration,
+    /// Timeout for `mcp.*` effect calls — distinct from the model
+    /// timeout so a hung tool server doesn't hold a turn as long as
+    /// a slow completion may legitimately take.
+    mcp_timeout: Duration,
 }
 
 fn run() -> std::io::Result<()> {
@@ -92,23 +104,17 @@ fn run() -> std::io::Result<()> {
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned())
         .trim_end_matches('/')
         .to_owned();
-    if env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() != Ok("1") {
-        let host = base_url
-            .strip_prefix("https://")
-            .and_then(|rest| rest.split('/').next())
-            .and_then(|h| h.split(':').next())
-            .unwrap_or_default();
-        if !(host == "openrouter.ai" || host.ends_with(".openrouter.ai")) {
-            return Err(err_msg(
-                "OPENROUTER_BASE_URL must be https on openrouter.ai \
-                 (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)",
-            ));
-        }
+    let allow_any = env("OPENROUTER_ALLOW_ANY_BASE_URL").as_deref() == Ok("1");
+    if !allow_any && let Err(e) = endpoint_allowed(&base_url) {
+        return Err(err_msg(format!(
+            "OPENROUTER_BASE_URL {e} (or set OPENROUTER_ALLOW_ANY_BASE_URL=1)"
+        )));
     }
     let config = LlmConfig {
         api_key: env("OPENROUTER_API_KEY").unwrap_or_default(),
         default_model: env("OPENROUTER_MODEL").unwrap_or_else(|_| "openrouter/free".to_owned()),
         base_url,
+        allow_any,
         site: env("OPENROUTER_SITE").ok(),
         app_name: env("OPENROUTER_APP_NAME").ok(),
         timeout: env("OPENROUTER_TIMEOUT_MS")
@@ -116,6 +122,11 @@ fn run() -> std::io::Result<()> {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(55_000)),
+        mcp_timeout: env("MCP_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(30_000)),
     };
     let store_path =
         env("FIXTURE_STORE").unwrap_or_else(|_| "openrouter-effect-store.json".to_owned());
@@ -236,13 +247,87 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
             String::new(),
         );
     }
-    if config.api_key.is_empty() {
-        return fail("missing_openrouter_api_key");
-    }
     let Ok(payload) = serde_json::from_slice::<Value>(&req.payload) else {
         return fail("invalid_argument");
     };
+    // `mcp.*` payloads dispatch to the MCP client — they don't touch
+    // the model provider and don't need its API key.
+    if mcp::is_mcp_payload(&payload) {
+        return match mcp::call(&payload, config.mcp_timeout) {
+            Ok(text) => {
+                let result_ref = data_uri(&text);
+                store.insert(
+                    req.operation_id.clone(),
+                    OpRecord {
+                        status: "succeeded".to_owned(),
+                        result_ref: result_ref.clone(),
+                        error_code: String::new(),
+                    },
+                );
+                save_store(store_path, &store);
+                (
+                    EffectExecutionResponse {
+                        effect_id: req.effect_id,
+                        status: "succeeded".to_owned(),
+                        result_ref,
+                        provider_operation_ref: req.operation_id,
+                        error_code: String::new(),
+                    }
+                    .encode_to_vec(),
+                    String::new(),
+                )
+            }
+            Err(code) => fail(&code),
+        };
+    }
+    // Per-request endpoint override: the GUI sends `base_url` when a
+    // custom OpenAI-compatible provider is selected. Same guard as the
+    // env default — https on openrouter.ai unless the operator opted out
+    // with OPENROUTER_ALLOW_ANY_BASE_URL=1 — so an effect payload cannot
+    // exfiltrate the API key to an arbitrary host.
+    let base_url = match payload.get("base_url").and_then(Value::as_str) {
+        Some(url) => {
+            let url = url.trim_end_matches('/').to_owned();
+            if !config.allow_any
+                && let Err(e) = endpoint_allowed(&url)
+            {
+                return fail(&format!("base_url {e}"));
+            }
+            url
+        }
+        None => config.base_url.clone(),
+    };
+    // Per-request credential reference: `api_key_env` names a daemon env
+    // var (allowlisted `PROVIDER_KEY_*` prefix) holding the key — the
+    // secret itself never enters the durable effect payload.
+    let api_key = match payload.get("api_key_env").and_then(Value::as_str) {
+        Some(name) => {
+            // Only PROVIDER_KEY_*-prefixed daemon env vars may be named as
+            // credential holders — an unrestricted selector could repurpose
+            // any adapter env var as a model credential.
+            if !name.starts_with("PROVIDER_KEY_")
+                || name.len() == "PROVIDER_KEY_".len()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
+                return fail("api_key_env_invalid");
+            }
+            match env(name) {
+                Ok(v) if !v.is_empty() => v,
+                _ => return fail(&format!("api_key_env {name} not set")),
+            }
+        }
+        None => config.api_key.clone(),
+    };
+    if api_key.is_empty() {
+        return fail("missing_openrouter_api_key");
+    }
     let mut body = payload.clone();
+    if let Some(map) = body.as_object_mut() {
+        map.remove("base_url");
+        map.remove("api_key_env");
+    }
     if body.get("model").is_none() {
         body["model"] = Value::String(config.default_model.clone());
     }
@@ -250,7 +335,7 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
         return fail("invalid_argument");
     }
 
-    match call_chat(config, &body) {
+    match call_chat(config, &base_url, &api_key, &body) {
         Ok(content) => {
             let result_ref = data_uri(&content);
             store.insert(
@@ -299,15 +384,38 @@ fn status(req: EffectStatusRequest, store_path: &str) -> (Vec<u8>, String) {
     )
 }
 
-fn call_chat(config: &LlmConfig, body: &Value) -> Result<String, String> {
-    let url = format!("{}/chat/completions", config.base_url);
+/// SSRF guard for provider endpoints: https on openrouter.ai or a
+/// subdomain. Anything else requires the operator opt-out.
+fn endpoint_allowed(url: &str) -> Result<(), String> {
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|h| h.split(':').next())
+        .unwrap_or_default();
+    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
+        Ok(())
+    } else {
+        Err("must be https on openrouter.ai".to_owned())
+    }
+}
+
+fn call_chat(
+    config: &LlmConfig,
+    base_url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<String, String> {
+    let url = format!("{base_url}/chat/completions");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
+        // Never follow redirects — a 3xx to an attacker host would
+        // otherwise forward the provider Authorization header.
+        .max_redirects(0)
         .build()
         .into();
     let mut req = agent
         .post(&url)
-        .header("Authorization", &format!("Bearer {}", config.api_key))
+        .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json");
     if let Some(site) = &config.site {
         req = req.header("HTTP-Referer", site);
@@ -322,10 +430,25 @@ fn call_chat(config: &LlmConfig, body: &Value) -> Result<String, String> {
         .body_mut()
         .read_json()
         .map_err(|_| "provider_bad_response".to_owned())?;
-    payload["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "provider_bad_response".to_owned())
+    let message = &payload["choices"][0]["message"];
+    if let Some(text) = message["content"].as_str() {
+        return Ok(text.to_owned());
+    }
+    // Some providers return segmented content or reasoning-only replies.
+    if let Some(parts) = message["content"].as_array() {
+        let text = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    if let Some(text) = message["reasoning"].as_str().filter(|s| !s.is_empty()) {
+        return Ok(text.to_owned());
+    }
+    Err("provider_bad_response".to_owned())
 }
 
 fn data_uri(text: &str) -> String {
@@ -373,6 +496,49 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
-fn err_msg(msg: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_owned())
+fn err_msg(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The MCP dispatch path drives a real `echo-mcp` subprocess through
+    /// `MCP_SERVERS` — covers the stdio transport + result flattening the
+    /// daemon relies on for `mcp.*` effects.
+    #[test]
+    fn mcp_call_tool_against_echo_server() {
+        let echo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/echo-mcp");
+        assert!(
+            std::path::Path::new(echo).exists(),
+            "echo-mcp binary missing — run `cargo build -p echo-mcp` first"
+        );
+        // SAFETY: single-threaded access in this test binary; no other
+        // test reads MCP_SERVERS.
+        unsafe {
+            std::env::set_var(
+                "MCP_SERVERS",
+                format!(r#"{{"echo": {{"command": "{echo}"}}}}"#),
+            );
+        }
+        let out = mcp::call(
+            &serde_json::json!({
+                "op": "mcp.call_tool",
+                "server": "echo",
+                "tool": "echo",
+                "arguments": {"text": "mcp-ok"},
+            }),
+            Duration::from_secs(15),
+        )
+        .expect("mcp.call_tool");
+        assert_eq!(out, "mcp-ok");
+
+        let err = mcp::call(
+            &serde_json::json!({"op": "mcp.list_tools", "server": "ghost"}),
+            Duration::from_secs(5),
+        )
+        .expect_err("ghost server must fail");
+        assert!(err.contains("not in MCP_SERVERS"), "{err}");
+    }
 }

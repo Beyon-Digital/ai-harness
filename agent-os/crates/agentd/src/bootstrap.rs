@@ -313,6 +313,8 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
             principal,
             actor,
             path,
+            journal.clone(),
+            epoch,
         )
         .await?
     } else {
@@ -520,8 +522,12 @@ fn compute_digest(dir: &Path) -> errors::Result<String> {
     adapter_registry::registry::compute_bundle_digest(dir, &manifest_digest)
 }
 
-/// Proposes, smoke-tests, and activates `path` as the config generation
-/// when the store has no active generation.
+/// Proposes, smoke-tests, and activates `path` as the config
+/// generation. With no active generation the file seeds the runtime;
+/// with one, a *different* document activates as a new generation —
+/// a restarted `--config` is a deliberate operator transition, while
+/// an identical file is an idempotent no-op.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_config(
     store: Arc<SqliteKernelStore>,
     coordinator: Arc<CommandCoordinator>,
@@ -530,10 +536,9 @@ async fn bootstrap_config(
     principal: PrincipalId,
     actor: ActorId,
     path: &Path,
+    journal: Arc<dyn events::journal::EventJournalPort>,
+    epoch: u64,
 ) -> errors::Result<Option<String>> {
-    if let Some(active) = read_active_generation(store.clone()).await? {
-        return Ok(Some(active));
-    }
     let document = std::fs::read(path).map_err(|e| io("read config doc", &e))?;
     let digest = format!(
         "sha256:{}",
@@ -542,23 +547,77 @@ async fn bootstrap_config(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
-    let outcome = submit(
-        &coordinator,
-        ids.as_ref(),
-        principal,
-        actor,
-        config_engine::commands::CMD_PROPOSE_CONFIG,
-        contract::ProposeConfigGeneration {
-            generation_id: String::new(),
-            document_bytes: document,
-            digest,
+    let mut expected_revision = 0u64;
+    let mut reactivate: Option<String> = None;
+    if let Some(active_id) = read_active_generation(store.clone()).await? {
+        let mut txn = store.begin_read().await?;
+        let active = txn
+            .config()
+            .get_generation(
+                domain::ids::ConfigGenerationId::from_str(&active_id)
+                    .map_err(|_| boot_error("active generation id malformed"))?,
+            )
+            .await?;
+        let pointer = txn.config().get_active().await?;
+        if let Some(gen_row) = &active
+            && gen_row.digest == digest
+        {
+            tracing::info!(
+                generation_id = active_id,
+                "config document unchanged — keeping active generation"
+            );
+            return Ok(Some(active_id));
         }
-        .encode_to_vec(),
-        "config.propose.boot".to_owned(),
-    )
-    .await?;
-    let generation_id = String::from_utf8(outcome.payload)
-        .map_err(|_| boot_error("propose outcome is not a generation id"))?;
+        expected_revision = pointer.map(|p| p.revision).unwrap_or(0);
+        // Identical bytes already have a generation row (digests are
+        // unique) — reactivating it is a rollback, not a new proposal.
+        reactivate = txn
+            .config()
+            .get_generation_by_digest(&digest)
+            .await?
+            .map(|g| g.generation_id.to_string());
+        drop(txn);
+        tracing::info!(
+            generation_id = active_id,
+            reactivate = reactivate.is_some(),
+            "config document changed"
+        );
+    }
+    // A digest match means the generation exists — but only a generation
+    // that previously HELD the active pointer is a rollback; a merely
+    // proposed/tested generation taking the pointer for the first time is
+    // an ordinary activation.
+    let is_rollback = match &reactivate {
+        Some(id) => {
+            generation_previously_active(&store, ids.as_ref(), epoch, principal, &journal, id)
+                .await?
+        }
+        None => false,
+    };
+    let generation_id = match reactivate {
+        Some(existing) => existing,
+        None => {
+            let outcome = submit(
+                &coordinator,
+                ids.as_ref(),
+                principal,
+                actor,
+                config_engine::commands::CMD_PROPOSE_CONFIG,
+                contract::ProposeConfigGeneration {
+                    generation_id: String::new(),
+                    document_bytes: document,
+                    digest: digest.clone(),
+                }
+                .encode_to_vec(),
+                // Digest+revision scoped key: a different document must not
+                // collide with an earlier boot's idempotency record.
+                format!("config.propose.boot.{digest}.{expected_revision}"),
+            )
+            .await?;
+            String::from_utf8(outcome.payload)
+                .map_err(|_| boot_error("propose outcome is not a generation id"))?
+        }
+    };
     submit(
         &coordinator,
         ids.as_ref(),
@@ -575,23 +634,108 @@ async fn bootstrap_config(
         format!("config.test.{generation_id}"),
     )
     .await?;
-    submit(
-        &coordinator,
-        ids.as_ref(),
-        principal,
-        actor,
-        config_engine::commands::CMD_ACTIVATE_CONFIG,
-        contract::ActivateConfigGeneration {
-            generation_id: generation_id.clone(),
-            expected_active_revision: 0,
-        }
-        .encode_to_vec(),
-        format!("config.activate.{generation_id}"),
-    )
-    .await?;
+    if is_rollback {
+        // Moving the pointer back to a previously-active generation is a
+        // rollback — emit `ConfigRolledBack`, not `ConfigActivated`.
+        submit(
+            &coordinator,
+            ids.as_ref(),
+            principal,
+            actor,
+            config_engine::commands::CMD_ROLLBACK_CONFIG,
+            contract::RollbackConfigGeneration {
+                generation_id: generation_id.clone(),
+                expected_active_revision: expected_revision,
+                reason: "boot --config restore".to_owned(),
+            }
+            .encode_to_vec(),
+            format!("config.rollback.{generation_id}.{expected_revision}"),
+        )
+        .await?;
+    } else {
+        submit(
+            &coordinator,
+            ids.as_ref(),
+            principal,
+            actor,
+            config_engine::commands::CMD_ACTIVATE_CONFIG,
+            contract::ActivateConfigGeneration {
+                generation_id: generation_id.clone(),
+                expected_active_revision: expected_revision,
+            }
+            .encode_to_vec(),
+            // Revision-scoped: retries within one transition replay, a
+            // later transition gets a fresh key.
+            format!("config.activate.{generation_id}.{expected_revision}"),
+        )
+        .await?;
+    }
     let _ = clock;
-    tracing::info!(generation_id, "initial config generation activated");
+    tracing::info!(generation_id, "config generation activated");
     Ok(Some(generation_id))
+}
+
+/// Decides whether `generation_id` ever held the active pointer —
+/// distinguishing a true rollback (emit `ConfigRolledBack`) from the
+/// first activation of a proposed/tested generation (emit
+/// `ConfigActivated`). Committed-but-unpublished outbox rows are
+/// authoritative (the journal is an async projection that can lag a
+/// shutdown), so both are scanned.
+async fn generation_previously_active(
+    store: &Arc<SqliteKernelStore>,
+    ids: &dyn IdProvider,
+    epoch: u64,
+    principal: PrincipalId,
+    journal: &Arc<dyn events::journal::EventJournalPort>,
+    generation_id: &str,
+) -> errors::Result<bool> {
+    let names_activation = |event_type: &str| {
+        event_type.ends_with("ConfigActivated") || event_type.ends_with("ConfigRolledBack")
+    };
+    let payload_names = |payload: &[u8]| {
+        contract::ConfigGeneration::decode(payload)
+            .map(|g| g.generation_id == generation_id)
+            .unwrap_or(false)
+    };
+    let config_key = events::stream::StreamKey::config_global();
+    // Journal first: a prior activation is normally already published
+    // (drained during that uptime), so the fast path avoids touching the
+    // outbox at all.
+    let mut from = 0u64;
+    loop {
+        let page = journal.read_stream(&config_key, from, 512).await?;
+        if page.events.is_empty() {
+            break;
+        }
+        for event in &page.events {
+            from = event.sequence;
+            if names_activation(&event.event_type) && payload_names(&event.payload) {
+                return Ok(true);
+            }
+        }
+    }
+    // Outbox second — only reached when the journal shows nothing, which
+    // is the crash/immediate-shutdown path where a committed activation
+    // event may still be staged. Read-only scan, rolled back after.
+    let mut txn = store
+        .begin_write(TxContext {
+            daemon_epoch: epoch,
+            principal_id: principal,
+            command_id: domain::ids::CommandId::new(ids),
+            correlation_id: None,
+        })
+        .await?;
+    let pending = txn.streams().scan_unpublished(u32::MAX).await?;
+    txn.rollback().await?;
+    for row in &pending {
+        if row.stream_key.as_str() == config_key.as_str()
+            && names_activation(&row.event_type)
+            && payload_names(&row.payload)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Reads the active generation id, when one is set.

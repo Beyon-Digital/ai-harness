@@ -535,13 +535,19 @@ impl RunWorker {
                 })
             })
             .collect();
+        // Honor the profile's `agent_loop` binding: pin resolution to
+        // that adapter id so a run bound to `acp-local` actually spawns
+        // the acp-loop adapter instead of the first registered loop.
+        // Builtin names (`fixture-loop`) have no adapter id — leave the
+        // pin unset and keep the generic resolution.
+        let loop_pin = self.profile_loop_pin(txn, &row.requested_profile).await?;
         let agent_loop = resolve(
             &PortRequirement {
                 port_id: LOOP_PORT_ID.to_owned(),
-                port_version: 1,
+                port_version: loop_pin.map(|(_, v)| v).unwrap_or(1),
                 required_capabilities: Vec::new(),
                 sandbox_tier: SandboxTier::T0,
-                pin_adapter_id: None,
+                pin_adapter_id: loop_pin.map(|(id, _)| id),
                 require_conformance_passed: false,
             },
             &candidates,
@@ -564,6 +570,18 @@ impl RunWorker {
                 ));
             }
         };
+        let local_bundles: Vec<(String, String, String)> = self
+            .deps
+            .bundles
+            .iter()
+            .map(|b| {
+                (
+                    b.adapter_id.clone(),
+                    b.version.clone(),
+                    b.bundle_digest.clone(),
+                )
+            })
+            .collect();
         runtime::resolved_environment::plan_environment(
             txn,
             self.deps.ids.as_ref(),
@@ -571,6 +589,7 @@ impl RunWorker {
             &row.requested_profile,
             &spec,
             &agent_loop,
+            &local_bundles,
             row.workspace_uri.clone(),
             None,
             domain::resource::WorkspaceAccessMode::ReadOnly,
@@ -719,34 +738,76 @@ impl RunWorker {
                 state.truncate(end);
                 tracing::info!(run = %run_id_str(row.run_id), cap, "loop state truncated");
             }
-            let mut settled: Vec<serde_json::Value> = txn
-                .effects()
-                .list_by_run(row.run_id)
-                .await?
-                .iter()
-                .filter(|e| effects::is_terminal(e.state) && e.step_sequence == row.step_sequence)
-                .map(|e| {
-                    serde_json::json!({
+            let run_effects = txn.effects().list_by_run(row.run_id).await?;
+            // `settled` carries only the current step's terminal effects
+            // (fed exactly once — replay is deliberate). `op_counts`
+            // summarizes ALL terminal effects for the run so loops can
+            // bound per-operation work (e.g. MCP tool hops) without the
+            // feed re-delivering history. `events` stays the version-1
+            // ARRAY of settled-effect objects; the counts ride in a
+            // leading marker element (`kernel.op_counts`) that parses
+            // like any other settled entry so v1 loops stay compatible.
+            // At most 64 distinct operation names are counted — beyond
+            // that the counts are advisory anyway.
+            let mut op_counts = std::collections::BTreeMap::<String, u64>::new();
+            let mut settled: Vec<serde_json::Value> = Vec::new();
+            for e in &run_effects {
+                if !effects::is_terminal(e.state) {
+                    continue;
+                }
+                if op_counts.len() < 64 || op_counts.contains_key(&e.operation) {
+                    *op_counts.entry(e.operation.clone()).or_default() += 1;
+                }
+                if e.step_sequence == row.step_sequence {
+                    settled.push(serde_json::json!({
                         "effect_id": e.effect_id.to_string(),
                         "operation": e.operation,
                         "state": format!("{:?}", e.state).to_ascii_lowercase(),
                         "result_ref": e.result_ref,
                         "error_code": e.error_code,
-                    })
-                })
-                .collect();
+                    }));
+                }
+            }
             let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
             if drop_n > 0 {
                 tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
                 settled.drain(..drop_n);
             }
-            let mut events = serde_json::to_vec(&settled).unwrap_or_default();
+            let marker = |counts: &std::collections::BTreeMap<String, u64>| {
+                serde_json::json!({
+                    "effect_id": "",
+                    "operation": "kernel.op_counts",
+                    "state": "committed",
+                    "result_ref": "",
+                    "error_code": "",
+                    "op_counts": counts,
+                })
+            };
+            let pack = |settled: &[serde_json::Value], counts: Option<&serde_json::Value>| {
+                let mut v = Vec::with_capacity(settled.len() + 1);
+                if let Some(m) = counts {
+                    v.push(m.clone());
+                }
+                v.extend_from_slice(settled);
+                serde_json::to_vec(&v).unwrap_or_default()
+            };
+            // The marker only accompanies real settled entries — an
+            // empty feed must remain `[]` so v1 loops that scan the
+            // array never see a synthetic "effect" on idle turns.
+            let marker_value = marker(&op_counts);
+            let marker_opt = (!settled.is_empty()).then_some(&marker_value);
+            let mut events = pack(&settled, marker_opt);
+            // Shrink order: oldest settled entries first, then the
+            // marker itself, so the newest result never silently drops.
             while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
                 settled.remove(0);
-                events = serde_json::to_vec(&settled).unwrap_or_default();
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
-            // A cap below 2 bytes can't even hold `[]` — emit the empty
-            // payload (0 bytes) so the configured bound always holds.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                events = pack(&settled, None);
+            }
+            // A cap too small even for the settled batch — emit the
+            // empty payload (0 bytes) so the configured bound holds.
             if events.len() > limits.max_fed_event_bytes as usize {
                 events = Vec::new();
             }
@@ -1237,11 +1298,23 @@ impl RunWorker {
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
             "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // MCP tool servers configured for `mcp.*` effect payloads.
+            "MCP_SERVERS",
+            "MCP_TIMEOUT_MS",
+            "MCP_ALLOW_ANY_URL",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
             {
                 env.push((key.to_owned(), value));
+            }
+        }
+        // `PROVIDER_KEY_*` holds per-provider credentials referenced by
+        // `api_key_env` in model.chat payloads — forwarded by name, so
+        // arbitrary daemon secrets still never reach adapters.
+        for (key, value) in std::env::vars() {
+            if key.starts_with("PROVIDER_KEY_") && !value.is_empty() {
+                env.push((key, value));
             }
         }
         let adapter_instance = AdapterInstanceId::new(self.deps.ids.as_ref());
@@ -1321,6 +1394,47 @@ impl RunWorker {
             return Err(error);
         }
         Ok((child, phase))
+    }
+
+    /// Read the requested profile's `agent_loop` binding under the
+    /// active generation and turn it into an adapter pin for `resolve`:
+    /// `(adapter_id, port_version)` parsed the same way
+    /// `plan_environment` parses profile bindings (`<id>@<version>`,
+    /// version defaulting to 1). `Ok(None)` for builtin names (e.g.
+    /// `fixture-loop`) which carry no adapter id.
+    async fn profile_loop_pin(
+        &self,
+        txn: &mut dyn KernelTxn,
+        profile_name: &str,
+    ) -> errors::Result<Option<(AdapterId, u32)>> {
+        let Some(active) = txn.config().get_active().await? else {
+            return Ok(None);
+        };
+        let Some(generation) = txn.config().get_generation(active.generation_id).await? else {
+            return Ok(None);
+        };
+        let doc = config_engine::model::parse_document(
+            std::str::from_utf8(&generation.document)
+                .map_err(|_| worker_error(ErrorCode::Internal, "generation doc not utf-8"))?,
+        )?;
+        let profile = config_engine::profile::resolve_profile(&doc, profile_name)?;
+        let Some(binding) = profile.bindings.get(LOOP_PORT_ID) else {
+            return Ok(None);
+        };
+        let (name, version) = binding
+            .split_once('@')
+            .map(|(n, v)| (n, v.parse::<u32>().unwrap_or(1)))
+            .unwrap_or((binding.as_str(), 1));
+        if config_engine::generations::BUILTIN_ADAPTERS.contains(&name) {
+            return Ok(None);
+        }
+        let id = name.parse::<AdapterId>().map_err(|_| {
+            worker_error(
+                ErrorCode::InvalidArgument,
+                "profile agent_loop binding is not an adapter id",
+            )
+        })?;
+        Ok(Some((id, version)))
     }
 
     /// The executor identity this worker claims effects under.
@@ -1495,6 +1609,12 @@ impl RunWorker {
             "OPENROUTER_APP_NAME",
             "OPENROUTER_TIMEOUT_MS",
             "OPENROUTER_ALLOW_ANY_BASE_URL",
+            // ACP loop adapter: which agent CLI to spawn and how.
+            "ACP_COMMAND",
+            "ACP_ARGS",
+            "ACP_CWD",
+            "ACP_TIMEOUT_MS",
+            "ACP_ALLOW_TOOLS",
             // Test/debug knob: the fixture loop records each LoopInput.
             "FIXTURE_LOOP_RECORD_DIR",
         ] {

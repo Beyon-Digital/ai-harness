@@ -45,6 +45,12 @@ pub struct EnvironmentPlan {
 /// Fails `FailedPrecondition` when a required port has no resolvable
 /// adapter (missing required adapter fails run start *before* any
 /// execution-facing side effect).
+///
+/// `local_bundles` is the daemon's on-disk bundle inventory as
+/// `(adapter_id, version, bundle_digest)` triples; candidate
+/// registrations that don't match it are dropped — a stale durable
+/// registration must never pin a binding to a bundle this daemon can't
+/// spawn.
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_environment(
     txn: &mut dyn KernelTxn,
@@ -53,6 +59,7 @@ pub async fn plan_environment(
     profile_name: &str,
     agent_spec: &crate::create_run::AgentSpecRef,
     agent_loop: &ResolvedAdapter,
+    local_bundles: &[(String, String, String)],
     workspace_uri: Option<String>,
     workspace_base_revision: Option<String>,
     workspace_mode: WorkspaceAccessMode,
@@ -84,7 +91,16 @@ pub async fn plan_environment(
         .await?
         .into_iter()
         .map(Candidate::decode)
-        .collect::<errors::Result<Vec<_>>>()?;
+        .collect::<errors::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|c| {
+            local_bundles.iter().any(|(id, version, digest)| {
+                *id == c.row.adapter_id.to_string()
+                    && *version == c.row.version
+                    && *digest == c.row.bundle_digest
+            })
+        })
+        .collect();
     let mut bindings = Vec::new();
     for (slot, binding) in &profile.bindings {
         if config_engine::generations::BUILTIN_ADAPTERS

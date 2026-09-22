@@ -112,6 +112,17 @@ pub async fn boot_daemon_full(
     loop_scripts: HashMap<RunId, String>,
     effect_env: HashMap<String, String>,
 ) -> Daemon {
+    boot_daemon_with(runtime_dir, bundles, loop_scripts, effect_env, CONFIG_YAML).await
+}
+
+/// Boot a daemon from an explicit config file path.
+pub async fn boot_daemon_with(
+    runtime_dir: &Path,
+    bundles: Vec<PathBuf>,
+    loop_scripts: HashMap<RunId, String>,
+    effect_env: HashMap<String, String>,
+    config_path: &str,
+) -> Daemon {
     // `local-trusted` binds `effect.execute` to the fixture effect adapter —
     // every booted daemon needs its bundle registered.
     let mut bundles = bundles;
@@ -125,7 +136,7 @@ pub async fn boot_daemon_full(
     loop {
         match boot(DaemonConfig {
             runtime_dir: runtime_dir.to_path_buf(),
-            config_doc: Some(PathBuf::from(CONFIG_YAML)),
+            config_doc: Some(PathBuf::from(config_path)),
             adapter_bundles: bundles.clone(),
             loop_scripts: loop_scripts.clone(),
             loop_env: HashMap::new(),

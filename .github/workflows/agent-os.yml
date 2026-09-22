@@ -22,6 +22,26 @@ jobs:
         run: python3 tools/validate_repo.py
       - name: Check contract mirror freshness and lock
         run: bash agent-os/scripts/check-contract-mirror.sh
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: agent-os/crates/agentgw/web-app/package-lock.json
+      - name: Check embedded SPA bundle freshness
+        # web/dist is committed so Rust builds need no Node — rebuild the
+        # web-app and fail if the committed bundle drifted from source.
+        run: |
+          cd agent-os/crates/agentgw/web-app
+          npm ci
+          npm run build
+          cd -
+          # status --porcelain catches modified AND untracked hashed assets.
+          test -z "$(git status --porcelain agent-os/crates/agentgw/web/dist)" || {
+            git status --porcelain agent-os/crates/agentgw/web/dist
+            echo "web/dist is stale — run npm run build in web-app and commit"
+            exit 1
+          }
 
   quality:
     name: Rust quality gates
@@ -33,6 +53,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-os
       - name: Format
         run: cargo fmt --check
       - name: Clippy

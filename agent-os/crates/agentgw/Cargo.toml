@@ -8,10 +8,12 @@ publish.workspace = true
 [dependencies]
 agentctl.workspace = true
 axum = { version = "0.8", features = ["json"] }
+config-engine.workspace = true
 control-api.workspace = true
 domain.workspace = true
 errors.workspace = true
 prost.workspace = true
+rust-embed = "8"
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

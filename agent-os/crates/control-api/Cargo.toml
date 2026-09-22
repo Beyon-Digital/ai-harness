@@ -15,6 +15,7 @@ events.workspace = true
 prost.workspace = true
 runtime.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-stream.workspace = true
 tonic.workspace = true
@@ -33,6 +34,5 @@ kernel-store-sqlite.workspace = true
 tempfile.workspace = true
 testkit.workspace = true
 rustix = { workspace = true, features = ["fs"] }
-sha2.workspace = true
 tower = { version = "0.5", features = ["util"] }
 hyper-util = "0.1"

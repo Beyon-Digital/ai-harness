@@ -1578,6 +1578,17 @@ impl ConfigRead for MockConfigRepo {
         Ok(lock(&self.state)?.config_generations.get(&id).cloned())
     }
 
+    async fn get_generation_by_digest(
+        &mut self,
+        digest: &str,
+    ) -> errors::Result<Option<ConfigGenerationRow>> {
+        Ok(lock(&self.state)?
+            .config_generations
+            .values()
+            .find(|g| g.digest == digest)
+            .cloned())
+    }
+
     async fn get_active(&mut self) -> errors::Result<Option<ActiveConfigGenerationRow>> {
         Ok(lock(&self.state)?.active_config.clone())
     }

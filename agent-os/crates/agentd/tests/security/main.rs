@@ -813,7 +813,10 @@ async fn insecure_socket_directory_is_corrected_at_bind() {
         0o777
     );
 
-    let socket = ControlSocket::bind(&runtime_dir, &()).unwrap();
+    #[derive(Debug)]
+    struct TestLock;
+    impl control_api::uds::DaemonLockHeld for TestLock {}
+    let socket = ControlSocket::bind(&runtime_dir, &TestLock).unwrap();
 
     let dir_mode = std::fs::metadata(&runtime_dir)
         .unwrap()

@@ -12,6 +12,7 @@
 //! The composition root wires this worker in a later task, so its items are
 //! not yet reachable from `main`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,6 +68,10 @@ pub struct SchedulerWorker {
     clock: Arc<dyn Clock>,
     principal: PrincipalId,
     actor: ActorId,
+    /// Per-timer retry state: `timer_id -> (attempts, next_attempt_unix_ms)`.
+    /// A permanently failing claim is deferred with backoff so it cannot
+    /// starve every later due timer by staying first-selectable.
+    backoff: HashMap<domain::ids::TimerId, (u32, i64)>,
 }
 
 impl SchedulerWorker {
@@ -82,12 +87,13 @@ impl SchedulerWorker {
             clock: deps.clock,
             principal: deps.principal,
             actor: deps.actor,
+            backoff: HashMap::new(),
         }
     }
 
     /// Dispatches timers until `shutdown` requests a stop.
     #[allow(dead_code)]
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = interval(self.poll);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -106,20 +112,52 @@ impl SchedulerWorker {
         }
     }
 
-    /// Claims and dispatches up to `BATCH_LIMIT_PER_TICK` due timers.
-    async fn dispatch_tick(&self) -> errors::Result<()> {
+    /// Claims and dispatches up to `BATCH_LIMIT_PER_TICK` due timers. A
+    /// timer whose fire fails is deferred with exponential backoff and
+    /// excluded for the rest of the tick, so one bad row cannot stall the
+    /// queue by staying the earliest selectable claim.
+    async fn dispatch_tick(&mut self) -> errors::Result<()> {
         let owner = format!("scheduler:{}", self.actor);
+        let now = self.clock.now_unix_ms();
+        let mut exclude: HashSet<domain::ids::TimerId> = self
+            .backoff
+            .iter()
+            .filter(|(_, (_, next))| *next > now)
+            .map(|(id, _)| *id)
+            .collect();
         for _ in 0..BATCH_LIMIT_PER_TICK {
-            let Some(claimed) = self.claim_next(&owner).await? else {
+            let Some(claimed) = self.claim_next(&owner, &exclude).await? else {
                 return Ok(());
             };
-            self.fire(claimed, &owner).await?;
+            if let Err(_error) = self.fire(claimed.clone(), &owner).await {
+                let attempts = self
+                    .backoff
+                    .get(&claimed.timer_id)
+                    .map(|(n, _)| *n)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                // 2s, 4s, 8s, ... capped at 60s. The map is
+                // intentionally per-epoch: a restart resets claims via
+                // the epoch guard anyway, and a fresh attempt-1 retry
+                // after boot is both bounded and explainable.
+                let shift = attempts.saturating_sub(1).min(5);
+                let delay_ms = 2_000i64.saturating_mul(1i64 << shift).min(60_000);
+                self.backoff
+                    .insert(claimed.timer_id, (attempts, now + delay_ms));
+                exclude.insert(claimed.timer_id);
+                continue;
+            }
+            self.backoff.remove(&claimed.timer_id);
         }
         Ok(())
     }
 
     /// Claims the next dispatchable timer inside one transaction.
-    async fn claim_next(&self, owner: &str) -> errors::Result<Option<TimerRow>> {
+    async fn claim_next(
+        &self,
+        owner: &str,
+        exclude: &HashSet<domain::ids::TimerId>,
+    ) -> errors::Result<Option<TimerRow>> {
         let mut txn = self
             .store
             .begin_write(TxContext {
@@ -141,6 +179,7 @@ impl SchedulerWorker {
             self.clock.now_unix_ms(),
             owner,
             self.epoch.epoch(),
+            exclude,
         )
         .await?;
         txn.commit().await?;

@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 use axum::Router;
@@ -21,7 +22,7 @@ use axum::extract::{DefaultBodyLimit, Path as AxPath, Query, State};
 use axum::http::{Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,9 +34,11 @@ use domain::ids::{ActorId, CommandId, IdempotencyKey};
 use domain::provider::SystemIdProvider;
 use prost::Message;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+/// The SPA bundle is committed under `web/dist` (built from `web-app/`)
+/// so `cargo build` needs no Node toolchain.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "web/dist/"]
+struct WebDist;
 
 mod devices;
 
@@ -152,19 +155,27 @@ async fn serve(
         index_path,
         auth_token,
         devices_file,
-        runtime_dir,
+        runtime_dir: runtime_dir.clone(),
         loopback,
+        local_device_id: local_device_id(&runtime_dir),
     });
+    if !loopback {
+        // Bearer tokens and control-plane traffic over plaintext HTTP are
+        // interceptable — remote binds belong behind a TLS terminator.
+        tracing::warn!(
+            %listen,
+            "agentgw serving plaintext HTTP on a non-loopback address; put a TLS terminator in front"
+        );
+    }
 
     let app = Router::new()
         .route("/", get(serve_index))
-        .route("/app.js", get(serve_app_js))
-        .route("/style.css", get(serve_style))
         .route("/api/health", get(api_health))
         .route("/api/index", get(api_index))
         .route("/api/sessions", post(api_create_session))
         .route("/api/specs", post(api_put_spec))
         .route("/api/runs", post(api_create_run))
+        .route("/api/runs", get(api_runs_list))
         .route("/api/runs/{run_id}", get(api_get_run))
         .route("/api/runs/{run_id}/decisions", get(api_run_decisions))
         .route("/api/runs/{run_id}/environment", get(api_run_environment))
@@ -175,6 +186,9 @@ async fn serve(
         .route("/api/adapters", get(api_adapters))
         .route("/api/config", get(api_config))
         .route("/api/config/generations", get(api_config_generations))
+        .route("/api/config/proposals", get(api_proposals_list))
+        .route("/api/config/proposals", post(api_proposals_create))
+        .route("/api/profiles", get(api_profiles))
         .route("/api/metrics", get(api_metrics))
         .route("/api/approvals", get(api_approvals))
         .route("/api/approvals/respond", post(api_respond_approval))
@@ -184,6 +198,7 @@ async fn serve(
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .fallback(serve_static)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
@@ -205,6 +220,42 @@ struct AppState {
     /// Whether the listen address is loopback-only — credential-free
     /// requests are only trusted as "local" on loopback binds.
     loopback: bool,
+    /// Stable device identity attached to approval responses from
+    /// credential-free ("local") and master-token ("admin") callers —
+    /// persisted under the runtime dir so restarts keep the same id.
+    local_device_id: String,
+}
+
+/// Reads or mints the gateway's local device id at
+/// `<runtime-dir>/agentgw-device-id` (0600).
+fn local_device_id(runtime_dir: &Path) -> String {
+    let path = runtime_dir.join("agentgw-device-id");
+    if let Ok(id) = std::fs::read_to_string(&path)
+        && domain::ids::DeviceId::from_str(id.trim()).is_ok()
+    {
+        return id.trim().to_owned();
+    }
+    let id = new_uuid7();
+    // Create with mode 0600 atomically — no permissive window between
+    // write and chmod.
+    #[cfg(unix)]
+    let write = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(id.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let write = std::fs::write(&path, &id);
+    if let Err(e) = write {
+        tracing::warn!("agentgw-device-id persist failed: {e}");
+    }
+    id
 }
 
 /// Inserted into request extensions by `require_auth`: `"admin"` for the
@@ -227,6 +278,13 @@ struct SpecRef {
     agent_spec_id: String,
     version: String,
     digest: String,
+    /// `display_name` parsed out of the spec body for GUI pickers.
+    #[serde(default)]
+    display_name: String,
+    /// `runtime_profile_name` parsed out of the spec body — lets the
+    /// gateway fill `requested_profile` when a caller omits it.
+    #[serde(default)]
+    profile: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -282,7 +340,20 @@ async fn require_auth(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned));
+        .and_then(|v: &str| v.strip_prefix("Bearer ").map(str::to_owned))
+        // EventSource can't set headers — accept `?token=` as a bearer
+        // fallback, but only on the SSE endpoint so ordinary API URLs
+        // can't carry the credential into logs/history.
+        .or_else(|| {
+            (req.uri().path() == "/api/events/subscribe")
+                .then(|| {
+                    req.uri().query().and_then(|q| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix("token=").map(str::to_owned))
+                    })
+                })
+                .flatten()
+        });
     // A registry read error is an outage, not a bad credential — answer
     // 503 so operators can distinguish it from a 401.
     #[allow(clippy::result_large_err)]
@@ -323,8 +394,19 @@ async fn require_auth(
             None if state.loopback => AuthedCaller("local".to_owned()),
             None => return unauthorized(),
         }
-    } else {
+    } else if state.loopback {
+        // Loopback with no configured credentials: the OS uid boundary
+        // is the trust domain.
         AuthedCaller("local".to_owned())
+    } else {
+        // A remote listener with NO credentials must fail closed — a
+        // bound bearer token or device registry is required, otherwise
+        // every remote request would act as `local` (full control plane).
+        tracing::warn!(
+            "agentgw: non-loopback bind with no credentials — all requests rejected; \
+             set AGENTGW_TOKEN/--auth-token or --devices-file"
+        );
+        return unauthorized();
     };
     let mut req = req;
     req.extensions_mut().insert(caller);
@@ -354,7 +436,10 @@ async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Respons
     );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; style-src 'self'; connect-src 'self'"
+        // style attributes + <style> tags are used by the bundled SPA
+        // (React Flow positions nodes via inline styles).
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; font-src 'self'; connect-src 'self'"
             .parse()
             .expect("static"),
     );
@@ -458,16 +543,60 @@ fn req_string<'a>(body: &'a Value, key: &str) -> Result<&'a str, (StatusCode, Js
 
 // ---- static GUI ----
 
-async fn serve_index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+fn mime_of(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript",
+        Some("css") => "text/css",
+        Some("json") | Some("map") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff") | Some("woff2") => "font/woff2",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
 }
 
-async fn serve_app_js() -> Response {
-    ([(header::CONTENT_TYPE, "text/javascript")], APP_JS).into_response()
+fn embedded(path: &str) -> Response {
+    match WebDist::get(path) {
+        Some(file) => {
+            let mime = mime_of(path);
+            let mut res = ([(header::CONTENT_TYPE, mime)], file.data).into_response();
+            // Hashed bundle assets are immutable; index.html is not.
+            if path.starts_with("assets/") {
+                res.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    "public, max-age=31536000, immutable"
+                        .parse()
+                        .expect("static"),
+                );
+            } else {
+                res.headers_mut()
+                    .insert(header::CACHE_CONTROL, "no-cache".parse().expect("static"));
+            }
+            res
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+    }
 }
 
-async fn serve_style() -> Response {
-    ([(header::CONTENT_TYPE, "text/css")], STYLE_CSS).into_response()
+async fn serve_index() -> Response {
+    embedded("index.html")
+}
+
+/// SPA fallback: any non-API path serves index.html so client-side
+/// routes work on refresh; unknown /api/ paths stay a real 404.
+async fn serve_static(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    if path.starts_with("api/") {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+    }
+    match WebDist::get(path) {
+        Some(_) if !path.is_empty() => embedded(path),
+        _ => embedded("index.html"),
+    }
 }
 
 // ---- REST ----
@@ -579,6 +708,20 @@ async fn api_put_spec(State(state): State<Arc<AppState>>, Json(body): Json<Value
             v["agent_spec_id"] = json!(id);
             v["version"] = json!(version);
             v["digest"] = json!(digest);
+            // Spec bodies are JSON for GUI-created agents; pull the
+            // display name + runtime profile so pickers and run
+            // creation can use them without re-reading the spec.
+            let parsed: Value = serde_json::from_slice(&spec_body).unwrap_or_default();
+            let display_name = parsed
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let profile = parsed
+                .get("runtime_profile_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
             remember(&state, |i| {
                 if !i
                     .specs
@@ -591,6 +734,8 @@ async fn api_put_spec(State(state): State<Arc<AppState>>, Json(body): Json<Value
                             agent_spec_id: id.clone(),
                             version: version.clone(),
                             digest,
+                            display_name: display_name.clone(),
+                            profile: profile.clone(),
                         },
                     );
                 }
@@ -652,7 +797,24 @@ async fn api_create_run(State(state): State<Arc<AppState>>, Json(body): Json<Val
             agent_spec_ref,
             parent_run_id,
             observed_parent_cancellation_epoch: 0,
-            requested_profile: opt_string(&body, "requested_profile"),
+            requested_profile: {
+                // Fall back to the spec's declared runtime profile so
+                // callers that only know the spec (the chat UI) don't
+                // wedge the run on `profile '' not defined`.
+                let explicit = opt_string(&body, "requested_profile");
+                if explicit.is_empty() {
+                    let spec_id = body.get("agent_spec_id").and_then(|v| v.as_str());
+                    let spec_ver = body.get("spec_version").and_then(|v| v.as_str());
+                    match (spec_id, spec_ver) {
+                        (Some(id), Some(ver)) => hydrate_spec_profile(&state, id, ver)
+                            .await
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                } else {
+                    explicit
+                }
+            },
             workspace_uri: opt_string(&body, "workspace_uri"),
             requested_capabilities,
             requested_budget: Vec::new(),
@@ -690,6 +852,37 @@ async fn api_create_run(State(state): State<Arc<AppState>>, Json(body): Json<Val
         }
         Err(r) => r,
     }
+}
+
+/// `GET /api/runs` — hydrated run rows for the index's run ids. The
+/// contract has no list RPC, so this fans out `GetRun` per known id.
+async fn api_runs_list(State(state): State<Arc<AppState>>) -> Response {
+    let run_ids: Vec<String> = match state.index.read() {
+        Ok(i) => i.runs.iter().map(|r| r.run_id.clone()).collect(),
+        Err(_) => return gw_err("index lock poisoned"),
+    };
+    let mut runs = Vec::with_capacity(run_ids.len());
+    for run_id in run_ids {
+        // A run the daemon forgot (e.g. wiped runtime under a live
+        // index) is skipped; transient failures propagate so the UI can
+        // tell an outage from an empty history.
+        match state
+            .daemon
+            .control
+            .clone()
+            .get_run(contract::GetRunRequest { run_id })
+            .await
+        {
+            Ok(r) => {
+                if let Some(run) = r.into_inner().run {
+                    runs.push(run_json(&run));
+                }
+            }
+            Err(e) if e.code() == tonic::Code::NotFound => {}
+            Err(e) => return gw_err(e),
+        }
+    }
+    Json(json!({"runs": runs})).into_response()
 }
 
 fn run_json(run: &contract::AgentRun) -> Value {
@@ -817,6 +1010,65 @@ async fn open_db_ro(path: &Path) -> Result<sqlx::SqliteConnection, sqlx::Error> 
         .read_only(true)
         .create_if_missing(false);
     sqlx::SqliteConnection::connect_with(&options).await
+}
+
+/// The spec's `runtime_profile_name` — read from the in-memory index,
+/// hydrated from the durable `agent_specs` body for index entries
+/// written before the field existed (they carry an empty `profile`).
+/// The hydrated value is written back so the DB is only read once.
+async fn hydrate_spec_profile(
+    state: &Arc<AppState>,
+    spec_id: &str,
+    version: &str,
+) -> Option<String> {
+    if let Some(spec) = state
+        .index
+        .read()
+        .ok()
+        .and_then(|i| {
+            i.specs
+                .iter()
+                .find(|s| s.agent_spec_id == spec_id && s.version == version)
+                .cloned()
+        })
+        .filter(|s| !s.profile.is_empty())
+    {
+        return Some(spec.profile);
+    }
+    let kernel_path = state.runtime_dir.join("kernel.db");
+    let mut conn = open_db_ro(&kernel_path).await.ok()?;
+    let body: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT body FROM agent_specs WHERE agent_spec_id = ?1 AND version = ?2",
+    )
+    .bind(spec_id)
+    .bind(version)
+    .fetch_optional(&mut conn)
+    .await
+    .ok()
+    .flatten();
+    let profile: String = body
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|doc| {
+            doc.get("runtime_profile_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if profile.is_empty() {
+        return None;
+    }
+    // Persist the hydrated value back into the index entry.
+    let cloned = profile.clone();
+    remember(state, |i| {
+        if let Some(s) = i
+            .specs
+            .iter_mut()
+            .find(|s| s.agent_spec_id == spec_id && s.version == version)
+        {
+            s.profile = cloned.clone();
+        }
+    });
+    Some(profile)
 }
 
 /// SELECT <col>, COUNT(*) grouped rows as `[{state|kind: v, count: n}]`.
@@ -1277,6 +1529,178 @@ async fn api_config(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// `GET /api/profiles` — the active document's profiles flattened to
+/// `{name, bindings}` rows for GUI pickers (agent creation, pipeline
+/// designer, run form).
+async fn api_profiles(State(state): State<Arc<AppState>>) -> Response {
+    let inner = match state
+        .daemon
+        .control
+        .clone()
+        .get_active_config(contract::GetActiveConfigRequest {})
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => return gw_err(e),
+    };
+    let document =
+        String::from_utf8_lossy(&inner.generation.unwrap_or_default().document).to_string();
+    let parsed = match config_engine::parse_document(&document) {
+        Ok(d) => d,
+        Err(e) => return gw_err(e),
+    };
+    let profiles = parsed
+        .profiles
+        .keys()
+        .map(|name| {
+            // Resolve the extends chain so GUI pickers see the profile's
+            // effective bindings, not just the overrides it declares.
+            let resolved = config_engine::profile::resolve_profile(&parsed, name);
+            let (bindings, extends) = match resolved {
+                Ok(r) => (
+                    r.bindings,
+                    parsed.profiles.get(name).and_then(|p| p.extends.clone()),
+                ),
+                Err(_) => (BTreeMap::new(), None),
+            };
+            json!({"name": name, "bindings": bindings, "extends": extends})
+        })
+        .collect::<Vec<_>>();
+    Json(json!({"profiles": profiles})).into_response()
+}
+
+/// `POST /api/config/proposals` — validate a candidate config document
+/// and stage it under `<runtime-dir>/proposed/<uuid>.yaml`. The kernel
+/// only activates config at boot (`--config`), so proposals are a
+/// staging + validation surface, not a live apply.
+async fn api_proposals_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let document = match req_string(&body, "document") {
+        Ok(v) => v.to_owned(),
+        Err(r) => return r.into_response(),
+    };
+    let dir = state.runtime_dir.join("proposed");
+    let id = new_uuid7();
+    let path = dir.join(format!("{id}.yaml"));
+    let path_for_write = path.clone();
+    let document_for_write = document.clone();
+    // Filesystem I/O off the async executor; failures surface as 500s.
+    let write = tokio::task::spawn_blocking(move || -> std::io::Result<i64> {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path_for_write, &document_for_write)?;
+        // Proposal documents can carry provider endpoints/keys — owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path_for_write, std::fs::Permissions::from_mode(0o600))?;
+        }
+        prune_proposals(&dir)?;
+        Ok(std::fs::metadata(&path_for_write)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default())
+    })
+    .await;
+    let (valid, error) = match config_engine::parse_document(&document) {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+    let created_at_ms = match write {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return gw_err(format!("write proposal: {e}")),
+        Err(e) => return gw_err(format!("proposal worker: {e}")),
+    };
+    Json(json!({
+        "proposal_id": id,
+        "path": path.to_string_lossy(),
+        "created_at_ms": created_at_ms,
+        "valid": valid,
+        "error": error,
+    }))
+    .into_response()
+}
+
+/// Proposals retained on disk — the oldest staged documents are deleted
+/// past this bound so repeated proposals cannot fill the runtime volume.
+const MAX_PROPOSALS: usize = 64;
+
+fn prune_proposals(dir: &Path) -> std::io::Result<()> {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("yaml"))
+        .filter_map(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| (t, e.path()))
+        })
+        .collect();
+    files.sort_by_key(|(t, _)| *t);
+    let excess = files.len().saturating_sub(MAX_PROPOSALS);
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// `GET /api/config/proposals` — list staged proposals, re-validating
+/// each so a doc that became invalid after an engine upgrade shows it.
+async fn api_proposals_list(State(state): State<Arc<AppState>>) -> Response {
+    let dir = state.runtime_dir.join("proposed");
+    let scanned = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<Value>> {
+        let mut proposals = Vec::new();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(proposals),
+            Err(e) => return Err(e),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let document = match std::fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let (valid, error) = match config_engine::parse_document(&document) {
+                Ok(_) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            proposals.push(json!({
+                "proposal_id": path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default(),
+                "path": path.to_string_lossy(),
+                "created_at_ms": entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_default(),
+                "valid": valid,
+                "error": error,
+            }));
+        }
+        Ok(proposals)
+    })
+    .await;
+    match scanned {
+        Ok(Ok(mut proposals)) => {
+            proposals.sort_by_key(|p| p["created_at_ms"].as_i64().unwrap_or_default());
+            Json(json!({"proposals": proposals})).into_response()
+        }
+        Ok(Err(e)) => gw_err(format!("proposals dir: {e}")),
+        Err(e) => gw_err(format!("proposal worker: {e}")),
+    }
+}
+
 async fn api_approvals(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BTreeMap<String, String>>,
@@ -1328,11 +1752,13 @@ async fn api_respond_approval(
         Ok(v) => v.to_owned(),
         Err(r) => return r.into_response(),
     };
-    // A device-authenticated caller's response is bound to that device;
-    // admin/local callers may still pass `device_id` explicitly.
+    // The responding device is never caller-asserted: a device-token
+    // caller's response is bound to that authenticated device, and
+    // admin/local callers are recorded under the gateway's own stable
+    // device identity. A body-supplied `device_id` is ignored.
     let authenticated = caller.map(|axum::Extension(c)| c.0);
     let device_id = match authenticated.as_deref() {
-        Some("admin") | Some("local") | None => opt_string(&body, "device_id"),
+        Some("admin") | Some("local") | None => state.local_device_id.clone(),
         Some(id) => id.to_owned(),
     };
     let request = contract::ApprovalResponseRequest {

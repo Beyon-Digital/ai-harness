@@ -1,0 +1,22 @@
+[package]
+name = "agent-os-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Native desktop shell for the Agent OS gateway"
+publish = false
+
+[lib]
+name = "agent_os_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde_json = "1"
+
+[workspace]
+# Standalone package — the agent-os workspace uses an explicit members
+# list, and desktop builds pull webkit deps CI runners may not have.

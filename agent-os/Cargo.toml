@@ -21,6 +21,7 @@ members = [
     "crates/kernel-store",
     "crates/kernel-store-sqlite",
     "crates/message-queue",
+    "crates/ndjson-rpc",
     "crates/observability",
     "crates/permissions",
     "crates/process-supervisor",
@@ -34,7 +35,10 @@ members = [
     "crates/testkit",
     "crates/wasm-host",
     "crates/workspace",
+    "fixtures/acp-loop",
     "fixtures/agent-loop",
+    "fixtures/echo-acp",
+    "fixtures/echo-mcp",
     "fixtures/effect-adapter",
     "fixtures/local-memory",
     "fixtures/openrouter-effect",
@@ -94,6 +98,7 @@ identity = { path = "crates/identity" }
 kernel-store = { path = "crates/kernel-store" }
 kernel-store-sqlite = { path = "crates/kernel-store-sqlite" }
 message-queue = { path = "crates/message-queue" }
+ndjson-rpc = { path = "crates/ndjson-rpc" }
 observability = { path = "crates/observability" }
 permissions = { path = "crates/permissions" }
 process-supervisor = { path = "crates/process-supervisor" }

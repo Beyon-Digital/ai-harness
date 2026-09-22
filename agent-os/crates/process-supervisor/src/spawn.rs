@@ -346,6 +346,13 @@ pub async fn terminate(mut child: Child, grace: std::time::Duration) -> ExitReas
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    // A cooperative leader may exit while its descendants ignore or
+    // outlive the shutdown — the child is its own group leader, so the
+    // group can still hold members. Sweep it: if the group is already
+    // empty both signals are ESRCH no-ops.
+    signal_group(child.pid, Signal::TERM);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    signal_group(child.pid, Signal::KILL);
     exit_reason(&mut child.process)
 }
 

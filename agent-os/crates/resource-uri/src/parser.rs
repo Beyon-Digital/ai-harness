@@ -110,8 +110,22 @@ impl ResourceUri {
                 let (id, version) = id_and_version
                     .split_once('@')
                     .ok_or_else(|| invalid("adapter URI needs <id>@<version>"))?;
-                if version.is_empty() || digest.is_empty() {
-                    return Err(invalid("adapter version/digest empty"));
+                // Strict charsets keep rendered forms canonical: a version
+                // or digest carrying delimiters/whitespace/controls would
+                // render ambiguous or fail to re-parse.
+                if version.is_empty()
+                    || !version
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+                {
+                    return Err(invalid("adapter version has illegal characters"));
+                }
+                if digest.is_empty()
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_'))
+                {
+                    return Err(invalid("adapter digest has illegal characters"));
                 }
                 Ok(Self::Adapter {
                     adapter_id: AdapterId::from_str(id).map_err(|_| invalid("adapter id"))?,
@@ -198,8 +212,8 @@ fn normalize_path(raw: &str) -> errors::Result<String> {
         let decoded = decode_segment(segment)?;
         match decoded.as_str() {
             "" | "." | ".." => return Err(invalid("path segment escapes or is empty")),
-            value if value.contains('/') || value.contains('\\') => {
-                return Err(invalid("decoded path segment reintroduces a separator"));
+            value if !is_canonical_token(value) => {
+                return Err(invalid("decoded path segment reintroduces a delimiter"));
             }
             value => segments.push(value.to_owned()),
         }
@@ -215,11 +229,21 @@ fn decode_token(segment: &str) -> errors::Result<String> {
     let decoded = decode_segment(segment)?;
     match decoded.as_str() {
         "" | "." | ".." => Err(invalid("token escapes or is empty")),
-        value if value.contains('/') || value.contains('\\') || value.contains('\0') => {
-            Err(invalid("decoded token reintroduces a separator"))
+        value if !is_canonical_token(value) => {
+            Err(invalid("decoded token reintroduces a delimiter"))
         }
         _ => Ok(decoded),
     }
+}
+
+/// Canonical-token rule: a parsed value must render back to itself — so
+/// decoded text rejects URI delimiters (`%`, `/`, `\\`, `#`, `?`), ASCII
+/// controls, and whitespace. A literal `%` otherwise renders unescaped and
+/// the displayed form can fail to re-parse.
+fn is_canonical_token(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|c| matches!(c, '%' | '/' | '\\' | '#' | '?') || c.is_control() || c.is_whitespace())
 }
 
 /// Strict percent-decoding: `%` must be followed by two hex digits; bytes

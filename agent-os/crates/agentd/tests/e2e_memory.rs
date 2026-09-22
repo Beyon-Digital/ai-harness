@@ -311,16 +311,48 @@ async fn e2e_settled_effects_are_fed_once_not_replayed() {
                 .unwrap_or_else(|e| panic!("missing turn-{step}.json: {e}")),
         )
         .unwrap();
-        serde_json::from_str(file["events"].as_str().unwrap_or("[]"))
-            .unwrap_or_else(|_| panic!("turn-{step} events not JSON"))
+        let doc: serde_json::Value = serde_json::from_str(file["events"].as_str().unwrap_or("[]"))
+            .unwrap_or_else(|_| panic!("turn-{step} events not JSON"));
+        doc.as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e["operation"].as_str() != Some("kernel.op_counts"))
+            .collect()
+    };
+    let fed_counts = |step: u32| -> serde_json::Value {
+        let file: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(inputs_dir.join(format!("turn-{step}.json"))).unwrap(),
+        )
+        .unwrap();
+        serde_json::from_str::<serde_json::Value>(file["events"].as_str().unwrap_or("[]"))
+            .unwrap()
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e["operation"].as_str() == Some("kernel.op_counts"))
+            .and_then(|m| m.get("op_counts").cloned())
+            .unwrap_or_default()
     };
     // Step 1's invoke_effect committed ⇒ fed to the step-2 turn.
     let turn2 = fed_events(2);
     assert_eq!(turn2.len(), 1, "turn 2 should see the put effect");
     assert_eq!(turn2[0]["operation"], "memory.put");
+    // op_counts summarizes all run history and travels alongside real
+    // settled entries — step 3's feed is empty (step 2 was `wait`), so
+    // it carries no marker; step 4's feed shows both ops counted.
+    let turn3_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(inputs_dir.join("turn-3.json")).unwrap())
+            .unwrap();
+    let raw3: serde_json::Value =
+        serde_json::from_str(turn3_doc["events"].as_str().unwrap_or("[]")).unwrap();
+    assert_eq!(raw3, serde_json::json!([]), "empty feed stays a bare []");
     // Step 2 was `wait` — its outcome must not replay to the step-3 turn.
     assert_eq!(fed_events(3), Vec::<serde_json::Value>::new());
     // Step 3's invoke_effect ⇒ fed to step 4; the step-4 wait clears step 5.
     assert_eq!(fed_events(4).len(), 1);
+    assert_eq!(fed_counts(4)["memory.put"], 1);
+    assert_eq!(fed_counts(4)["memory.get"], 1);
     assert_eq!(fed_events(5), Vec::<serde_json::Value>::new());
 }
