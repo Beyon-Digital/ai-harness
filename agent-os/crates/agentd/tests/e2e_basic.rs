@@ -122,7 +122,37 @@ async fn e2e_restart_with_changed_config_activates_new_generation() {
     let bundle = make_fixture_bundle(tmp.path());
     let runtime_dir = tmp.path().join("runtime");
 
+    // Wait for `needle` to appear `want` times on the config/global
+    // journal — the outbox drains asynchronously, so shutting down before
+    // this can leave activation evidence unpublished for the NEXT boot.
+    async fn await_config_event(socket: &std::path::Path, needle: &str, want: usize) {
+        let deadline = Instant::now() + std::time::Duration::from_millis(30_000);
+        loop {
+            let events = cli(socket, &["events", "read", "--stream-key", "config/global"]).await;
+            let found = events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| {
+                    e["event_type"]
+                        .as_str()
+                        .map(|t| t.contains(needle))
+                        .unwrap_or(false)
+                })
+                .count();
+            if found >= want {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected {want} `{needle}` events, journal has {found}"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
     let daemon = boot_daemon(&runtime_dir, vec![bundle.clone()]).await;
+    await_config_event(daemon.socket_path(), "ConfigActivated", 1).await;
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 
@@ -142,6 +172,7 @@ async fn e2e_restart_with_changed_config_activates_new_generation() {
         alt.to_str().unwrap(),
     )
     .await;
+    await_config_event(daemon.socket_path(), "ConfigActivated", 2).await;
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 
@@ -149,29 +180,7 @@ async fn e2e_restart_with_changed_config_activates_new_generation() {
     // generation via `ConfigRolledBack` — no new generation, no
     // idempotency conflict.
     let daemon = boot_daemon(&runtime_dir, vec![bundle]).await;
-    let socket = daemon.socket_path().to_path_buf();
-    let deadline = Instant::now() + std::time::Duration::from_millis(30_000);
-    loop {
-        let events = cli(
-            &socket,
-            &["events", "read", "--stream-key", "config/global"],
-        )
-        .await;
-        let types: Vec<String> = events["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|e| e["event_type"].as_str().map(str::to_owned))
-            .collect();
-        if types.iter().any(|t| t.contains("ConfigRolledBack")) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "config rollback event never journaled: {types:?}"
-        );
-        tokio::task::yield_now().await;
-    }
+    await_config_event(daemon.socket_path(), "ConfigRolledBack", 1).await;
     daemon.initiate_shutdown();
     daemon.wait().await.expect("clean shutdown");
 }

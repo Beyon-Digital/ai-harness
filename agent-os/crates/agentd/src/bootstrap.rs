@@ -313,6 +313,7 @@ pub async fn boot(config: DaemonConfig) -> errors::Result<Daemon> {
             principal,
             actor,
             path,
+            journal.clone(),
         )
         .await?
     } else {
@@ -525,6 +526,7 @@ fn compute_digest(dir: &Path) -> errors::Result<String> {
 /// with one, a *different* document activates as a new generation —
 /// a restarted `--config` is a deliberate operator transition, while
 /// an identical file is an idempotent no-op.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_config(
     store: Arc<SqliteKernelStore>,
     coordinator: Arc<CommandCoordinator>,
@@ -533,6 +535,7 @@ async fn bootstrap_config(
     principal: PrincipalId,
     actor: ActorId,
     path: &Path,
+    journal: Arc<dyn events::journal::EventJournalPort>,
 ) -> errors::Result<Option<String>> {
     let document = std::fs::read(path).map_err(|e| io("read config doc", &e))?;
     let digest = format!(
@@ -571,13 +574,21 @@ async fn bootstrap_config(
             .get_generation_by_digest(&digest)
             .await?
             .map(|g| g.generation_id.to_string());
+        drop(txn);
         tracing::info!(
             generation_id = active_id,
             reactivate = reactivate.is_some(),
             "config document changed"
         );
     }
-    let was_reactivate = reactivate.is_some();
+    // A digest match means the generation exists — but only a generation
+    // that previously HELD the active pointer is a rollback; a merely
+    // proposed/tested generation taking the pointer for the first time is
+    // an ordinary activation.
+    let is_rollback = match &reactivate {
+        Some(id) => generation_previously_active(&journal, id).await?,
+        None => false,
+    };
     let generation_id = match reactivate {
         Some(existing) => existing,
         None => {
@@ -618,7 +629,7 @@ async fn bootstrap_config(
         format!("config.test.{generation_id}"),
     )
     .await?;
-    if was_reactivate {
+    if is_rollback {
         // Moving the pointer back to a previously-active generation is a
         // rollback — emit `ConfigRolledBack`, not `ConfigActivated`.
         submit(
@@ -657,6 +668,36 @@ async fn bootstrap_config(
     let _ = clock;
     tracing::info!(generation_id, "config generation activated");
     Ok(Some(generation_id))
+}
+
+/// Scans the durable `config/global` journal for a `ConfigActivated` or
+/// `ConfigRolledBack` event naming `generation_id` — proof the pointer
+/// previously referenced it (distinguishes a true rollback from the
+/// first activation of a CLI-proposed generation).
+async fn generation_previously_active(
+    journal: &Arc<dyn events::journal::EventJournalPort>,
+    generation_id: &str,
+) -> errors::Result<bool> {
+    let key = events::stream::StreamKey::config_global();
+    let mut from = 0u64;
+    loop {
+        let page = journal.read_stream(&key, from, 512).await?;
+        if page.events.is_empty() {
+            return Ok(false);
+        }
+        for event in &page.events {
+            from = event.sequence;
+            let is_activation = event.event_type.ends_with("ConfigActivated")
+                || event.event_type.ends_with("ConfigRolledBack");
+            if is_activation
+                && contract::ConfigGeneration::decode(event.payload.as_slice())
+                    .map(|g| g.generation_id == generation_id)
+                    .unwrap_or(false)
+            {
+                return Ok(true);
+            }
+        }
+    }
 }
 
 /// Reads the active generation id, when one is set.
