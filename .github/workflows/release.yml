@@ -36,7 +36,7 @@ jobs:
           - { label: linux-x86_64, os: ubuntu-22.04 }
           - { label: windows-x86_64, os: windows-latest }
           - { label: macos-arm64, os: macos-14 }
-          - { label: macos-x86_64, os: macos-13 }
+          - { label: macos-x86_64, os: macos-15-intel }
     defaults:
       run:
         working-directory: apps/desktop
@@ -100,7 +100,7 @@ jobs:
         include:
           - { label: linux-x86_64, os: ubuntu-22.04 }
           - { label: macos-arm64, os: macos-14 }
-          - { label: macos-x86_64, os: macos-13 }
+          - { label: macos-x86_64, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (repo-pinned channel)
