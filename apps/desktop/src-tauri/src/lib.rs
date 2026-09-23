@@ -50,6 +50,14 @@ fn cancelled() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // The daemon is a singleton — a second launch just focuses the
+        // running instance's window instead of competing for it.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
             let window = open_window(app.handle())?;
             match env::var("AGENTOS_GATEWAY")
@@ -227,7 +235,8 @@ fn wait_for_tcp(port: u16) -> Result<(), String> {
 /// socket file left by a crashed run doesn't count.
 #[cfg(unix)]
 fn daemon_ready(socket: &Path) -> bool {
-    socket.is_file() && std::os::unix::net::UnixStream::connect(socket).is_ok()
+    // is_file() excludes S_IFSOCK — connect alone covers missing/stale.
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 #[cfg(not(unix))]
@@ -243,6 +252,12 @@ fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
         if cancelled() {
             return Err("startup cancelled".to_owned());
         }
+        // A live socket wins over a dead child: on simultaneous launches
+        // the loser's agentd exits on the lock while the winner's is
+        // already answering — attach instead of reporting failure.
+        if daemon_ready(socket) {
+            return Ok(());
+        }
         {
             let mut children = CHILDREN.lock().expect("children");
             if !matches!(children[child].try_wait(), Ok(None)) {
@@ -251,9 +266,6 @@ fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
                         .to_owned(),
                 );
             }
-        }
-        if daemon_ready(socket) {
-            return Ok(());
         }
         thread::sleep(POLL);
     }
