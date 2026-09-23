@@ -72,7 +72,7 @@ jobs:
           triple=$(rustc -vV | awk '/^host:/{print $2}')
           cd "$GITHUB_WORKSPACE/agent-os"
           cargo build --release --target "$triple" \
-            -p agentd -p agentgw \
+            -p agentd -p agentgw -p wasm-host \
             -p local-memory -p openrouter-loop -p openrouter-effect \
             -p acp-loop -p fixture-agent-loop -p fixture-effect-adapter
           cargo build --release --target wasm32-wasip1 -p wasm-echo
@@ -177,12 +177,15 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
           files: artifacts/**/*
           body: |
-            Desktop installers for the Agent OS gateway shell plus CLI
-            binaries (agentd / agentctl / agentgw / agentos-wasm-host and
-            the bundled adapters). The desktop app connects to a running
-            gateway — start `agentd` + `agentgw` first (see
-            docs/guides/web-gui-and-llm-adapter.md), or set
-            AGENTOS_GATEWAY to a reachable gateway URL.
+            Desktop installers plus CLI binaries (agentd / agentctl /
+            agentgw / agentos-wasm-host and the bundled adapters).
+
+            The macOS and Linux desktop apps are self-contained: they
+            spawn the embedded `agentd` + `agentgw` and adapter bundles
+            at launch, then open the dashboard — no terminal steps. The
+            Windows build runs in remote-gateway mode: start `agentd` +
+            `agentgw` first (see docs/guides/web-gui-and-llm-adapter.md)
+            or set AGENTOS_GATEWAY to a reachable gateway URL.
 
             Binaries are unsigned: macOS Gatekeeper and Windows
             SmartScreen will warn on first launch.

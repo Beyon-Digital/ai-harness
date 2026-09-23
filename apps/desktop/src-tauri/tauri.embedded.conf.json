@@ -3,7 +3,8 @@
   "bundle": {
     "externalBin": [
       "binaries/agentd",
-      "binaries/agentgw"
+      "binaries/agentgw",
+      "binaries/agentos-wasm-host"
     ],
     "resources": {
       "resources/agentos": "agentos"

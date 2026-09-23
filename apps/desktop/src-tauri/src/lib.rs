@@ -57,7 +57,10 @@ pub fn run() {
                     let handle = app.handle().clone();
                     thread::spawn(move || match bootstrap(&handle) {
                         Ok(url) => navigate(&window, url),
-                        Err(e) => fail(&window, &e),
+                        Err(e) => {
+                            kill_children();
+                            fail(&window, &e);
+                        }
                     });
                 }
             }
@@ -260,11 +263,33 @@ fn spawn(cmd: &mut Command, log_path: &Path) -> Result<(), String> {
 }
 
 fn kill_children() {
-    let mut children = CHILDREN.lock().expect("children");
-    for mut child in children.drain(..) {
-        let _ = child.kill();
-        let _ = child.wait();
+    // Spawn order is agentd then agentgw; reverse so the gateway stops
+    // first and the daemon can drain its adapter children last.
+    let mut children: Vec<Child> = CHILDREN.lock().expect("children").drain(..).collect();
+    for child in children.iter_mut().rev() {
+        stop_child(child);
     }
+}
+
+/// SIGTERM first — agentd handles it by draining adapter children and
+/// completing shutdown; escalate to SIGKILL past the grace window.
+fn stop_child(child: &mut Child) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                _ => return,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Sidecars sit next to the app executable, named `<name>` or

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stage the embedded runtime the desktop app spawns at launch:
-#   src-tauri/binaries/{agentd,agentgw}-<triple>[.exe]  (externalBin sidecars)
+#   src-tauri/binaries/{agentd,agentgw,agentos-wasm-host}-<triple>[.exe]
+#                                                        (externalBin sidecars)
 #   src-tauri/resources/agentos/share/**               (bundle resources:
 #                                                       configs, manifests,
 #                                                       adapter bundles)
@@ -25,7 +26,7 @@ ext=""
 [[ "$triple" == *windows* ]] && ext=".exe"
 
 mkdir -p "$tauri_dir/binaries"
-for b in agentd agentgw; do
+for b in agentd agentgw agentos-wasm-host; do
   src="$aos/target/$triple/release/$b$ext"
   [[ -f "$src" ]] || src="$aos/target/release/$b$ext"   # native build dir
   [[ -f "$src" ]] || { echo "missing $src"; exit 1; }
