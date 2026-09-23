@@ -220,6 +220,14 @@ fn open_dir(dir: &Path) -> Result<(), String> {
 }
 
 fn navigate(window: &WebviewWindow, url: Url) {
+    // Title reflects the destination: the error page marks failure, any
+    // other page means a recovered or connected app.
+    let title = if url.path() == "/error.html" {
+        "Agent OS — startup failed"
+    } else {
+        "Agent OS"
+    };
+    let _ = window.set_title(title);
     if let Err(e) = window.navigate(url) {
         eprintln!("agent-os: navigate failed: {e}");
     }
@@ -227,7 +235,6 @@ fn navigate(window: &WebviewWindow, url: Url) {
 
 fn fail(window: &WebviewWindow, msg: &str) {
     eprintln!("agent-os: {msg}");
-    let _ = window.set_title("Agent OS — startup failed");
     let mut url = format!("{TAURI_ORIGIN}/error.html?msg={}", urlencode(msg));
     // The page echoes the path verbatim so non-technical users don't have
     // to know where the platform's app-data dir lives.
