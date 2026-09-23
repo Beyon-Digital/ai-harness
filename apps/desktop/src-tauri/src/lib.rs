@@ -467,36 +467,44 @@ fn spawn(cmd: &mut Command, log_path: &Path) -> Result<usize, String> {
     Ok(children.len() - 1)
 }
 
+/// Bundled configs give agentd a 30s drain deadline
+/// (`limits.shutdown.drain_deadline_ms`) — allow it plus teardown.
+const DRAIN_GRACE: Duration = Duration::from_secs(35);
+
 fn kill_children() {
-    // Spawn order is agentd then agentgw; reverse so the gateway stops
-    // first and the daemon can drain its adapter children last.
+    // Signal every child before waiting: agentd begins draining while
+    // the gateway exits — serial SIGTERM-then-wait would stack the
+    // grace windows.
     let mut children: Vec<Child> = CHILDREN.lock().expect("children").drain(..).collect();
     for child in children.iter_mut().rev() {
-        stop_child(child);
+        terminate(child);
+    }
+    let deadline = Instant::now() + DRAIN_GRACE;
+    while Instant::now() < deadline
+        && children
+            .iter_mut()
+            .any(|c| matches!(c.try_wait(), Ok(None)))
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
-/// SIGTERM first — agentd handles it by draining adapter children and
-/// completing shutdown; escalate to SIGKILL past the grace window.
-fn stop_child(child: &mut Child) {
-    if !matches!(child.try_wait(), Ok(None)) {
-        return;
-    }
-    #[cfg(unix)]
-    {
+/// SIGTERM when still running — agentd handles it by draining adapter
+/// children and completing shutdown; escalation happens in kill_children.
+#[cfg(unix)]
+fn terminate(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(None)) {
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        // Bundled configs give agentd a 30s drain deadline
-        // (`limits.shutdown.drain_deadline_ms`) — allow it plus teardown.
-        let deadline = Instant::now() + Duration::from_secs(35);
-        while Instant::now() < deadline {
-            match child.try_wait() {
-                Ok(None) => thread::sleep(Duration::from_millis(50)),
-                _ => return,
-            }
-        }
     }
+}
+
+#[cfg(not(unix))]
+fn terminate(child: &mut Child) {
     let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// Sidecars sit next to the app executable, named `<name>` or
