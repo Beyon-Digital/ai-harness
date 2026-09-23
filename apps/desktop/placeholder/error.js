@@ -16,7 +16,9 @@ if (!invoke) {
   openLogs.style.display = "none";
 } else {
   openLogs.addEventListener("click", () => {
-    invoke("open_logs").catch(() => {});
+    invoke("open_logs").catch((e) => {
+      openLogs.textContent = `Couldn't open: ${e}`;
+    });
   });
   retry.addEventListener("click", () => {
     retry.disabled = true;

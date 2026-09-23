@@ -201,30 +201,22 @@ fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_dir(dir: &Path) -> Result<(), String> {
-    Command::new("open")
-        .arg(dir)
-        .status()
-        .map_err(|e| format!("open: {e}"))?;
-    Ok(())
-}
-
+const OPENER: &str = "open";
 #[cfg(target_os = "windows")]
-fn open_dir(dir: &Path) -> Result<(), String> {
-    Command::new("explorer")
-        .arg(dir)
-        .status()
-        .map_err(|e| format!("explorer: {e}"))?;
-    Ok(())
-}
-
+const OPENER: &str = "explorer";
 #[cfg(all(unix, not(target_os = "macos")))]
+const OPENER: &str = "xdg-open";
+
 fn open_dir(dir: &Path) -> Result<(), String> {
-    Command::new("xdg-open")
+    let status = Command::new(OPENER)
         .arg(dir)
         .status()
-        .map_err(|e| format!("xdg-open: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("{OPENER}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{OPENER} exited with {status}"))
+    }
 }
 
 fn navigate(window: &WebviewWindow, url: Url) {
@@ -328,6 +320,7 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
         // A service that exits before answering gets one retry — a flaky
         // first spawn shouldn't hard-fail the whole launch.
         for attempt in 0..=1 {
+            let log_from = log_len(&agentd_log);
             let daemon = spawn(&mut agentd_cmd, &agentd_log)?;
             match wait_for_daemon(&socket, daemon) {
                 ServiceWait::Ready => break,
@@ -337,14 +330,14 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
                 ServiceWait::Exited => {
                     return Err(format!(
                         "agentd exited during startup{}",
-                        log_tail_msg(&agentd_log)
+                        log_tail_msg(&agentd_log, log_from)
                     ));
                 }
                 ServiceWait::TimedOut => {
                     return Err(format!(
                         "daemon did not create {} within {BOOT_TIMEOUT:?}{}",
                         socket.display(),
-                        log_tail_msg(&agentd_log)
+                        log_tail_msg(&agentd_log, log_from)
                     ));
                 }
                 ServiceWait::Cancelled => return Err("startup cancelled".to_owned()),
@@ -365,6 +358,7 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
             .envs(child_env());
+        let log_from = log_len(&agentgw_log);
         let gateway = spawn(&mut agentgw_cmd, &agentgw_log)?;
         match wait_for_tcp(port, gateway) {
             ServiceWait::Ready => break,
@@ -374,13 +368,13 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
             ServiceWait::Exited => {
                 return Err(format!(
                     "agentgw exited during startup{}",
-                    log_tail_msg(&agentgw_log)
+                    log_tail_msg(&agentgw_log, log_from)
                 ));
             }
             ServiceWait::TimedOut => {
                 return Err(format!(
                     "gateway did not open port {port} within {BOOT_TIMEOUT:?}{}",
-                    log_tail_msg(&agentgw_log)
+                    log_tail_msg(&agentgw_log, log_from)
                 ));
             }
             ServiceWait::Cancelled => return Err("startup cancelled".to_owned()),
@@ -465,13 +459,43 @@ fn wait_for_daemon(socket: &Path, child: usize) -> ServiceWait {
     ServiceWait::TimedOut
 }
 
-/// The last lines of a service log, ANSI-stripped — appended to a startup
-/// failure so the error page shows *why* instead of only where to look.
-fn log_tail(path: &Path) -> Option<String> {
+/// File length captured just before a spawn — `log_tail` only reports
+/// bytes appended after this point, so a process that dies silently
+/// can't inherit an earlier run's output as its reported failure.
+fn log_len(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// The last lines written to a service log by *this* spawn — ANSI-
+/// stripped, appended to a startup failure so the error page shows *why*
+/// instead of only where to look. The read is bounded: logs are append-
+/// only across launches, so it seeks near the end rather than loading a
+/// file that grew over the app's lifetime.
+fn log_tail(path: &Path, from: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
     const LINES: usize = 20;
     const BYTES: usize = 4000;
-    let raw = fs::read(path).ok()?;
+    // Well past the BYTES cap applied after line selection, to cover
+    // over-long lines.
+    const WINDOW: u64 = (BYTES as u64) * 4;
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= from {
+        return None;
+    }
+    let start = from.max(len.saturating_sub(WINDOW));
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw).ok()?;
     let text = strip_ansi(&String::from_utf8_lossy(&raw));
+    // A window starting mid-file begins mid-line — drop the partial.
+    let text = if start > from {
+        text.split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or(text.as_str())
+    } else {
+        text.as_str()
+    };
     let tail: Vec<&str> = text.lines().rev().take(LINES).collect();
     if tail.is_empty() {
         return None;
@@ -489,8 +513,8 @@ fn log_tail(path: &Path) -> Option<String> {
 
 /// Formats the log tail for an error message, or a pointer to the file
 /// when nothing was captured (process died before writing anything).
-fn log_tail_msg(log: &Path) -> String {
-    match log_tail(log) {
+fn log_tail_msg(log: &Path, from: u64) -> String {
+    match log_tail(log, from) {
         Some(tail) => format!("\n\n{tail}"),
         None => " — the service wrote no log output".to_owned(),
     }
