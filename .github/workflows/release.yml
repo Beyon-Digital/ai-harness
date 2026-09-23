@@ -37,7 +37,7 @@ permissions:
 
 env:
   IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || inputs.publish }}
-  RELEASE_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.ref == 'refs/heads/main' && 'dev-latest' || format('dev-{0}', github.ref_name)) }}
+  RELEASE_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.ref == 'refs/heads/main' && 'dev-latest' || format('dev-{0}', github.sha)) }}
 
 jobs:
   desktop:
@@ -182,17 +182,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # The rolling dev channel reuses one tag — move it to the commit
-      # that was just built before the release action attaches to it.
-      - name: Point the dev-latest tag at this commit
+      # The rolling dev channel reuses one release — drop stale assets
+      # first so a renamed or version-bumped installer can't linger next
+      # to the current set on the release page.
+      - name: Clear stale dev-latest assets
         if: ${{ env.RELEASE_NAME == 'dev-latest' }}
         uses: actions/github-script@v7
         with:
           script: |
             try {
-              await github.rest.git.updateRef({ owner: context.repo.owner, repo: context.repo.repo, ref: 'tags/dev-latest', sha: context.sha, force: true });
-            } catch {
-              await github.rest.git.createRef({ owner: context.repo.owner, repo: context.repo.repo, ref: 'refs/tags/dev-latest', sha: context.sha });
+              const rel = await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag: 'dev-latest' });
+              for (const asset of rel.data.assets) {
+                await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: asset.id });
+              }
+            } catch (e) {
+              if (e.status !== 404) throw e;
             }
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -202,16 +206,17 @@ jobs:
           draft: false
           prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
           generate_release_notes: true
-          # Curated installables only — a recursive glob would attach the
+          # Curated installables only — download-artifact strips the
+          # `bundle` common root, and a recursive glob would attach the
           # raw contents of bundle dirs (hundreds of files inside .app).
           files: |
             artifacts/cli-*/agentos-*.tar.gz
-            artifacts/desktop-*/bundle/dmg/*.dmg
-            artifacts/desktop-*/bundle/appimage/*.AppImage
-            artifacts/desktop-*/bundle/deb/*.deb
-            artifacts/desktop-*/bundle/rpm/*.rpm
-            artifacts/desktop-*/bundle/msi/*.msi
-            artifacts/desktop-*/bundle/nsis/*.exe
+            artifacts/desktop-*/dmg/*.dmg
+            artifacts/desktop-*/appimage/*.AppImage
+            artifacts/desktop-*/deb/*.deb
+            artifacts/desktop-*/rpm/*.rpm
+            artifacts/desktop-*/msi/*.msi
+            artifacts/desktop-*/nsis/*.exe
           body: |
             Desktop installers plus CLI binaries (agentd / agentctl /
             agentgw / agentos-wasm-host and the bundled adapters).
@@ -227,3 +232,16 @@ jobs:
             SmartScreen will warn on first launch.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Flip the rolling tag last, once assets are fully uploaded — a
+      # failed publish then leaves tag and release pointing at the same
+      # previous commit instead of splitting them.
+      - name: Point the dev-latest tag at this commit
+        if: ${{ env.RELEASE_NAME == 'dev-latest' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.git.updateRef({ owner: context.repo.owner, repo: context.repo.repo, ref: 'tags/dev-latest', sha: context.sha, force: true });
+            } catch {
+              await github.rest.git.createRef({ owner: context.repo.owner, repo: context.repo.repo, ref: 'refs/tags/dev-latest', sha: context.sha });
+            }

@@ -63,24 +63,34 @@ Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
 
 ## Releases
 
-`.github/workflows/release.yml` builds installers and CLI archives on
-every `v*` tag push and publishes them to a draft GitHub Release:
+`.github/workflows/release.yml` publishes GitHub Releases automatically:
+
+- **Every merge to `main`** rebuilds the matrix and refreshes the
+  rolling **`dev-latest`** prerelease — `releases/tag/dev-latest` always
+  carries the newest build (stale assets are cleared first, then the
+  tag moves to the built commit).
+- **`v*` tags publish a full release** directly (tag names containing
+  `-`, e.g. `v1.0.0-rc1`, land as prereleases).
+- **Manual `workflow_dispatch`** with `publish: true` does the same on
+  demand.
+
+Assets on every release:
 
 - Desktop: `.dmg` (macOS arm64 + Intel), `.msi`/`.nsis` (Windows),
   `.AppImage`/`.deb` (Linux x86_64).
-- CLI archives (`agentos-<tag>-<platform>.tar.gz`): `agentd`,
+- CLI archives (`agentos-<name>-<platform>.tar.gz`): `agentd`,
   `agentctl`, `agentgw`, `agentos-wasm-host`, the adapter binaries,
   `wasm-echo.wasm`, `make-adapter-bundle.sh`, config manifests, and the
   gateway guide. Unix-only — the daemon speaks Unix sockets; on Windows
   the desktop app points at a remote `agentgw` via `AGENTOS_GATEWAY`.
 
-Cut a release:
+Cut a stable release:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
-# → release workflow → draft release with all artifacts attached
+# → release workflow → published release with all artifacts attached
 ```
 
-PRs touching `apps/desktop/**` and manual `workflow_dispatch` runs
-execute the same matrix build-only (artifacts on the run, nothing
-published), so the packaging path is always exercised before a tag.
+PRs touching `apps/desktop/**` execute the same matrix build-only
+(artifacts on the run, nothing published), so the packaging path is
+always exercised before a tag.
