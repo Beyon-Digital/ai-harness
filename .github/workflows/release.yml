@@ -243,10 +243,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const expected = require('fs').readFileSync(`${process.env.RUNNER_TEMP}/expected-assets.txt`, 'utf8').split('\n').filter(Boolean);
+            // GitHub normalizes asset `name` (spaces become dots), while the
+            // release action restores the original filename as `label` —
+            // match either, or every spaced filename looks "obsolete".
+            const expected = new Set(require('fs').readFileSync(`${process.env.RUNNER_TEMP}/expected-assets.txt`, 'utf8').split('\n').filter(Boolean));
             const rel = await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag: 'dev-latest' });
             for (const asset of rel.data.assets) {
-              if (!expected.includes(asset.name)) {
+              if (!expected.has(asset.name) && !expected.has(asset.label)) {
                 await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: asset.id });
               }
             }
