@@ -15,8 +15,11 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
-    thread,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -36,6 +39,13 @@ const TAURI_ORIGIN: &str = "tauri://localhost";
 const TAURI_ORIGIN: &str = "http://tauri.localhost";
 
 static CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+static BOOTSTRAP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+/// Set on app exit so a mid-flight bootstrap stops before spawning more.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+fn cancelled() -> bool {
+    CANCEL.load(Ordering::Relaxed)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -55,13 +65,14 @@ pub fn run() {
                 },
                 None => {
                     let handle = app.handle().clone();
-                    thread::spawn(move || match bootstrap(&handle) {
+                    let join = thread::spawn(move || match bootstrap(&handle) {
                         Ok(url) => navigate(&window, url),
                         Err(e) => {
                             kill_children();
                             fail(&window, &e);
                         }
                     });
+                    *BOOTSTRAP.lock().expect("bootstrap") = Some(join);
                 }
             }
             Ok(())
@@ -70,6 +81,12 @@ pub fn run() {
         .expect("agent-os desktop failed to start");
     app.run(|_, event| {
         if let RunEvent::Exit = event {
+            // Join bootstrap before teardown so a child can't be spawned
+            // after CHILDREN is drained.
+            CANCEL.store(true, Ordering::Relaxed);
+            if let Some(join) = BOOTSTRAP.lock().expect("bootstrap").take() {
+                let _ = join.join();
+            }
             kill_children();
         }
     });
@@ -101,21 +118,28 @@ fn fail(window: &WebviewWindow, msg: &str) {
 /// Spawn the embedded services and return the gateway URL once it is
 /// answering. Sidecars absent → remote-gateway fallback URL.
 fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
-    let agentd = find_sidecar("agentd");
-    let agentgw = find_sidecar("agentgw");
-    let (agentd, agentgw) = match (agentd, agentgw) {
-        (Some(a), Some(g)) => (a, g),
-        _ => {
-            return DEFAULT_GATEWAY.parse().map_err(|e| format!("{e}"));
-        }
-    };
-
     let resource_dir = handle
         .path()
         .resource_dir()
         .map_err(|e| format!("resource dir: {e}"))?;
     let staged_src = resource_dir.join("agentos");
-    if !staged_src.is_dir() {
+    // A packaged app ships `agentos/share` — its absence means an
+    // unpackaged build (Windows, dev shell) where remote-gateway mode
+    // is the intended path.
+    let packaged = staged_src.join("share").is_dir();
+
+    let (agentd, agentgw) = match (find_sidecar("agentd"), find_sidecar("agentgw")) {
+        (Some(a), Some(g)) => (a, g),
+        _ if packaged => {
+            return Err(
+                "embedded services missing from the app bundle — reinstall the app".to_owned(),
+            )
+        }
+        _ => {
+            return DEFAULT_GATEWAY.parse().map_err(|e| format!("{e}"));
+        }
+    };
+    if !packaged {
         return Err(format!(
             "embedded runtime not staged (missing {})",
             staged_src.display()
@@ -136,25 +160,35 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
     let logs = data_dir.join("logs");
     let _ = fs::create_dir_all(&logs);
 
-    let config = pick_config(&staged_share)?;
-    let bundles = bundle_dirs(&staged_share.join("bundles"))?;
-
-    let mut agentd_cmd = Command::new(&agentd);
-    agentd_cmd
-        .arg("--runtime-dir")
-        .arg(&runtime_dir)
-        .arg("--config")
-        .arg(&config);
-    for b in &bundles {
-        agentd_cmd.arg("--adapter-bundle").arg(b);
+    // The daemon lock is a singleton per runtime dir: when a first app
+    // instance (or a manually started agentd) already answers, attach a
+    // gateway to it instead of spawning a second agentd that exits on
+    // the lock. The socket connect proves a live daemon — a stale file
+    // alone doesn't.
+    if daemon_ready(&socket) {
+        eprintln!(
+            "agent-os: attaching to running daemon at {}",
+            socket.display()
+        );
+    } else {
+        let config = pick_config(&staged_share)?;
+        let bundles = bundle_dirs(&staged_share.join("bundles"))?;
+        let mut agentd_cmd = Command::new(&agentd);
+        agentd_cmd
+            .arg("--runtime-dir")
+            .arg(&runtime_dir)
+            .arg("--config")
+            .arg(&config);
+        for b in &bundles {
+            agentd_cmd.arg("--adapter-bundle").arg(b);
+        }
+        let daemon = spawn(&mut agentd_cmd, &logs.join("agentd.log"))?;
+        wait_for_daemon(&socket, daemon)?;
     }
-    spawn(&mut agentd_cmd, &logs.join("agentd.log"))?;
 
-    wait_for_path(&socket)?;
-    // The socket file existing doesn't guarantee the listener is up;
-    // agentgw dials lazily per request, so start it once the file appears.
-    thread::sleep(Duration::from_millis(300));
-
+    if cancelled() {
+        return Err("startup cancelled".to_owned());
+    }
     let port = pick_port();
     let mut agentgw_cmd = Command::new(&agentgw);
     agentgw_cmd
@@ -176,6 +210,9 @@ fn wait_for_tcp(port: u16) -> Result<(), String> {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     while Instant::now() < deadline {
+        if cancelled() {
+            return Err("startup cancelled".to_owned());
+        }
         if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
             return Ok(());
         }
@@ -186,17 +223,43 @@ fn wait_for_tcp(port: u16) -> Result<(), String> {
     ))
 }
 
-fn wait_for_path(path: &Path) -> Result<(), String> {
+/// True when a daemon already answers on the control socket — a stale
+/// socket file left by a crashed run doesn't count.
+#[cfg(unix)]
+fn daemon_ready(socket: &Path) -> bool {
+    socket.is_file() && std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
+#[cfg(not(unix))]
+fn daemon_ready(socket: &Path) -> bool {
+    socket.is_file()
+}
+
+/// Poll until the daemon's control socket answers; fails fast if the
+/// spawned agentd exits first (e.g. it lost the daemon lock).
+fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     while Instant::now() < deadline {
-        if path.exists() {
+        if cancelled() {
+            return Err("startup cancelled".to_owned());
+        }
+        {
+            let mut children = CHILDREN.lock().expect("children");
+            if !matches!(children[child].try_wait(), Ok(None)) {
+                return Err(
+                    "agentd exited during startup — see logs/agentd.log in the app data dir"
+                        .to_owned(),
+                );
+            }
+        }
+        if daemon_ready(socket) {
             return Ok(());
         }
         thread::sleep(POLL);
     }
     Err(format!(
         "daemon did not create {} within {BOOT_TIMEOUT:?} — see logs/agentd.log in the app data dir",
-        path.display()
+        socket.display()
     ))
 }
 
@@ -245,7 +308,9 @@ fn bundle_dirs(bundles: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-fn spawn(cmd: &mut Command, log_path: &Path) -> Result<(), String> {
+/// Spawn `cmd`, log its output, register it for teardown, and return
+/// its CHILDREN index so callers can watch for early exits.
+fn spawn(cmd: &mut Command, log_path: &Path) -> Result<usize, String> {
     let prog = cmd.get_program().to_string_lossy().into_owned();
     let log = fs::OpenOptions::new()
         .create(true)
@@ -258,8 +323,9 @@ fn spawn(cmd: &mut Command, log_path: &Path) -> Result<(), String> {
         .stderr(Stdio::from(log_err))
         .spawn()
         .map_err(|e| format!("spawn {prog}: {e}"))?;
-    CHILDREN.lock().expect("children").push(child);
-    Ok(())
+    let mut children = CHILDREN.lock().expect("children");
+    children.push(child);
+    Ok(children.len() - 1)
 }
 
 fn kill_children() {

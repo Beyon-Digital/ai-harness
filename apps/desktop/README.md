@@ -32,7 +32,7 @@ npm run dev          # dev window → http://127.0.0.1:7740 (external mode)
 # first, stage them, then bundle:
 triple=$(rustc -vV | awk '/^host:/{print $2}')
 (cd ../../agent-os && cargo build --release --target "$triple" \
-  -p agentd -p agentgw -p local-memory -p openrouter-loop \
+  -p agentd -p agentgw -p wasm-host -p local-memory -p openrouter-loop \
   -p openrouter-effect -p acp-loop -p fixture-agent-loop \
   -p fixture-effect-adapter \
   && cargo build --release --target wasm32-wasip1 -p wasm-echo)
