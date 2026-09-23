@@ -182,15 +182,24 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # Expected asset names for this run — recorded before upload so
-      # post-upload cleanup can drop anything stale instead of wiping
-      # the working release first (a failed upload must not erase the
-      # previous complete set).
-      - name: Record expected asset names
+      # Rolling-channel assets get a per-commit suffix so an upload can
+      # never overwrite the live set mid-run — a failed publish leaves the
+      # previous complete release untouched. Post-upload cleanup then
+      # drops every asset whose name isn't in this build's set.
+      - name: Suffix dev assets and record expected names
         if: ${{ env.RELEASE_NAME == 'dev-latest' }}
         working-directory: artifacts
         run: |
-          find . -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' -o -name '*.tar.gz' \) -printf '%f\n' | sort -u > "$RUNNER_TEMP/expected-assets.txt"
+          find . -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' -o -name '*.tar.gz' \) -print0 |
+          while IFS= read -r -d '' f; do
+            base=$(basename "$f")
+            case "$base" in
+              *.tar.gz) new="${base%.tar.gz}-dev.${GITHUB_SHA:0:8}.tar.gz" ;;
+              *)        new="${base%.*}-dev.${GITHUB_SHA:0:8}.${base##*.}" ;;
+            esac
+            mv "$f" "$(dirname "$f")/$new"
+            printf '%s\n' "$new" >> "$RUNNER_TEMP/expected-assets.txt"
+          done
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
