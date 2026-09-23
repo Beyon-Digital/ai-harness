@@ -1,38 +1,65 @@
 # Agent OS Desktop
 
-Native desktop shell (Tauri v2) for the Agent OS web gateway. The app
-opens the running `agentgw` UI in a native window — the shell ships no
-frontend of its own, so the same React app serves browser and desktop.
+Native desktop app (Tauri v2) for the Agent OS web gateway. On macOS and
+Linux the app is self-contained: it bundles `agentd`, `agentgw`, the
+adapter bundles and configs, spawns them on launch, and opens the
+gateway UI in a native window once it answers — no terminal needed.
 
 ## Run
 
+Just launch the app. It stages the embedded runtime into the app data
+dir, starts `agentd` + `agentgw` (port 7740, or a free port if taken),
+and loads the dashboard when it's up. Service logs live under the app
+data dir in `logs/`; runtime state (kernel.db, events.db) in `run/`.
+
+## Environment
+
+Every variable the services read has a built-in default — nothing needs
+to be set for the app to work. Two ways to customize:
+
+- `agentos.env` in the app data dir — auto-created on first launch with
+  a commented template (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`,
+  `AGENTOS_GATEWAY`, `AGENTOS_CONFIG`, `MCP_SERVERS`, `ACP_*`, …). Edit
+  it in any text editor and relaunch; no terminal needed.
+- Real environment variables — always win over the file.
+
+Key vars: `AGENTOS_GATEWAY=http://host:port` skips the embedded
+services entirely (remote-gateway mode); `AGENTOS_CONFIG=<name>.yaml`
+picks a bundled config from `share/`; `OPENROUTER_API_KEY` set → the
+app auto-picks `openrouter.yaml` for the real-LLM path.
+
 ```sh
-# 1. Start the stack (from agent-os/):
-agentd --runtime-dir /tmp/run --config config/openrouter.yaml
-agentgw --socket /tmp/run/control.sock --listen 127.0.0.1:7740
+AGENTOS_GATEWAY=http://my-host:7740 ./Agent\ OS.app/...   # remote gateway, no local services
+AGENTOS_CONFIG=openrouter.yaml                            # pick a bundled config
+OPENROUTER_API_KEY=sk-or-...                              # auto-picks openrouter.yaml
+```
 
-# 2. Launch the shell (from apps/desktop/):
+```sh
 npm install          # once — fetches the Tauri CLI
-npm run dev          # dev window → http://127.0.0.1:7740
-
-# Or point at another gateway:
-AGENTOS_GATEWAY=http://my-host:7740 npm run dev
+npm run dev          # dev window → http://127.0.0.1:7740 (external mode)
 ```
 
 ## Installable builds
 
 ```sh
-npm run build        # tauri build → src-tauri/target/release/bundle/
+# Unix (macOS/Linux): self-contained app — build agent-os release bins
+# first, stage them, then bundle:
+triple=$(rustc -vV | awk '/^host:/{print $2}')
+(cd ../../agent-os && cargo build --release --target "$triple" \
+  -p agentd -p agentgw -p wasm-host -p local-memory -p openrouter-loop \
+  -p openrouter-effect -p acp-loop -p fixture-agent-loop \
+  -p fixture-effect-adapter \
+  && cargo build --release --target wasm32-wasip1 -p wasm-echo)
+./scripts/stage-embedded-runtime.sh "$triple"
+npm ci && npm run build:embedded
+
+# Windows (no embedded runtime — the daemon speaks Unix sockets):
+npm ci && npm run build
 ```
 
 Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
 (Windows), `.AppImage`/`.deb` (Linux). Linux builds need webkit2gtk
 (`apt install libwebkit2gtk-4.1-dev libappindicator3-dev patchelf`).
-
-The shell is intentionally thin — it loads the gateway URL, so a release
-build still talks to a running daemon+gateway. Bundling `agentd` as a
-sidecar binary is a follow-up: add it to `bundle.externalBin` and spawn
-it from `lib.rs::run()` before opening the window.
 
 ## Releases
 

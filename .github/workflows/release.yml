@@ -36,7 +36,7 @@ jobs:
           - { label: linux-x86_64, os: ubuntu-22.04 }
           - { label: windows-x86_64, os: windows-latest }
           - { label: macos-arm64, os: macos-14 }
-          - { label: macos-x86_64, os: macos-13 }
+          - { label: macos-x86_64, os: macos-15-intel }
     defaults:
       run:
         working-directory: apps/desktop
@@ -51,10 +51,13 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.94.0"
+          targets: wasm32-wasip1
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/src-tauri
+          workspaces: |
+            agent-os
+            apps/desktop/src-tauri
       - name: Linux webview/build deps
         if: runner.os == 'Linux'
         run: |
@@ -63,7 +66,26 @@ jobs:
             librsvg2-dev patchelf libxdo-dev libssl-dev libfuse2 file
       - name: Install JS deps
         run: npm ci
-      - name: Build bundles
+      - name: Build + stage embedded runtime (Unix sidecars)
+        if: runner.os != 'Windows'
+        run: |
+          triple=$(rustc -vV | awk '/^host:/{print $2}')
+          cd "$GITHUB_WORKSPACE/agent-os"
+          cargo build --release --target "$triple" \
+            -p agentd -p agentgw -p wasm-host \
+            -p local-memory -p openrouter-loop -p openrouter-effect \
+            -p acp-loop -p fixture-agent-loop -p fixture-effect-adapter
+          cargo build --release --target wasm32-wasip1 -p wasm-echo
+          "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
+      - name: Build bundles (self-contained app)
+        if: runner.os != 'Windows'
+        # Finder-AppleScript DMG styling times out on headless CI;
+        # respecting CI skips it (slightly plainer DMG layout).
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: false
+        run: npm run build:embedded
+      - name: Build bundles (remote-gateway shell)
+        if: runner.os == 'Windows'
         run: npm run build
       - name: Upload bundles as workflow artifacts
         uses: actions/upload-artifact@v4
@@ -82,7 +104,7 @@ jobs:
         include:
           - { label: linux-x86_64, os: ubuntu-22.04 }
           - { label: macos-arm64, os: macos-14 }
-          - { label: macos-x86_64, os: macos-13 }
+          - { label: macos-x86_64, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (repo-pinned channel)
@@ -134,9 +156,11 @@ jobs:
 
   # One publish job owns the draft release — parallel matrix jobs calling
   # a release action can race on release creation and attach subsets.
+  # `env` is not a valid context in a job-level `if` (workflow env vars
+  # aren't evaluated there), so the release predicate is inlined.
   publish:
     name: Publish draft release
-    if: ${{ env.IS_RELEASE }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.publish }}
     needs: [desktop, cli]
     runs-on: ubuntu-latest
     steps:
@@ -153,12 +177,15 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_NAME, '-') }}
           files: artifacts/**/*
           body: |
-            Desktop installers for the Agent OS gateway shell plus CLI
-            binaries (agentd / agentctl / agentgw / agentos-wasm-host and
-            the bundled adapters). The desktop app connects to a running
-            gateway — start `agentd` + `agentgw` first (see
-            docs/guides/web-gui-and-llm-adapter.md), or set
-            AGENTOS_GATEWAY to a reachable gateway URL.
+            Desktop installers plus CLI binaries (agentd / agentctl /
+            agentgw / agentos-wasm-host and the bundled adapters).
+
+            The macOS and Linux desktop apps are self-contained: they
+            spawn the embedded `agentd` + `agentgw` and adapter bundles
+            at launch, then open the dashboard — no terminal steps. The
+            Windows build runs in remote-gateway mode: start `agentd` +
+            `agentgw` first (see docs/guides/web-gui-and-llm-adapter.md)
+            or set AGENTOS_GATEWAY to a reachable gateway URL.
 
             Binaries are unsigned: macOS Gatekeeper and Windows
             SmartScreen will warn on first launch.

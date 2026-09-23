@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+concurrency:
+  # A new push supersedes older runs on this ref — otherwise a hung run
+  # blocks the PR's check rollup for hours.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validators:
     name: Repository validators and contract mirror
@@ -46,6 +52,9 @@ jobs:
   quality:
     name: Rust quality gates
     runs-on: macos-latest
+    # Suite takes ~6 min; cap so a deadlocked test fails fast instead of
+    # running to the 6h platform limit.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: agent-os

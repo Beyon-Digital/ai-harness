@@ -6,7 +6,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "build:embedded": "tauri build --config src-tauri/tauri.embedded.conf.json"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/agentd",
+      "binaries/agentgw",
+      "binaries/agentos-wasm-host"
+    ],
+    "resources": {
+      "resources/agentos": "agentos"
+    }
+  }
+}

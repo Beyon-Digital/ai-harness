@@ -1,33 +1,599 @@
 //! Agent OS desktop shell (Tauri v2).
 //!
-//! The window navigates to the running `agentgw` HTTP gateway — the
-//! shell is a thin native wrapper, so all UI/logic stays in the shared
-//! web app. `AGENTOS_GATEWAY` overrides the URL (default
-//! `http://127.0.0.1:7740`); set it to a reachable gateway — local or
-//! remote — before launching, or to a `tauri dev` frontend URL.
+//! The app is self-contained: it ships `agentd`, `agentgw`, the adapter
+//! bundles and configs as sidecars/resources, spawns the services on
+//! launch, and navigates the window to the gateway once it answers —
+//! double-click is all a user needs.
+//!
+//! `AGENTOS_GATEWAY` overrides everything: when set, no services are
+//! spawned and the window loads that URL instead (local or remote
+//! gateway). Platforms without bundled sidecars (e.g. Windows, where the
+//! CLI is Unix-only) also fall back to that remote-gateway mode.
+//!
+//! Every knob the services read has a built-in default; the app also
+//! loads `agentos.env` from the app data dir (auto-created on first
+//! launch) so non-developer users can set e.g. `OPENROUTER_API_KEY`
+//! without a terminal. Precedence: process env > agentos.env > default.
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use std::{
+    collections::HashMap,
+    env, fs,
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const DEFAULT_GATEWAY: &str = "http://127.0.0.1:7740";
+const PREFERRED_PORT: u16 = 7740;
+const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL: Duration = Duration::from_millis(100);
+
+/// Origin that bundled `frontendDist` pages are served from. Query
+/// strings survive `WebviewWindow::navigate`, so the error page reads
+/// its message from `location.search`.
+#[cfg(not(windows))]
+const TAURI_ORIGIN: &str = "tauri://localhost";
+#[cfg(windows)]
+const TAURI_ORIGIN: &str = "http://tauri.localhost";
+
+static CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+static BOOTSTRAP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+/// Set on app exit so a mid-flight bootstrap stops before spawning more.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+/// `agentos.env` from the app data dir — loaded once in setup.
+static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Defaults applied to every spawned service when neither the process
+/// env nor `agentos.env` sets the key.
+const DEFAULT_ENV: &[(&str, &str)] = &[
+    ("RUST_LOG", "info"),
+    ("OPENROUTER_MODEL", "openrouter/free"),
+    ("OPENROUTER_APP_NAME", "Agent OS"),
+];
+
+/// Template written to `<app_data>/agentos.env` on first launch so the
+/// customization surface is discoverable without docs.
+const ENV_TEMPLATE: &str = "\
+# Agent OS environment — KEY=VALUE per line, # comments, optional `export ` prefix.
+# Real environment variables always win over values here.
+# No quoting or escapes — the value is everything after the first `=`.
+# (Inline `#` does NOT start a comment; put comments on their own line.)
+#
+# Real-LLM mode: set your OpenRouter key and the app auto-switches to the
+# openrouter.yaml profile (model calls flow through as durable effects).
+# OPENROUTER_API_KEY=
+# OPENROUTER_MODEL=openrouter/free
+# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+#
+# RUST_LOG=info
+#
+# Connect to an existing gateway instead of running embedded services:
+# AGENTOS_GATEWAY=http://127.0.0.1:7740
+# Pick a different bundled config yaml from share/ (default.yaml unless
+# OPENROUTER_API_KEY is set → openrouter.yaml):
+# AGENTOS_CONFIG=default.yaml
+#
+# MCP tool servers (JSON array) for the mcp-enabled profile:
+# MCP_SERVERS=[]
+# ACP agent CLI for the acp-local profile:
+# ACP_COMMAND=
+# ACP_ARGS=
+# ACP_CWD=
+";
+
+fn cancelled() -> bool {
+    CANCEL.load(Ordering::Relaxed)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // The daemon is a singleton — a second launch just focuses the
+        // running instance's window instead of competing for it.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
-            let gateway = std::env::var("AGENTOS_GATEWAY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_GATEWAY.to_owned());
-            let url = gateway
-                .parse()
-                .map_err(|e| format!("invalid AGENTOS_GATEWAY `{gateway}`: {e}"))?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("Agent OS")
-                .inner_size(1280.0, 840.0)
-                .min_inner_size(900.0, 600.0)
-                .build()?;
+            if let Ok(dir) = app.path().app_data_dir() {
+                let _ = fs::create_dir_all(&dir);
+                let _ = ENV_FILE.set(load_env_file(&dir.join("agentos.env")));
+            }
+            let window = open_window(app.handle())?;
+            match app_var("AGENTOS_GATEWAY") {
+                Some(gateway) => match gateway.parse::<Url>() {
+                    Ok(url) => navigate(&window, url),
+                    Err(e) => fail(
+                        &window,
+                        &format!("invalid AGENTOS_GATEWAY `{gateway}`: {e}"),
+                    ),
+                },
+                None => {
+                    let handle = app.handle().clone();
+                    let join = thread::spawn(move || match bootstrap(&handle) {
+                        Ok(url) => navigate(&window, url),
+                        Err(e) => {
+                            kill_children();
+                            fail(&window, &e);
+                        }
+                    });
+                    *BOOTSTRAP.lock().expect("bootstrap") = Some(join);
+                }
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("agent-os desktop failed to start");
+    app.run(|_, event| {
+        if let RunEvent::Exit = event {
+            // Join bootstrap before teardown so a child can't be spawned
+            // after CHILDREN is drained.
+            CANCEL.store(true, Ordering::Relaxed);
+            if let Some(join) = BOOTSTRAP.lock().expect("bootstrap").take() {
+                let _ = join.join();
+            }
+            kill_children();
+        }
+    });
+}
+
+fn open_window(handle: &tauri::AppHandle) -> Result<WebviewWindow, String> {
+    WebviewWindowBuilder::new(handle, "main", WebviewUrl::App(PathBuf::from("index.html")))
+        .title("Agent OS")
+        .inner_size(1280.0, 840.0)
+        .min_inner_size(900.0, 600.0)
+        .build()
+        .map_err(|e| format!("{e}"))
+}
+
+fn navigate(window: &WebviewWindow, url: Url) {
+    if let Err(e) = window.navigate(url) {
+        eprintln!("agent-os: navigate failed: {e}");
+    }
+}
+
+fn fail(window: &WebviewWindow, msg: &str) {
+    eprintln!("agent-os: {msg}");
+    let _ = window.set_title("Agent OS — startup failed");
+    if let Ok(url) = Url::parse(&format!("{TAURI_ORIGIN}/error.html?msg={}", urlencode(msg))) {
+        navigate(window, url);
+    }
+}
+
+/// Spawn the embedded services and return the gateway URL once it is
+/// answering. Sidecars absent → remote-gateway fallback URL.
+fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
+    let resource_dir = handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resource dir: {e}"))?;
+    let staged_src = resource_dir.join("agentos");
+    // A packaged app ships `agentos/share` — its absence means an
+    // unpackaged build (Windows, dev shell) where remote-gateway mode
+    // is the intended path.
+    let packaged = staged_src.join("share").is_dir();
+
+    let (agentd, agentgw) = match (find_sidecar("agentd"), find_sidecar("agentgw")) {
+        (Some(a), Some(g)) => (a, g),
+        _ if packaged => {
+            return Err(
+                "embedded services missing from the app bundle — reinstall the app".to_owned(),
+            )
+        }
+        _ => {
+            return DEFAULT_GATEWAY.parse().map_err(|e| format!("{e}"));
+        }
+    };
+    if !packaged {
+        return Err(format!(
+            "embedded runtime not staged (missing {})",
+            staged_src.display()
+        ));
+    }
+    // Pin the wasm host path — adapter_registry falls back to the
+    // sibling-of-agentd lookup, but explicit never depends on order.
+    if let Some(host) = find_sidecar("agentos-wasm-host") {
+        if env::var_os("AGENTOS_WASM_HOST").is_none() {
+            env::set_var("AGENTOS_WASM_HOST", &host);
+        }
+    }
+    let data_dir = handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    let runtime_dir = data_dir.join("run");
+    fs::create_dir_all(&runtime_dir).map_err(|e| format!("runtime dir: {e}"))?;
+    let socket = runtime_dir.join("control.sock");
+    let logs = data_dir.join("logs");
+    let _ = fs::create_dir_all(&logs);
+
+    // The daemon lock is a singleton per runtime dir: when a first app
+    // instance (or a manually started agentd) already answers, attach a
+    // gateway to it instead of spawning a second agentd that exits on
+    // the lock. The socket connect proves a live daemon — a stale file
+    // alone doesn't. Check before any mutation: a surviving daemon
+    // references the staged bundle paths below.
+    if daemon_ready(&socket) {
+        eprintln!(
+            "agent-os: attaching to running daemon at {}",
+            socket.display()
+        );
+    } else {
+        // No live daemon — rewriting the staged copies is safe.
+        let embedded = data_dir.join("embedded");
+        copy_tree(&staged_src, &embedded)?;
+        let staged_share = embedded.join("share");
+        chmod_entrypoints(&staged_share.join("bundles"));
+
+        let config = pick_config(&staged_share)?;
+        let bundles = bundle_dirs(&staged_share.join("bundles"))?;
+        let mut agentd_cmd = Command::new(&agentd);
+        agentd_cmd
+            .arg("--runtime-dir")
+            .arg(&runtime_dir)
+            .arg("--config")
+            .arg(&config)
+            .envs(child_env());
+        for b in &bundles {
+            agentd_cmd.arg("--adapter-bundle").arg(b);
+        }
+        let daemon = spawn(&mut agentd_cmd, &logs.join("agentd.log"))?;
+        wait_for_daemon(&socket, daemon)?;
+    }
+
+    if cancelled() {
+        return Err("startup cancelled".to_owned());
+    }
+    let port = pick_port();
+    let mut agentgw_cmd = Command::new(&agentgw);
+    agentgw_cmd
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .envs(child_env());
+    spawn(&mut agentgw_cmd, &logs.join("agentgw.log"))?;
+
+    wait_for_tcp(port)?;
+    format!("http://127.0.0.1:{port}/")
+        .parse()
+        .map_err(|e| format!("{e}"))
+}
+
+/// Gateway reachable once TCP connects — `/api/health` backs it but a
+/// connect is enough to prove the listener is up.
+fn wait_for_tcp(port: u16) -> Result<(), String> {
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    while Instant::now() < deadline {
+        if cancelled() {
+            return Err("startup cancelled".to_owned());
+        }
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(POLL);
+    }
+    Err(format!(
+        "gateway did not open port {port} within {BOOT_TIMEOUT:?} — see logs/agentgw.log in the app data dir"
+    ))
+}
+
+/// True when a daemon already answers on the control socket — a stale
+/// socket file left by a crashed run doesn't count.
+#[cfg(unix)]
+fn daemon_ready(socket: &Path) -> bool {
+    // is_file() excludes S_IFSOCK — connect alone covers missing/stale.
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
+#[cfg(not(unix))]
+fn daemon_ready(socket: &Path) -> bool {
+    socket.is_file()
+}
+
+/// Poll until the daemon's control socket answers; fails fast if the
+/// spawned agentd exits first (e.g. it lost the daemon lock).
+fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    while Instant::now() < deadline {
+        if cancelled() {
+            return Err("startup cancelled".to_owned());
+        }
+        // A live socket wins over a dead child: on simultaneous launches
+        // the loser's agentd exits on the lock while the winner's is
+        // already answering — attach instead of reporting failure.
+        if daemon_ready(socket) {
+            return Ok(());
+        }
+        {
+            let mut children = CHILDREN.lock().expect("children");
+            if !matches!(children[child].try_wait(), Ok(None)) {
+                return Err(
+                    "agentd exited during startup — see logs/agentd.log in the app data dir"
+                        .to_owned(),
+                );
+            }
+        }
+        thread::sleep(POLL);
+    }
+    Err(format!(
+        "daemon did not create {} within {BOOT_TIMEOUT:?} — see logs/agentd.log in the app data dir",
+        socket.display()
+    ))
+}
+
+/// Read `agentos.env` (creating it from the template when absent).
+/// Format: `KEY=VALUE` lines, `#` comments, optional `export ` prefix.
+fn load_env_file(path: &Path) -> HashMap<String, String> {
+    if !path.exists() {
+        // May hold an API key — create owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut f) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = f.write_all(ENV_TEMPLATE.as_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::write(path, ENV_TEMPLATE);
+        }
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_owned(), v.trim().to_owned());
+        }
+    }
+    map
+}
+
+/// Env lookup for app-level switches — process env wins, `agentos.env`
+/// supplies the value when the var isn't set in the environment.
+fn app_var(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            ENV_FILE
+                .get()
+                .and_then(|m| m.get(key))
+                .filter(|v| !v.trim().is_empty())
+                .cloned()
+        })
+}
+
+/// (key, value) pairs to inject into service commands: everything from
+/// `agentos.env` plus the DEFAULT_ENV table, skipping keys already set
+/// in the process env (which children inherit anyway).
+fn child_env() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(file) = ENV_FILE.get() {
+        for (k, v) in file {
+            if env::var_os(k).is_none() {
+                out.push((k.clone(), v.clone()));
+            }
+        }
+    }
+    for (k, v) in DEFAULT_ENV {
+        let k = (*k).to_owned();
+        if env::var_os(&k).is_none() && ENV_FILE.get().map_or(true, |m| !m.contains_key(&k)) {
+            out.push((k, (*v).to_owned()));
+        }
+    }
+    out
+}
+
+fn pick_port() -> u16 {
+    for candidate in [PREFERRED_PORT, 0] {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", candidate)) {
+            if let Ok(addr) = l.local_addr() {
+                return addr.port();
+            }
+        }
+    }
+    PREFERRED_PORT
+}
+
+/// `AGENTOS_CONFIG` selects a config file from the bundled share dir;
+/// otherwise real-LLM config when an API key is present, else the
+/// deterministic fixture profile.
+fn pick_config(share: &Path) -> Result<PathBuf, String> {
+    let name = app_var("AGENTOS_CONFIG")
+        .or_else(|| app_var("OPENROUTER_API_KEY").map(|_| "openrouter.yaml".to_owned()))
+        .unwrap_or_else(|| "default.yaml".to_owned());
+    let path = share.join(&name);
+    if !path.is_file() {
+        return Err(format!("config {} not found", path.display()));
+    }
+    Ok(path)
+}
+
+fn bundle_dirs(bundles: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
+    let entries = fs::read_dir(bundles).map_err(|e| format!("bundles dir: {e}"))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+/// Spawn `cmd`, log its output, register it for teardown, and return
+/// its CHILDREN index so callers can watch for early exits.
+fn spawn(cmd: &mut Command, log_path: &Path) -> Result<usize, String> {
+    let prog = cmd.get_program().to_string_lossy().into_owned();
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("log {}: {e}", log_path.display()))?;
+    let log_err = log.try_clone().map_err(|e| format!("{e}"))?;
+    let child = cmd
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(|e| format!("spawn {prog}: {e}"))?;
+    let mut children = CHILDREN.lock().expect("children");
+    children.push(child);
+    Ok(children.len() - 1)
+}
+
+/// Bundled configs give agentd a 30s drain deadline
+/// (`limits.shutdown.drain_deadline_ms`) — allow it plus teardown.
+const DRAIN_GRACE: Duration = Duration::from_secs(35);
+
+fn kill_children() {
+    // Signal every child before waiting: agentd begins draining while
+    // the gateway exits — serial SIGTERM-then-wait would stack the
+    // grace windows.
+    let mut children: Vec<Child> = CHILDREN.lock().expect("children").drain(..).collect();
+    for child in children.iter_mut().rev() {
+        terminate(child);
+    }
+    let deadline = Instant::now() + DRAIN_GRACE;
+    while Instant::now() < deadline
+        && children
+            .iter_mut()
+            .any(|c| matches!(c.try_wait(), Ok(None)))
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// SIGTERM when still running — agentd handles it by draining adapter
+/// children and completing shutdown; escalation happens in kill_children.
+#[cfg(unix)]
+fn terminate(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(None)) {
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate(child: &mut Child) {
+    let _ = child.kill();
+}
+
+/// Sidecars sit next to the app executable, named `<name>` or
+/// `<name>-<target-triple>` (plus `.exe` on Windows).
+fn find_sidecar(name: &str) -> Option<PathBuf> {
+    let exe_dir = env::current_exe().ok()?.parent()?.to_path_buf();
+    let direct = exe_dir.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let prefixed = format!("{name}-");
+    let entries = fs::read_dir(&exe_dir).ok()?;
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let stem = file.strip_suffix(".exe").unwrap_or(&file);
+        if stem == name || stem.starts_with(&prefixed) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() {
+        fs::remove_dir_all(dst).map_err(|e| format!("reset {}: {e}", dst.display()))?;
+    }
+    copy_tree_inner(src, dst)
+}
+
+fn copy_tree_inner(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    let entries = fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let (s, d) = (entry.path(), dst.join(entry.file_name()));
+        if s.is_dir() {
+            copy_tree_inner(&s, &d)?;
+        } else {
+            fs::copy(&s, &d).map_err(|e| format!("copy {}: {e}", s.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Adapter bundles contain an executable named by the manifest's
+/// `entrypoint`; file copies don't always carry the exec bit.
+#[cfg(unix)]
+fn chmod_entrypoints(bundles: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(entries) = fs::read_dir(bundles) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let manifest = dir.join("adapter.manifest.json");
+        let Ok(text) = fs::read_to_string(&manifest) else {
+            continue;
+        };
+        if let Some(name) = entrypoint_of(&text) {
+            let bin = dir.join(name);
+            if bin.is_file() {
+                let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn chmod_entrypoints(_bundles: &Path) {}
+
+/// Pull `"entrypoint": "<file>"` out of the manifest without a JSON dep.
+fn entrypoint_of(manifest: &str) -> Option<String> {
+    let idx = manifest.find("\"entrypoint\"")?;
+    let after = &manifest[idx + "\"entrypoint\"".len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }

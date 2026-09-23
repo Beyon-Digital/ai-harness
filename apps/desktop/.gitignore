@@ -1,2 +1,6 @@
 node_modules/
 target/
+
+# Staged at build time by scripts/stage-embedded-runtime.sh
+src-tauri/binaries/
+src-tauri/resources/
