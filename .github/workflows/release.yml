@@ -182,22 +182,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # The rolling dev channel reuses one release — drop stale assets
-      # first so a renamed or version-bumped installer can't linger next
-      # to the current set on the release page.
-      - name: Clear stale dev-latest assets
+      # Expected asset names for this run — recorded before upload so
+      # post-upload cleanup can drop anything stale instead of wiping
+      # the working release first (a failed upload must not erase the
+      # previous complete set).
+      - name: Record expected asset names
         if: ${{ env.RELEASE_NAME == 'dev-latest' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              const rel = await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag: 'dev-latest' });
-              for (const asset of rel.data.assets) {
-                await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: asset.id });
-              }
-            } catch (e) {
-              if (e.status !== 404) throw e;
-            }
+        working-directory: artifacts
+        run: |
+          find . -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' -o -name '*.tar.gz' \) -printf '%f\n' | sort -u > "$RUNNER_TEMP/expected-assets.txt"
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -232,6 +225,22 @@ jobs:
             SmartScreen will warn on first launch.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Cleanup runs only after a successful upload: remove release
+      # assets whose names aren't in this build's set — renamed or
+      # version-bumped installers can't linger. The previous set survives
+      # a failed upload untouched.
+      - name: Remove obsolete dev-latest assets
+        if: ${{ env.RELEASE_NAME == 'dev-latest' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expected = require('fs').readFileSync(`${process.env.RUNNER_TEMP}/expected-assets.txt`, 'utf8').split('\n').filter(Boolean);
+            const rel = await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag: 'dev-latest' });
+            for (const asset of rel.data.assets) {
+              if (!expected.includes(asset.name)) {
+                await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: asset.id });
+              }
+            }
       # Flip the rolling tag last, once assets are fully uploaded — a
       # failed publish then leaves tag and release pointing at the same
       # previous commit instead of splitting them.
