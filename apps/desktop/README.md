@@ -12,7 +12,21 @@ dir, starts `agentd` + `agentgw` (port 7740, or a free port if taken),
 and loads the dashboard when it's up. Service logs live under the app
 data dir in `logs/`; runtime state (kernel.db, events.db) in `run/`.
 
-Overrides for power users:
+## Environment
+
+Every variable the services read has a built-in default — nothing needs
+to be set for the app to work. Two ways to customize:
+
+- `agentos.env` in the app data dir — auto-created on first launch with
+  a commented template (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`,
+  `AGENTOS_GATEWAY`, `AGENTOS_CONFIG`, `MCP_SERVERS`, `ACP_*`, …). Edit
+  it in any text editor and relaunch; no terminal needed.
+- Real environment variables — always win over the file.
+
+Key vars: `AGENTOS_GATEWAY=http://host:port` skips the embedded
+services entirely (remote-gateway mode); `AGENTOS_CONFIG=<name>.yaml`
+picks a bundled config from `share/`; `OPENROUTER_API_KEY` set → the
+app auto-picks `openrouter.yaml` for the real-LLM path.
 
 ```sh
 AGENTOS_GATEWAY=http://my-host:7740 ./Agent\ OS.app/...   # remote gateway, no local services

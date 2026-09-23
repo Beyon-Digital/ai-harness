@@ -50,8 +50,9 @@
     <p>
       Service logs are under the app data directory in
       <code>logs/agentd.log</code> and <code>logs/agentgw.log</code>.<br />
-      To connect to an existing gateway instead, relaunch with
-      <code>AGENTOS_GATEWAY=http://host:port</code>.
+      Environment overrides live in <code>agentos.env</code> in the same
+      directory — e.g. set <code>AGENTOS_GATEWAY=http://host:port</code>
+      there to connect to an existing gateway.
     </p>
   </body>
 </html>

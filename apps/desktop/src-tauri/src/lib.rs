@@ -9,15 +9,21 @@
 //! spawned and the window loads that URL instead (local or remote
 //! gateway). Platforms without bundled sidecars (e.g. Windows, where the
 //! CLI is Unix-only) also fall back to that remote-gateway mode.
+//!
+//! Every knob the services read has a built-in default; the app also
+//! loads `agentos.env` from the app data dir (auto-created on first
+//! launch) so non-developer users can set e.g. `OPENROUTER_API_KEY`
+//! without a terminal. Precedence: process env > agentos.env > default.
 
 use std::{
+    collections::HashMap,
     env, fs,
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -42,6 +48,44 @@ static CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 static BOOTSTRAP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 /// Set on app exit so a mid-flight bootstrap stops before spawning more.
 static CANCEL: AtomicBool = AtomicBool::new(false);
+/// `agentos.env` from the app data dir — loaded once in setup.
+static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Defaults applied to every spawned service when neither the process
+/// env nor `agentos.env` sets the key.
+const DEFAULT_ENV: &[(&str, &str)] = &[
+    ("RUST_LOG", "info"),
+    ("OPENROUTER_MODEL", "openrouter/free"),
+    ("OPENROUTER_APP_NAME", "Agent OS"),
+];
+
+/// Template written to `<app_data>/agentos.env` on first launch so the
+/// customization surface is discoverable without docs.
+const ENV_TEMPLATE: &str = "\
+# Agent OS environment — KEY=VALUE per line, # comments, optional `export ` prefix.
+# Real environment variables always win over values here.
+#
+# Real-LLM mode: set your OpenRouter key and the app auto-switches to the
+# openrouter.yaml profile (model calls flow through as durable effects).
+# OPENROUTER_API_KEY=
+# OPENROUTER_MODEL=openrouter/free
+# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+#
+# RUST_LOG=info
+#
+# Connect to an existing gateway instead of running embedded services:
+# AGENTOS_GATEWAY=http://127.0.0.1:7740
+# Pick a different bundled config yaml from share/ (default.yaml unless
+# OPENROUTER_API_KEY is set → openrouter.yaml):
+# AGENTOS_CONFIG=default.yaml
+#
+# MCP tool servers (JSON array) for the mcp-enabled profile:
+# MCP_SERVERS=[]
+# ACP agent CLI for the acp-local profile:
+# ACP_COMMAND=
+# ACP_ARGS=
+# ACP_CWD=
+";
 
 fn cancelled() -> bool {
     CANCEL.load(Ordering::Relaxed)
@@ -59,11 +103,12 @@ pub fn run() {
             }
         }))
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                let _ = fs::create_dir_all(&dir);
+                let _ = ENV_FILE.set(load_env_file(&dir.join("agentos.env")));
+            }
             let window = open_window(app.handle())?;
-            match env::var("AGENTOS_GATEWAY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-            {
+            match app_var("AGENTOS_GATEWAY") {
                 Some(gateway) => match gateway.parse::<Url>() {
                     Ok(url) => navigate(&window, url),
                     Err(e) => fail(
@@ -153,6 +198,13 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
             staged_src.display()
         ));
     }
+    // Pin the wasm host path — adapter_registry falls back to the
+    // sibling-of-agentd lookup, but explicit never depends on order.
+    if let Some(host) = find_sidecar("agentos-wasm-host") {
+        if env::var_os("AGENTOS_WASM_HOST").is_none() {
+            env::set_var("AGENTOS_WASM_HOST", &host);
+        }
+    }
     let data_dir = handle
         .path()
         .app_data_dir()
@@ -186,7 +238,8 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
             .arg("--runtime-dir")
             .arg(&runtime_dir)
             .arg("--config")
-            .arg(&config);
+            .arg(&config)
+            .envs(child_env());
         for b in &bundles {
             agentd_cmd.arg("--adapter-bundle").arg(b);
         }
@@ -203,7 +256,8 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
         .arg("--socket")
         .arg(&socket)
         .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"));
+        .arg(format!("127.0.0.1:{port}"))
+        .envs(child_env());
     spawn(&mut agentgw_cmd, &logs.join("agentgw.log"))?;
 
     wait_for_tcp(port)?;
@@ -275,6 +329,65 @@ fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
     ))
 }
 
+/// Read `agentos.env` (creating it from the template when absent).
+/// Format: `KEY=VALUE` lines, `#` comments, optional `export ` prefix.
+fn load_env_file(path: &Path) -> HashMap<String, String> {
+    if !path.exists() {
+        let _ = fs::write(path, ENV_TEMPLATE);
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_owned(), v.trim().to_owned());
+        }
+    }
+    map
+}
+
+/// Env lookup for app-level switches — process env wins, `agentos.env`
+/// supplies the value when the var isn't set in the environment.
+fn app_var(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            ENV_FILE
+                .get()
+                .and_then(|m| m.get(key))
+                .filter(|v| !v.trim().is_empty())
+                .cloned()
+        })
+}
+
+/// (key, value) pairs to inject into service commands: everything from
+/// `agentos.env` plus the DEFAULT_ENV table, skipping keys already set
+/// in the process env (which children inherit anyway).
+fn child_env() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(file) = ENV_FILE.get() {
+        for (k, v) in file {
+            if env::var_os(k).is_none() {
+                out.push((k.clone(), v.clone()));
+            }
+        }
+    }
+    for (k, v) in DEFAULT_ENV {
+        let k = (*k).to_owned();
+        if env::var_os(&k).is_none() && ENV_FILE.get().map_or(true, |m| !m.contains_key(&k)) {
+            out.push((k, (*v).to_owned()));
+        }
+    }
+    out
+}
+
 fn pick_port() -> u16 {
     for candidate in [PREFERRED_PORT, 0] {
         if let Ok(l) = TcpListener::bind(("127.0.0.1", candidate)) {
@@ -290,15 +403,8 @@ fn pick_port() -> u16 {
 /// otherwise real-LLM config when an API key is present, else the
 /// deterministic fixture profile.
 fn pick_config(share: &Path) -> Result<PathBuf, String> {
-    let name = env::var("AGENTOS_CONFIG")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            env::var("OPENROUTER_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(|_| "openrouter.yaml".to_owned())
-        })
+    let name = app_var("AGENTOS_CONFIG")
+        .or_else(|| app_var("OPENROUTER_API_KEY").map(|_| "openrouter.yaml".to_owned()))
         .unwrap_or_else(|| "default.yaml".to_owned());
     let path = share.join(&name);
     if !path.is_file() {
