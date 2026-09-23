@@ -79,6 +79,10 @@ jobs:
           "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
       - name: Build bundles (self-contained app)
         if: runner.os != 'Windows'
+        # Finder-AppleScript DMG styling times out on headless CI;
+        # respecting CI skips it (slightly plainer DMG layout).
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: false
         run: npm run build:embedded
       - name: Build bundles (remote-gateway shell)
         if: runner.os == 'Windows'
