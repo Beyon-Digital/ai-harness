@@ -145,7 +145,7 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
     for b in &bundles {
         agentd_cmd.arg("--adapter-bundle").arg(b);
     }
-    spawn(agentd_cmd, &logs.join("agentd.log"))?;
+    spawn(&mut agentd_cmd, &logs.join("agentd.log"))?;
 
     wait_for_path(&socket)?;
     // The socket file existing doesn't guarantee the listener is up;
@@ -159,7 +159,7 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
         .arg(&socket)
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"));
-    spawn(agentgw_cmd, &logs.join("agentgw.log"))?;
+    spawn(&mut agentgw_cmd, &logs.join("agentgw.log"))?;
 
     wait_for_tcp(port)?;
     format!("http://127.0.0.1:{port}/")
