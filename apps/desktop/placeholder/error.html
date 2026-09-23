@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent OS — startup failed</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 40px;
+        box-sizing: border-box;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0a0a0a;
+        color: #e4e4e7;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+      }
+      pre {
+        max-width: 720px;
+        max-height: 40vh;
+        overflow: auto;
+        padding: 16px;
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        background: #18181b;
+        color: #f87171;
+        font-size: 13px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      p {
+        color: #a1a1aa;
+        font-size: 13px;
+        text-align: center;
+      }
+    </style>
+    <script src="/error.js"></script>
+  </head>
+  <body>
+    <h1>Agent OS failed to start its services</h1>
+    <pre id="msg">unknown error</pre>
+    <p>
+      Service logs are under the app data directory in
+      <code>logs/agentd.log</code> and <code>logs/agentgw.log</code>.<br />
+      To connect to an existing gateway instead, relaunch with
+      <code>AGENTOS_GATEWAY=http://host:port</code>.
+    </p>
+  </body>
+</html>
