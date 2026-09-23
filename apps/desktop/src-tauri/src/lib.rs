@@ -14,16 +14,22 @@
 //! loads `agentos.env` from the app data dir (auto-created on first
 //! launch) so non-developer users can set e.g. `OPENROUTER_API_KEY`
 //! without a terminal. Precedence: process env > agentos.env > default.
+//!
+//! When a service fails to come up, the error page shows the tail of its
+//! log inline (no hunting hidden directories) plus Retry — which re-reads
+//! `agentos.env`, so editing the file and clicking Retry is enough — and
+//! an Open-logs button that reveals the logs directory in the platform
+//! file manager.
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     env, fs,
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
+        Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -48,8 +54,9 @@ static CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 static BOOTSTRAP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 /// Set on app exit so a mid-flight bootstrap stops before spawning more.
 static CANCEL: AtomicBool = AtomicBool::new(false);
-/// `agentos.env` from the app data dir — loaded once in setup.
-static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// `agentos.env` from the app data dir — loaded in setup and re-read on
+/// every Retry, so a user can fix the file and retry without relaunching.
+static ENV_FILE: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Defaults applied to every spawned service when neither the process
 /// env nor `agentos.env` sets the key.
@@ -104,32 +111,14 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .invoke_handler(tauri::generate_handler![retry_startup, open_logs])
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {
                 let _ = fs::create_dir_all(&dir);
-                let _ = ENV_FILE.set(load_env_file(&dir.join("agentos.env")));
+                *ENV_FILE.lock().expect("env file") = load_env_file(&dir.join("agentos.env"));
             }
             let window = open_window(app.handle())?;
-            match app_var("AGENTOS_GATEWAY") {
-                Some(gateway) => match gateway.parse::<Url>() {
-                    Ok(url) => navigate(&window, url),
-                    Err(e) => fail(
-                        &window,
-                        &format!("invalid AGENTOS_GATEWAY `{gateway}`: {e}"),
-                    ),
-                },
-                None => {
-                    let handle = app.handle().clone();
-                    let join = thread::spawn(move || match bootstrap(&handle) {
-                        Ok(url) => navigate(&window, url),
-                        Err(e) => {
-                            kill_children();
-                            fail(&window, &e);
-                        }
-                    });
-                    *BOOTSTRAP.lock().expect("bootstrap") = Some(join);
-                }
-            }
+            start_services(app.handle(), window);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -156,6 +145,88 @@ fn open_window(handle: &tauri::AppHandle) -> Result<WebviewWindow, String> {
         .map_err(|e| format!("{e}"))
 }
 
+/// The startup path shared by first launch and the error page's Retry:
+/// honor `AGENTOS_GATEWAY` when set, else spawn the embedded services on
+/// a bootstrap thread and navigate once the gateway answers.
+fn start_services(handle: &tauri::AppHandle, window: WebviewWindow) {
+    match app_var("AGENTOS_GATEWAY") {
+        Some(gateway) => match gateway.parse::<Url>() {
+            Ok(url) => navigate(&window, url),
+            Err(e) => fail(
+                &window,
+                &format!("invalid AGENTOS_GATEWAY `{gateway}`: {e}"),
+            ),
+        },
+        None => {
+            // Skip when a bootstrap is already in flight (rapid Retries).
+            let mut slot = BOOTSTRAP.lock().expect("bootstrap");
+            if slot.as_ref().is_some_and(|j| !j.is_finished()) {
+                return;
+            }
+            let h = handle.clone();
+            let join = thread::spawn(move || match bootstrap(&h) {
+                Ok(url) => navigate(&window, url),
+                Err(e) => {
+                    kill_children();
+                    fail(&window, &e);
+                }
+            });
+            *slot = Some(join);
+        }
+    }
+}
+
+/// Error-page Retry: re-read `agentos.env` (edits apply without an app
+/// relaunch) and rerun the whole startup path.
+#[tauri::command]
+fn retry_startup(window: WebviewWindow) {
+    if let Ok(dir) = window.app_handle().path().app_data_dir() {
+        *ENV_FILE.lock().expect("env file") = load_env_file(&dir.join("agentos.env"));
+    }
+    let handle = window.app_handle().clone();
+    start_services(&handle, window);
+}
+
+/// Opens the service logs directory in the platform file manager — the
+/// error page's escape hatch for users who want the full log.
+#[tauri::command]
+fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?
+        .join("logs");
+    fs::create_dir_all(&dir).map_err(|e| format!("logs dir: {e}"))?;
+    open_dir(&dir)
+}
+
+#[cfg(target_os = "macos")]
+fn open_dir(dir: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(dir)
+        .status()
+        .map_err(|e| format!("open: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_dir(dir: &Path) -> Result<(), String> {
+    Command::new("explorer")
+        .arg(dir)
+        .status()
+        .map_err(|e| format!("explorer: {e}"))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_dir(dir: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(dir)
+        .status()
+        .map_err(|e| format!("xdg-open: {e}"))?;
+    Ok(())
+}
+
 fn navigate(window: &WebviewWindow, url: Url) {
     if let Err(e) = window.navigate(url) {
         eprintln!("agent-os: navigate failed: {e}");
@@ -165,7 +236,13 @@ fn navigate(window: &WebviewWindow, url: Url) {
 fn fail(window: &WebviewWindow, msg: &str) {
     eprintln!("agent-os: {msg}");
     let _ = window.set_title("Agent OS — startup failed");
-    if let Ok(url) = Url::parse(&format!("{TAURI_ORIGIN}/error.html?msg={}", urlencode(msg))) {
+    let mut url = format!("{TAURI_ORIGIN}/error.html?msg={}", urlencode(msg));
+    // The page echoes the path verbatim so non-technical users don't have
+    // to know where the platform's app-data dir lives.
+    if let Ok(dir) = window.app_handle().path().app_data_dir() {
+        url.push_str(&format!("&dir={}", urlencode(&dir.display().to_string())));
+    }
+    if let Ok(url) = Url::parse(&url) {
         navigate(window, url);
     }
 }
@@ -247,46 +324,107 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
         for b in &bundles {
             agentd_cmd.arg("--adapter-bundle").arg(b);
         }
-        let daemon = spawn(&mut agentd_cmd, &logs.join("agentd.log"))?;
-        wait_for_daemon(&socket, daemon)?;
+        let agentd_log = logs.join("agentd.log");
+        // A service that exits before answering gets one retry — a flaky
+        // first spawn shouldn't hard-fail the whole launch.
+        for attempt in 0..=1 {
+            let daemon = spawn(&mut agentd_cmd, &agentd_log)?;
+            match wait_for_daemon(&socket, daemon) {
+                ServiceWait::Ready => break,
+                ServiceWait::Exited if attempt == 0 => {
+                    eprintln!("agent-os: agentd exited during startup — retrying once");
+                }
+                ServiceWait::Exited => {
+                    return Err(format!(
+                        "agentd exited during startup{}",
+                        log_tail_msg(&agentd_log)
+                    ));
+                }
+                ServiceWait::TimedOut => {
+                    return Err(format!(
+                        "daemon did not create {} within {BOOT_TIMEOUT:?}{}",
+                        socket.display(),
+                        log_tail_msg(&agentd_log)
+                    ));
+                }
+                ServiceWait::Cancelled => return Err("startup cancelled".to_owned()),
+            }
+        }
     }
 
     if cancelled() {
         return Err("startup cancelled".to_owned());
     }
     let port = pick_port();
-    let mut agentgw_cmd = Command::new(&agentgw);
-    agentgw_cmd
-        .arg("--socket")
-        .arg(&socket)
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .envs(child_env());
-    spawn(&mut agentgw_cmd, &logs.join("agentgw.log"))?;
-
-    wait_for_tcp(port)?;
+    let agentgw_log = logs.join("agentgw.log");
+    for attempt in 0..=1 {
+        let mut agentgw_cmd = Command::new(&agentgw);
+        agentgw_cmd
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .envs(child_env());
+        let gateway = spawn(&mut agentgw_cmd, &agentgw_log)?;
+        match wait_for_tcp(port, gateway) {
+            ServiceWait::Ready => break,
+            ServiceWait::Exited if attempt == 0 => {
+                eprintln!("agent-os: agentgw exited during startup — retrying once");
+            }
+            ServiceWait::Exited => {
+                return Err(format!(
+                    "agentgw exited during startup{}",
+                    log_tail_msg(&agentgw_log)
+                ));
+            }
+            ServiceWait::TimedOut => {
+                return Err(format!(
+                    "gateway did not open port {port} within {BOOT_TIMEOUT:?}{}",
+                    log_tail_msg(&agentgw_log)
+                ));
+            }
+            ServiceWait::Cancelled => return Err("startup cancelled".to_owned()),
+        }
+    }
     format!("http://127.0.0.1:{port}/")
         .parse()
         .map_err(|e| format!("{e}"))
 }
 
+/// How a startup poll ended for a spawned service.
+enum ServiceWait {
+    /// The service answers.
+    Ready,
+    /// The spawned process exited before answering.
+    Exited,
+    /// BOOT_TIMEOUT elapsed.
+    TimedOut,
+    /// App teardown interrupted the wait.
+    Cancelled,
+}
+
 /// Gateway reachable once TCP connects — `/api/health` backs it but a
-/// connect is enough to prove the listener is up.
-fn wait_for_tcp(port: u16) -> Result<(), String> {
+/// connect is enough to prove the listener is up. The child index is
+/// watched too, so a dead gateway fails fast instead of timing out.
+fn wait_for_tcp(port: u16, child: usize) -> ServiceWait {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     while Instant::now() < deadline {
         if cancelled() {
-            return Err("startup cancelled".to_owned());
+            return ServiceWait::Cancelled;
         }
         if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
-            return Ok(());
+            return ServiceWait::Ready;
+        }
+        {
+            let mut children = CHILDREN.lock().expect("children");
+            if !matches!(children[child].try_wait(), Ok(None)) {
+                return ServiceWait::Exited;
+            }
         }
         thread::sleep(POLL);
     }
-    Err(format!(
-        "gateway did not open port {port} within {BOOT_TIMEOUT:?} — see logs/agentgw.log in the app data dir"
-    ))
+    ServiceWait::TimedOut
 }
 
 /// True when a daemon already answers on the control socket — a stale
@@ -302,40 +440,85 @@ fn daemon_ready(socket: &Path) -> bool {
     socket.is_file()
 }
 
-/// Poll until the daemon's control socket answers; fails fast if the
-/// spawned agentd exits first (e.g. it lost the daemon lock).
-fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
+/// Poll until the daemon's control socket answers; reports `Exited` the
+/// moment the spawned agentd dies (e.g. it lost the daemon lock).
+fn wait_for_daemon(socket: &Path, child: usize) -> ServiceWait {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     while Instant::now() < deadline {
         if cancelled() {
-            return Err("startup cancelled".to_owned());
+            return ServiceWait::Cancelled;
         }
         // A live socket wins over a dead child: on simultaneous launches
         // the loser's agentd exits on the lock while the winner's is
         // already answering — attach instead of reporting failure.
         if daemon_ready(socket) {
-            return Ok(());
+            return ServiceWait::Ready;
         }
         {
             let mut children = CHILDREN.lock().expect("children");
             if !matches!(children[child].try_wait(), Ok(None)) {
-                return Err(
-                    "agentd exited during startup — see logs/agentd.log in the app data dir"
-                        .to_owned(),
-                );
+                return ServiceWait::Exited;
             }
         }
         thread::sleep(POLL);
     }
-    Err(format!(
-        "daemon did not create {} within {BOOT_TIMEOUT:?} — see logs/agentd.log in the app data dir",
-        socket.display()
-    ))
+    ServiceWait::TimedOut
+}
+
+/// The last lines of a service log, ANSI-stripped — appended to a startup
+/// failure so the error page shows *why* instead of only where to look.
+fn log_tail(path: &Path) -> Option<String> {
+    const LINES: usize = 20;
+    const BYTES: usize = 4000;
+    let raw = fs::read(path).ok()?;
+    let text = strip_ansi(&String::from_utf8_lossy(&raw));
+    let tail: Vec<&str> = text.lines().rev().take(LINES).collect();
+    if tail.is_empty() {
+        return None;
+    }
+    let mut out = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    if out.len() > BYTES {
+        let mut idx = out.len() - BYTES;
+        while !out.is_char_boundary(idx) {
+            idx += 1;
+        }
+        out = out[idx..].to_owned();
+    }
+    Some(out)
+}
+
+/// Formats the log tail for an error message, or a pointer to the file
+/// when nothing was captured (process died before writing anything).
+fn log_tail_msg(log: &Path) -> String {
+    match log_tail(log) {
+        Some(tail) => format!("\n\n{tail}"),
+        None => " — the service wrote no log output".to_owned(),
+    }
+}
+
+/// Removes ANSI SGR color sequences so a log tail stays readable when
+/// embedded in the error page.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            for inner in chars.by_ref() {
+                if inner.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Read `agentos.env` (creating it from the template when absent).
 /// Format: `KEY=VALUE` lines, `#` comments, optional `export ` prefix.
-fn load_env_file(path: &Path) -> HashMap<String, String> {
+fn load_env_file(path: &Path) -> BTreeMap<String, String> {
     if !path.exists() {
         // May hold an API key — create owner-only.
         #[cfg(unix)]
@@ -357,9 +540,9 @@ fn load_env_file(path: &Path) -> HashMap<String, String> {
         }
     }
     let Ok(text) = fs::read_to_string(path) else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -381,10 +564,10 @@ fn app_var(key: &str) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
         .or_else(|| {
             ENV_FILE
-                .get()
-                .and_then(|m| m.get(key))
+                .lock()
+                .ok()
+                .and_then(|m| m.get(key).cloned())
                 .filter(|v| !v.trim().is_empty())
-                .cloned()
         })
 }
 
@@ -392,17 +575,16 @@ fn app_var(key: &str) -> Option<String> {
 /// `agentos.env` plus the DEFAULT_ENV table, skipping keys already set
 /// in the process env (which children inherit anyway).
 fn child_env() -> Vec<(String, String)> {
+    let file = ENV_FILE.lock().expect("env file");
     let mut out = Vec::new();
-    if let Some(file) = ENV_FILE.get() {
-        for (k, v) in file {
-            if env::var_os(k).is_none() {
-                out.push((k.clone(), v.clone()));
-            }
+    for (k, v) in file.iter() {
+        if env::var_os(k).is_none() {
+            out.push((k.clone(), v.clone()));
         }
     }
     for (k, v) in DEFAULT_ENV {
         let k = (*k).to_owned();
-        if env::var_os(&k).is_none() && ENV_FILE.get().map_or(true, |m| !m.contains_key(&k)) {
+        if env::var_os(&k).is_none() && !file.contains_key(&k) {
             out.push((k, (*v).to_owned()));
         }
     }
