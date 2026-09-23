@@ -65,10 +65,12 @@ Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
 
 `.github/workflows/release.yml` publishes GitHub Releases automatically:
 
-- **Every merge to `main`** rebuilds the matrix and refreshes the
-  rolling **`dev-latest`** prerelease — `releases/tag/dev-latest` always
-  carries the newest build (stale assets are cleared first, then the
-  tag moves to the built commit).
+- **Merges to `main`** that touch the app, runtime, docs, or this
+  workflow (see the workflow's path filter) rebuild the matrix and
+  refresh the rolling **`dev-latest`** prerelease —
+  `releases/tag/dev-latest` always carries the newest build (assets are
+  uploaded first, then obsolete ones are removed, then the tag moves to
+  the built commit).
 - **`v*` tags publish a full release** directly (tag names containing
   `-`, e.g. `v1.0.0-rc1`, land as prereleases).
 - **Manual `workflow_dispatch`** with `publish: true` does the same on
