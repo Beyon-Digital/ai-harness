@@ -21,6 +21,16 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Bundled `frontendDist` pages (error.html) are served from
+# tauri://localhost only under the custom-protocol feature; without it
+# codegen builds an empty asset map and the error page 404s. This app
+# has no frontend dev server — `devUrl` points at the live gateway — so
+# enabling it by default is correct for both `cargo`/`tauri dev` builds
+# and `tauri build` bundles.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [workspace]
 # Standalone package — the agent-os workspace uses an explicit members
 # list, and desktop builds pull webkit deps CI runners may not have.
