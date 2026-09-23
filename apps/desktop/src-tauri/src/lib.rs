@@ -64,6 +64,8 @@ const DEFAULT_ENV: &[(&str, &str)] = &[
 const ENV_TEMPLATE: &str = "\
 # Agent OS environment — KEY=VALUE per line, # comments, optional `export ` prefix.
 # Real environment variables always win over values here.
+# No quoting or escapes — the value is everything after the first `=`.
+# (Inline `#` does NOT start a comment; put comments on their own line.)
 #
 # Real-LLM mode: set your OpenRouter key and the app auto-switches to the
 # openrouter.yaml profile (model calls flow through as durable effects).
@@ -209,11 +211,6 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
-    let embedded = data_dir.join("embedded");
-    copy_tree(&staged_src, &embedded)?;
-    let staged_share = embedded.join("share");
-    chmod_entrypoints(&staged_share.join("bundles"));
-
     let runtime_dir = data_dir.join("run");
     fs::create_dir_all(&runtime_dir).map_err(|e| format!("runtime dir: {e}"))?;
     let socket = runtime_dir.join("control.sock");
@@ -224,13 +221,20 @@ fn bootstrap(handle: &tauri::AppHandle) -> Result<Url, String> {
     // instance (or a manually started agentd) already answers, attach a
     // gateway to it instead of spawning a second agentd that exits on
     // the lock. The socket connect proves a live daemon — a stale file
-    // alone doesn't.
+    // alone doesn't. Check before any mutation: a surviving daemon
+    // references the staged bundle paths below.
     if daemon_ready(&socket) {
         eprintln!(
             "agent-os: attaching to running daemon at {}",
             socket.display()
         );
     } else {
+        // No live daemon — rewriting the staged copies is safe.
+        let embedded = data_dir.join("embedded");
+        copy_tree(&staged_src, &embedded)?;
+        let staged_share = embedded.join("share");
+        chmod_entrypoints(&staged_share.join("bundles"));
+
         let config = pick_config(&staged_share)?;
         let bundles = bundle_dirs(&staged_share.join("bundles"))?;
         let mut agentd_cmd = Command::new(&agentd);
@@ -333,7 +337,24 @@ fn wait_for_daemon(socket: &Path, child: usize) -> Result<(), String> {
 /// Format: `KEY=VALUE` lines, `#` comments, optional `export ` prefix.
 fn load_env_file(path: &Path) -> HashMap<String, String> {
     if !path.exists() {
-        let _ = fs::write(path, ENV_TEMPLATE);
+        // May hold an API key — create owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut f) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = f.write_all(ENV_TEMPLATE.as_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::write(path, ENV_TEMPLATE);
+        }
     }
     let Ok(text) = fs::read_to_string(path) else {
         return HashMap::new();
@@ -464,7 +485,9 @@ fn stop_child(child: &mut Child) {
     #[cfg(unix)]
     {
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Bundled configs give agentd a 30s drain deadline
+        // (`limits.shutdown.drain_deadline_ms`) — allow it plus teardown.
+        let deadline = Instant::now() + Duration::from_secs(35);
         while Instant::now() < deadline {
             match child.try_wait() {
                 Ok(None) => thread::sleep(Duration::from_millis(50)),
