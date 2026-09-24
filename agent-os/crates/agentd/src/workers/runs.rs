@@ -763,7 +763,10 @@ impl RunWorker {
                         "effect_id": e.effect_id.to_string(),
                         "operation": e.operation,
                         "state": format!("{:?}", e.state).to_ascii_lowercase(),
-                        "result_ref": e.result_ref,
+                        "result_ref": e
+                            .result_ref
+                            .as_deref()
+                            .map(compact_result_ref_for_loop),
                         "error_code": e.error_code,
                     }));
                 }
@@ -1925,6 +1928,99 @@ fn fresh_token(ids: &dyn IdProvider) -> u64 {
     (ids.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
 }
 
+fn compact_result_ref_for_loop(result_ref: &str) -> String {
+    let Some((prefix, body)) = result_ref.split_once(";base64,") else {
+        return result_ref.to_owned();
+    };
+    let Some(decoded) = base64_decode(body) else {
+        return result_ref.to_owned();
+    };
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+        return result_ref.to_owned();
+    };
+    let Some(content) = value
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return result_ref.to_owned();
+    };
+    let mut changed = false;
+    for item in content {
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("image")
+            && item.get("data").is_some()
+        {
+            item["data"] = serde_json::Value::String("[image attached]".to_owned());
+            changed = true;
+        }
+    }
+    if !changed {
+        return result_ref.to_owned();
+    }
+    let Ok(compact) = serde_json::to_vec(&value) else {
+        return result_ref.to_owned();
+    };
+    format!("{prefix};base64,{}", base64_encode(&compact))
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let lookup = |character: u8| {
+        TABLE
+            .iter()
+            .position(|candidate| *candidate == character)
+            .map(|position| position as u8)
+    };
+    let bytes: Vec<u8> = input.bytes().filter(|byte| *byte != b'=').collect();
+    let mut output = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            return None;
+        }
+        let values = chunk
+            .iter()
+            .map(|byte| lookup(*byte))
+            .collect::<Option<Vec<_>>>()?;
+        let packed = (u32::from(values[0]) << 18)
+            | (u32::from(*values.get(1)?) << 12)
+            | values.get(2).map_or(0, |value| u32::from(*value) << 6)
+            | values.get(3).map_or(0, |value| u32::from(*value));
+        output.push((packed >> 16) as u8);
+        if chunk.len() > 2 {
+            output.push((packed >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            output.push(packed as u8);
+        }
+    }
+    Some(output)
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len() * 4 / 3 + 4);
+    for chunk in input.chunks(3) {
+        let bytes = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let packed = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
+        output.push(TABLE[(packed >> 18) as usize & 63] as char);
+        output.push(TABLE[(packed >> 12) as usize & 63] as char);
+        output.push(if chunk.len() > 1 {
+            TABLE[(packed >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            TABLE[packed as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
 fn worker_error(code: ErrorCode, msg: impl Into<String>) -> KernelError {
     KernelError::new(code, RetryClass::Never, msg.into())
 }
@@ -1987,5 +2083,40 @@ fn plan_to_contract(plan: &EnvironmentPlan) -> contract::ResolvedRunEnvironment 
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_effect_compaction_preserves_plan_metadata() {
+        let result = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image", "mimeType": "image/jpeg", "data": "large-image-payload-that-does-not-belong-in-loop-context"}
+            ],
+            "request": {
+                "server": "computer",
+                "tool": "screenshot",
+                "remaining_calls": [
+                    {"server": "computer", "tool": "wait", "arguments": {"milliseconds": 500}}
+                ],
+                "final_output": "COMPUTER_SEQUENCE_OK"
+            }
+        });
+        let reference = format!(
+            "data:text/plain;base64,{}",
+            base64_encode(&serde_json::to_vec(&result).unwrap())
+        );
+        let compacted = compact_result_ref_for_loop(&reference);
+        let decoded = base64_decode(compacted.split_once(";base64,").unwrap().1).unwrap();
+        let compacted: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+
+        assert_eq!(compacted["content"][1]["data"], "[image attached]");
+        assert_eq!(compacted["request"]["remaining_calls"][0]["tool"], "wait");
+        assert_eq!(compacted["request"]["final_output"], "COMPUTER_SEQUENCE_OK");
+        assert!(compacted.to_string().len() < result.to_string().len());
     }
 }
