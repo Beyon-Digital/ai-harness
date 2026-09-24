@@ -75,15 +75,19 @@ fn encode_result(result: &Value, request: &Value) -> String {
         result = json!({"content": [{"type": "text", "text": result.to_string()}]});
     }
     if let Some(object) = result.as_object_mut() {
-        object.insert(
-            "request".to_owned(),
-            json!({
-                "op": request.get("op").cloned().unwrap_or(Value::Null),
-                "server": request.get("server").cloned().unwrap_or(Value::Null),
-                "tool": request.get("tool").cloned().unwrap_or(Value::Null),
-                "arguments": request.get("arguments").cloned().unwrap_or(json!({})),
-            }),
-        );
+        let mut encoded_request = json!({
+            "op": request.get("op").cloned().unwrap_or(Value::Null),
+            "server": request.get("server").cloned().unwrap_or(Value::Null),
+            "tool": request.get("tool").cloned().unwrap_or(Value::Null),
+            "arguments": request.get("arguments").cloned().unwrap_or(json!({})),
+        });
+        if let Some(remaining_calls) = request.get("remaining_calls") {
+            encoded_request["remaining_calls"] = remaining_calls.clone();
+        }
+        if let Some(final_output) = request.get("final_output") {
+            encoded_request["final_output"] = final_output.clone();
+        }
+        object.insert("request".to_owned(), encoded_request);
     }
     serde_json::to_string(&result).unwrap_or_default()
 }

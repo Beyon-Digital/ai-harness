@@ -213,6 +213,24 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     .and_then(Value::as_str)
                     .and_then(decode_data_uri)
                     .unwrap_or_default();
+                if let Some(next) = next_planned_call(&result) {
+                    return reply(
+                        Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                            operation: MCP_CALL_OP.to_owned(),
+                            payload: serde_json::to_vec(&next).unwrap_or_default(),
+                            effect_claim: Vec::new(),
+                        })),
+                        String::new(),
+                    );
+                }
+                if let Some(output) = planned_final_output(&result) {
+                    return reply(
+                        Some(loop_decision::Decision::Complete(Complete {
+                            output_ref: data_uri(&output),
+                        })),
+                        String::new(),
+                    );
+                }
                 format!(
                     "The MCP tool call succeeded with result:\n{}",
                     summarize_mcp_result(&result)
@@ -293,7 +311,54 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                 };
                 // The model asked to call an MCP tool — route it through
                 // the Effect Coordinator like the model call itself.
+                let mcp_plan = parse_mcp_plan(&content, &task);
                 let mcp_call = parse_mcp_call(&content);
+                if tools_required && mcp_hops == 0 {
+                    if let Some(call) = mcp_plan {
+                        return reply(
+                            Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                                operation: MCP_CALL_OP.to_owned(),
+                                payload: serde_json::to_vec(&call).unwrap_or_default(),
+                                effect_claim: Vec::new(),
+                            })),
+                            String::new(),
+                        );
+                    }
+                    if model_hops < 2 {
+                        let model = get("model").unwrap_or_else(|| model.to_owned());
+                        let mut request = chat_request(&model, &task, true, true);
+                        if let Some(messages) = request["messages"].as_array_mut() {
+                            messages.push(json!({
+                                "role": "assistant",
+                                "content": content,
+                            }));
+                            messages.push(json!({
+                                "role": "user",
+                                "content": "That response did not provide the required tool plan. Reply now with exactly one `mcp_plan` JSON object containing every computer action in order.",
+                            }));
+                        }
+                        if let Some(url) = get("base_url") {
+                            request["base_url"] = Value::String(url);
+                        }
+                        if let Some(ke) = get("api_key_env") {
+                            request["api_key_env"] = Value::String(ke);
+                        }
+                        return reply(
+                            Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                                operation: MODEL_CHAT_OP.to_owned(),
+                                payload: serde_json::to_vec(&request).unwrap_or_default(),
+                                effect_claim: Vec::new(),
+                            })),
+                            String::new(),
+                        );
+                    }
+                    return reply(
+                        Some(loop_decision::Decision::Fail(Fail {
+                            reason_code: "tool_plan_required".to_owned(),
+                        })),
+                        String::new(),
+                    );
+                }
                 if tools_enabled
                     && mcp_hops < MAX_MCP_HOPS
                     && let Some(call) = mcp_call
@@ -362,42 +427,6 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                             operation: MCP_CALL_OP.to_owned(),
                             payload: serde_json::to_vec(&call).unwrap_or_default(),
                             effect_claim: Vec::new(),
-                        })),
-                        String::new(),
-                    );
-                }
-                if tools_required && mcp_hops == 0 {
-                    if model_hops < 2 {
-                        let model = get("model").unwrap_or_else(|| model.to_owned());
-                        let mut request = chat_request(&model, &task, true, true);
-                        if let Some(messages) = request["messages"].as_array_mut() {
-                            messages.push(json!({
-                                "role": "assistant",
-                                "content": content,
-                            }));
-                            messages.push(json!({
-                                "role": "user",
-                                "content": "That response did not call a tool. Computer mode requires one real MCP call before completion. Reply now with exactly one `mcp_call` JSON object.",
-                            }));
-                        }
-                        if let Some(url) = get("base_url") {
-                            request["base_url"] = Value::String(url);
-                        }
-                        if let Some(ke) = get("api_key_env") {
-                            request["api_key_env"] = Value::String(ke);
-                        }
-                        return reply(
-                            Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
-                                operation: MODEL_CHAT_OP.to_owned(),
-                                payload: serde_json::to_vec(&request).unwrap_or_default(),
-                                effect_claim: Vec::new(),
-                            })),
-                            String::new(),
-                        );
-                    }
-                    return reply(
-                        Some(loop_decision::Decision::Fail(Fail {
-                            reason_code: "tool_call_required".to_owned(),
                         })),
                         String::new(),
                     );
@@ -588,6 +617,97 @@ fn parse_mcp_call(content: &str) -> Option<Value> {
     }))
 }
 
+fn parse_mcp_plan(content: &str, task: &str) -> Option<Value> {
+    let trimmed = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    let plan = parsed.get("mcp_plan")?;
+    let calls = plan.get("calls").and_then(Value::as_array)?;
+    if calls.is_empty() || calls.len() > MAX_MCP_HOPS as usize {
+        return None;
+    }
+    let mut normalized = calls
+        .iter()
+        .map(normalize_mcp_call)
+        .collect::<Option<Vec<_>>>()?;
+    let mut first = normalized.remove(0);
+    first["remaining_calls"] = Value::Array(normalized);
+    let final_output = exact_requested_output(task)
+        .or_else(|| {
+            plan.get("final_output")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if !final_output.is_empty() {
+        first["final_output"] = Value::String(final_output);
+    }
+    Some(first)
+}
+
+fn normalize_mcp_call(call: &Value) -> Option<Value> {
+    Some(json!({
+        "op": MCP_CALL_OP,
+        "server": call.get("server").and_then(Value::as_str)?,
+        "tool": call.get("tool").and_then(Value::as_str)?,
+        "arguments": call.get("arguments").cloned().unwrap_or_else(|| json!({})),
+    }))
+}
+
+fn next_planned_call(result: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(result).ok()?;
+    let request = value.get("request")?;
+    let calls = request.get("remaining_calls").and_then(Value::as_array)?;
+    let mut remaining = calls.clone();
+    if remaining.is_empty() {
+        return None;
+    }
+    let mut next = normalize_mcp_call(&remaining.remove(0))?;
+    next["remaining_calls"] = Value::Array(remaining);
+    if let Some(output) = request.get("final_output").and_then(Value::as_str)
+        && !output.is_empty()
+    {
+        next["final_output"] = Value::String(output.to_owned());
+    }
+    Some(next)
+}
+
+fn planned_final_output(result: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(result).ok()?;
+    let request = value.get("request")?;
+    let remaining = request.get("remaining_calls").and_then(Value::as_array)?;
+    if !remaining.is_empty() {
+        return None;
+    }
+    request
+        .get("final_output")
+        .and_then(Value::as_str)
+        .filter(|output| !output.is_empty())
+        .map(str::to_owned)
+}
+
+fn exact_requested_output(task: &str) -> Option<String> {
+    let lower = task.to_ascii_lowercase();
+    let start = lower.rfind("exactly ")? + "exactly ".len();
+    let candidate = task[start..]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(|character| {
+            matches!(
+                character,
+                '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?'
+            )
+        });
+    (!candidate.is_empty() && !candidate.contains(char::is_whitespace))
+        .then(|| candidate.to_owned())
+}
+
 fn summarize_mcp_result(result: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(result) else {
         return result.to_owned();
@@ -628,9 +748,12 @@ fn chat_request(model: &str, task: &str, tools_enabled: bool, tools_required: bo
         ""
     };
     let required_clause = if tools_required {
-        "\n\nComputer mode is active. You MUST reply with exactly one \
-        `mcp_call` now. Do not return `complete`, prose, or a description \
-        of an action before a real tool result has been received."
+        "\n\nComputer mode is active. Reply with exactly one plan object:\n\
+        {\"mcp_plan\":{\"calls\":[{\"server\":\"computer\",\"tool\":\"<tool>\",\
+        \"arguments\":{}}],\"final_output\":\"<final response after all calls>\"}}\n\
+        Include every requested computer action in order, with no more than \
+        four calls. Preserve any exact final response text from the task. Do \
+        not return `complete`, `mcp_call`, prose, or markdown."
     } else {
         ""
     };
@@ -806,13 +929,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_computer_prompt_forbids_completion_before_a_tool() {
+    fn required_computer_prompt_requires_an_ordered_plan() {
         let request = chat_request("openrouter/free", "inspect the screen", true, true);
         let system = request["messages"][0]["content"]
             .as_str()
             .expect("system prompt");
-        assert!(system.contains("MUST reply with exactly one `mcp_call`"));
+        assert!(system.contains("\"mcp_plan\""));
+        assert!(system.contains("every requested computer action in order"));
         assert!(system.contains("instead of narrating or claiming the action"));
+    }
+
+    #[test]
+    fn planned_computer_calls_continue_without_another_model_turn() {
+        let plan = json!({
+            "mcp_plan": {
+                "calls": [
+                    {"server": "computer", "tool": "screenshot", "arguments": {}},
+                    {"server": "computer", "tool": "wait", "arguments": {"milliseconds": 500}},
+                    {"server": "computer", "tool": "screenshot", "arguments": {}}
+                ],
+                "final_output": "ignored"
+            }
+        });
+        let first = parse_mcp_plan(
+            &plan.to_string(),
+            "Take a screenshot, wait 500 ms, take another screenshot, then say exactly COMPUTER_SEQUENCE_OK.",
+        )
+        .expect("plan");
+        assert_eq!(first["tool"], "screenshot");
+        assert_eq!(first["remaining_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(first["final_output"], "COMPUTER_SEQUENCE_OK");
+
+        let first_result = json!({"request": first, "content": []}).to_string();
+        let second = next_planned_call(&first_result).expect("second call");
+        assert_eq!(second["tool"], "wait");
+        assert_eq!(second["arguments"]["milliseconds"], 500);
+
+        let second_result = json!({"request": second, "content": []}).to_string();
+        let third = next_planned_call(&second_result).expect("third call");
+        assert_eq!(third["tool"], "screenshot");
+        assert!(third["remaining_calls"].as_array().unwrap().is_empty());
+
+        let third_result = json!({"request": third, "content": []}).to_string();
+        assert_eq!(
+            planned_final_output(&third_result).as_deref(),
+            Some("COMPUTER_SEQUENCE_OK")
+        );
     }
 
     #[test]
