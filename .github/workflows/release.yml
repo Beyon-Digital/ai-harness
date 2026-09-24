@@ -170,15 +170,6 @@ jobs:
           security find-identity -v -p codesigning build.keychain
           echo "$APPLE_API_PRIVATE_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
-      - name: Require Windows signing credentials for stable releases
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
-          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "WINDOWS_CERTIFICATE_PASSWORD is required" }
       - name: Import Windows Authenticode certificate
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -186,6 +177,13 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
+          # Missing cert secrets warn rather than fail — a Windows-only
+          # gap shouldn't block the whole release.
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            echo "::warning::WINDOWS_CERTIFICATE(_PASSWORD) not set — publishing UNSIGNED Windows bundles; SmartScreen will warn on install."
+            "**Windows bundles are UNSIGNED** — set WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD to sign them." | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
           $pfx = Join-Path $env:RUNNER_TEMP "certificate.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
@@ -213,6 +211,20 @@ jobs:
             "$GITHUB_WORKSPACE/agent-os/target/wasm32-wasip1/release"
           triple=$(rustc -vV | awk '/^host:/{print $2}')
           "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
+      - name: Sign embedded runtime binaries
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          # Notarization rejects the .app if ANY embedded Mach-O lacks a
+          # Developer ID signature + hardened runtime + secure timestamp;
+          # Tauri only signs the app shell, not the staged sidecars.
+          find src-tauri/binaries src-tauri/resources/agentos/share/bundles \
+            -type f -perm -111 | while IFS= read -r f; do
+            file "$f" | grep -q 'Mach-O' || continue
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$f"
+          done
       - name: Build bundles (self-contained app)
         if: runner.os != 'Windows'
         # Finder-AppleScript DMG styling times out on headless CI;
@@ -371,8 +383,9 @@ jobs:
             or set AGENTOS_GATEWAY to a reachable gateway URL.
 
             Stable releases are signed with Apple Developer ID and
-            notarized via an App Store Connect API key on macOS, and
-            Authenticode on Windows. Every
+            notarized via an App Store Connect API key on macOS. Windows
+            installers are Authenticode-signed when the certificate
+            secrets are configured. Every
             published asset includes a keyless Sigstore bundle
             (`.sigstore.json`) for identity-based verification.
         env:
