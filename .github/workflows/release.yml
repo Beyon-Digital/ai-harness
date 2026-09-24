@@ -2,10 +2,11 @@ name: release
 
 # Tag pushes (`v*`) publish a GitHub Release; every merge to `main`
 # refreshes the rolling `dev-latest` prerelease — both carry the macOS /
-# Linux / Windows desktop installers and the CLI tarballs. PRs touching
-# the desktop app run the same matrix build-only so the pipeline stays
-# continuously validated; manual dispatches opt into publishing via the
-# `publish` input.
+# Linux / Windows desktop installers and the CLI tarballs. Manual
+# dispatches opt into publishing via the `publish` input. PRs don't run
+# this pipeline — `agent-os.yml` is the presubmit gate; the matrix exists
+# to publish, and a full release build per PR burns minutes without
+# shipping anything.
 on:
   push:
     tags: ["v*"]
@@ -16,10 +17,6 @@ on:
       - "contracts/**"
       - "docs/**"
       - ".github/workflows/release.yml"
-  pull_request:
-    paths:
-      - "apps/desktop/**"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       publish:
@@ -27,10 +24,15 @@ on:
         type: boolean
         default: false
 
-# One run per ref — rapid merges queue rather than race the publish job.
+# One run per ref — a newer merge supersedes the in-flight dev-latest
+# refresh (only the newest state matters; serializing a full build per
+# commit wastes minutes). The publish design tolerates mid-flight
+# cancels: assets upload sha/run-suffixed, the tag moves last, and the
+# next run prunes leftovers. Tags get their own group so a main push
+# never cancels a stable release.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -41,9 +43,61 @@ env:
   RELEASE_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.ref == 'refs/heads/main' && 'dev-latest' || format('dev-{0}', github.sha)) }}
 
 jobs:
+  # The desktop sidecars and the CLI tarball ship the same binaries —
+  # build them once per OS here instead of compiling the same crate
+  # graph in both downstream jobs.
+  runtime:
+    name: Runtime binaries (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x86_64, os: ubuntu-22.04 }
+          - { label: macos-arm64, os: macos-14 }
+          - { label: macos-x86_64, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (repo-pinned channel)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.94.0"
+          targets: wasm32-wasip1
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-os
+      - name: Build runtime binaries + wasm plugin
+        working-directory: agent-os
+        run: |
+          cargo build --release \
+            -p agentd -p agentctl -p agentgw -p wasm-host \
+            -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop \
+            -p fixture-agent-loop -p fixture-effect-adapter -p computer-mcp
+          cargo build --release -p wasm-echo --target wasm32-wasip1
+      - name: Upload runtime binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.label }}
+          retention-days: 1
+          path: |
+            agent-os/target/release/agentd
+            agent-os/target/release/agentctl
+            agent-os/target/release/agentgw
+            agent-os/target/release/agentos-wasm-host
+            agent-os/target/release/local-memory
+            agent-os/target/release/openrouter-loop
+            agent-os/target/release/openrouter-effect
+            agent-os/target/release/acp-loop
+            agent-os/target/release/fixture-agent-loop
+            agent-os/target/release/fixture-effect-adapter
+            agent-os/target/release/computer-mcp
+            agent-os/target/wasm32-wasip1/release/wasm-echo.wasm
+
   desktop:
     name: Desktop bundle (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    needs: [runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -66,13 +120,10 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.94.0"
-          targets: wasm32-wasip1
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            agent-os
-            apps/desktop/src-tauri
+          workspaces: apps/desktop/src-tauri
       - name: Linux webview/build deps
         if: runner.os == 'Linux'
         run: |
@@ -149,17 +200,18 @@ jobs:
               }
             }
           } | ConvertTo-Json -Depth 5 | Out-File src-tauri/tauri.windows.conf.json -Encoding utf8
-      - name: Build + stage embedded runtime (Unix sidecars)
+      - name: Download runtime binaries (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-${{ matrix.label }}
+          path: agent-os
+      - name: Stage embedded runtime (Unix sidecars)
         if: runner.os != 'Windows'
         run: |
+          chmod -R +x "$GITHUB_WORKSPACE/agent-os/target/release" \
+            "$GITHUB_WORKSPACE/agent-os/target/wasm32-wasip1/release"
           triple=$(rustc -vV | awk '/^host:/{print $2}')
-          cd "$GITHUB_WORKSPACE/agent-os"
-          cargo build --release --target "$triple" \
-            -p agentd -p agentgw -p wasm-host \
-            -p local-memory -p openrouter-loop -p openrouter-effect \
-            -p acp-loop -p fixture-agent-loop -p fixture-effect-adapter \
-            -p computer-mcp
-          cargo build --release --target wasm32-wasip1 -p wasm-echo
           "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
       - name: Build bundles (self-contained app)
         if: runner.os != 'Windows'
@@ -191,6 +243,7 @@ jobs:
   cli:
     name: CLI binaries (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    needs: [runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -202,26 +255,15 @@ jobs:
           - { label: macos-x86_64, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust (repo-pinned channel)
-        uses: dtolnay/rust-toolchain@v1
+      - name: Download runtime binaries
+        uses: actions/download-artifact@v4
         with:
-          toolchain: "1.94.0"
-          targets: wasm32-wasip1
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: agent-os
-      - name: Build CLI binaries + wasm plugin
-        working-directory: agent-os
-        run: |
-          cargo build --release \
-            -p agentd -p agentctl -p agentgw -p wasm-host \
-            -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop \
-            -p fixture-agent-loop -p fixture-effect-adapter -p computer-mcp
-          cargo build --release -p wasm-echo --target wasm32-wasip1
+          name: runtime-${{ matrix.label }}
+          path: agent-os
       - name: Stage archive
         run: |
           set -euo pipefail
+          chmod -R +x agent-os/target/release
           pkg="agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}"
           mkdir -p "dist/$pkg/bin" "dist/$pkg/share/manifests" "dist/$pkg/share/bundles"
           cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop,fixture-agent-loop,fixture-effect-adapter,computer-mcp} \
