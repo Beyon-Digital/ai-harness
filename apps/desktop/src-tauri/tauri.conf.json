@@ -18,6 +18,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "deb": {
+        "depends": [
+          "xdotool",
+          "imagemagick"
+        ]
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0"
     },

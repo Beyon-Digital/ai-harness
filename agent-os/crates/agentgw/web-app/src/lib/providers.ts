@@ -10,6 +10,7 @@ export interface Provider {
 }
 
 export const PROVIDERS_KEY = "agentos.providers";
+const LEGACY_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
 export function defaultProviders(): Provider[] {
   return [
@@ -30,7 +31,9 @@ export function loadProviders(): Provider[] {
     const parsed = JSON.parse(raw) as Provider[];
     return parsed.length
       ? parsed.map((provider) =>
-          provider.id === "openrouter" && provider.builtin
+          provider.id === "openrouter" &&
+          provider.builtin &&
+          provider.model === LEGACY_OPENROUTER_MODEL
             ? { ...provider, model: "openrouter/free" }
             : provider,
         )

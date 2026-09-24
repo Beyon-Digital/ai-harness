@@ -23,7 +23,7 @@ to be set for the app to work. Two ways to customize:
   it in any text editor and relaunch; no terminal needed.
 - Real environment variables — always win over the file.
 
-Key vars: `AGENTOS_GATEWAY=http://host:port` skips the embedded
+Key vars: `AGENTOS_GATEWAY=https://host:port` skips the embedded
 services entirely (remote-gateway mode); `AGENTOS_CONFIG=<name>.yaml`
 picks a bundled config from `share/`; `OPENROUTER_API_KEY` set → the
 app auto-picks `openrouter.yaml` for the real-LLM path. The bundled
@@ -32,7 +32,7 @@ screenshot, click, type, key, and wait tools. Set `MCP_SERVERS`
 yourself to replace that automatic server map.
 
 ```sh
-AGENTOS_GATEWAY=http://my-host:7740 ./Agent\ OS.app/...   # remote gateway, no local services
+AGENTOS_GATEWAY=https://my-host:7740 ./Agent\ OS.app/...  # remote gateway, no local services
 AGENTOS_CONFIG=openrouter.yaml                            # pick a bundled config
 OPENROUTER_API_KEY=sk-or-...                              # auto-picks openrouter.yaml
 ```
@@ -61,8 +61,10 @@ npm ci && npm run build
 ```
 
 Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
-(Windows), `.AppImage`/`.deb` (Linux). Linux builds need webkit2gtk
-(`apt install libwebkit2gtk-4.1-dev libappindicator3-dev patchelf`).
+(Windows), and `.deb` (Linux). The Debian package declares the
+`xdotool` and ImageMagick runtime dependencies used by computer tools.
+Linux builds need webkit2gtk (`apt install libwebkit2gtk-4.1-dev
+libappindicator3-dev patchelf xdotool imagemagick`).
 
 ## Releases
 
@@ -83,12 +85,14 @@ Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
 Assets on every release:
 
 - Desktop: `.dmg` (macOS arm64 + Intel), `.msi`/`.nsis` (Windows),
-  `.AppImage`/`.deb` (Linux x86_64).
+  `.deb` (Linux x86_64).
 - CLI archives (`agentos-<name>-<platform>.tar.gz`): `agentd`,
   `agentctl`, `agentgw`, `agentos-wasm-host`, the adapter binaries,
   `wasm-echo.wasm`, `make-adapter-bundle.sh`, config manifests, and the
   gateway guide. Unix-only — the daemon speaks Unix sockets; on Windows
   the desktop app points at a remote `agentgw` via `AGENTOS_GATEWAY`.
+  Linux CLI archive users must install `xdotool` and ImageMagick before
+  using `computer-mcp`; the desktop `.deb` installs them automatically.
 
 Cut a stable release:
 

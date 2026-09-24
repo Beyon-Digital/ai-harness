@@ -763,10 +763,7 @@ impl RunWorker {
                         "effect_id": e.effect_id.to_string(),
                         "operation": e.operation,
                         "state": format!("{:?}", e.state).to_ascii_lowercase(),
-                        "result_ref": e
-                            .result_ref
-                            .as_deref()
-                            .map(compact_result_ref_for_loop),
+                        "result_ref": e.result_ref.clone(),
                         "error_code": e.error_code,
                     }));
                 }
@@ -809,13 +806,35 @@ impl RunWorker {
             let marker_value = marker(&op_counts);
             let marker_opt = (!settled.is_empty()).then_some(&marker_value);
             let mut events = pack(&settled, marker_opt);
-            // Shrink order: oldest settled entries first, then the
-            // marker itself, so the newest result never silently drops.
-            while events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
+            // Shrink order: old settled entries, then image payloads.
+            // Keeping a full newest screenshot when it fits lets a
+            // vision-capable model ground its next decision.
+            while events.len() > limits.max_fed_event_bytes as usize && settled.len() > 1 {
                 settled.remove(0);
                 events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
             if events.len() > limits.max_fed_event_bytes as usize {
+                for event in &mut settled {
+                    if let Some(result_ref) = event.get("result_ref").and_then(|v| v.as_str()) {
+                        event["result_ref"] =
+                            serde_json::Value::String(compact_result_ref_for_loop(result_ref));
+                    }
+                }
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
+            }
+            if events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
+                if let Some(newest) = settled.last_mut()
+                    && let Some(object) = newest.as_object_mut()
+                {
+                    object.insert(
+                        "op_counts".to_owned(),
+                        serde_json::to_value(&op_counts).unwrap_or_default(),
+                    );
+                    object.insert(
+                        "latest_mcp_request_hash".to_owned(),
+                        marker_value["latest_mcp_request_hash"].clone(),
+                    );
+                }
                 events = pack(&settled, None);
             }
             // A cap too small even for the settled batch — emit the

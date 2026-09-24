@@ -71,6 +71,17 @@ const STARTERS = [
   "Plan and run a custom agent workflow",
 ];
 
+function computerOriginIsSecure() {
+  const { hostname, protocol } = window.location;
+  return (
+    protocol === "https:" ||
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
 function describeDecision(decision: Decision): string | undefined {
   const detail = decision.detail ?? {};
   const value =
@@ -207,6 +218,10 @@ export function ChatPage({
       toast.error("Create or select an agent first");
       return;
     }
+    if (toolsOn && !computerOriginIsSecure()) {
+      toast.error("Computer mode requires HTTPS for remote gateways");
+      return;
+    }
     setBusy(true);
     setInput("");
     const userMessage: ChatMessage = {
@@ -280,7 +295,9 @@ export function ChatPage({
       .find((item) => item.runId === activeRunId);
     if (!activeRunId || !message) return;
     try {
-      await cancelRun(activeRunId, "cancelled from chat");
+      const revision =
+        message.revision ?? (await getRun(activeRunId)).run_revision;
+      await cancelRun(activeRunId, "cancelled from chat", revision);
     } catch (error) {
       toast.error((error as Error).message);
     }

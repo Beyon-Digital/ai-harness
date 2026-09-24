@@ -151,7 +151,7 @@ fn open_window(handle: &tauri::AppHandle) -> Result<WebviewWindow, String> {
 /// a bootstrap thread and navigate once the gateway answers.
 fn start_services(handle: &tauri::AppHandle, window: WebviewWindow) {
     match app_var("AGENTOS_GATEWAY") {
-        Some(gateway) => match gateway.parse::<Url>() {
+        Some(gateway) => match parse_gateway_url(&gateway) {
             Ok(url) => navigate(&window, url),
             Err(e) => fail(
                 &window,
@@ -175,6 +175,18 @@ fn start_services(handle: &tauri::AppHandle, window: WebviewWindow) {
             *slot = Some(join);
         }
     }
+}
+
+fn parse_gateway_url(gateway: &str) -> Result<Url, String> {
+    let url = gateway.parse::<Url>().map_err(|error| error.to_string())?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    );
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        return Ok(url);
+    }
+    Err("remote gateways must use HTTPS".to_owned())
 }
 
 /// Error-page Retry: re-read `agentos.env` (edits apply without an app
@@ -630,8 +642,7 @@ fn child_env() -> Vec<(String, String)> {
                 let display_env = ["DISPLAY", "XAUTHORITY"]
                     .into_iter()
                     .filter_map(|key| {
-                        app_var(key)
-                            .map(|value| (key.to_owned(), serde_json::Value::String(value)))
+                        app_var(key).map(|value| (key.to_owned(), serde_json::Value::String(value)))
                     })
                     .collect::<serde_json::Map<_, _>>();
                 if !display_env.is_empty() {
@@ -837,4 +848,22 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_gateway_url;
+
+    #[test]
+    fn remote_gateways_require_https() {
+        assert!(parse_gateway_url("https://gateway.example.com").is_ok());
+        assert!(parse_gateway_url("http://gateway.example.com").is_err());
+    }
+
+    #[test]
+    fn loopback_gateways_allow_http() {
+        assert!(parse_gateway_url("http://localhost:7740").is_ok());
+        assert!(parse_gateway_url("http://127.0.0.1:7740").is_ok());
+        assert!(parse_gateway_url("http://[::1]:7740").is_ok());
+    }
 }

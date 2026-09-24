@@ -191,7 +191,7 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
     // the current step's outcomes, so checking "any mcp effect" would
     // re-dispatch the same tool result forever.
     let latest = settled_effects(&input.events).last().cloned();
-    if let Some(effect) = latest
+    if let Some(ref effect) = latest
         && effect
             .get("operation")
             .and_then(Value::as_str)
@@ -214,6 +214,14 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     .and_then(decode_data_uri)
                     .unwrap_or_default();
                 if let Some(next) = next_planned_call(&result) {
+                    if final_only {
+                        return reply(
+                            Some(loop_decision::Decision::Fail(Fail {
+                                reason_code: "mcp_hop_limit".to_owned(),
+                            })),
+                            String::new(),
+                        );
+                    }
                     return reply(
                         Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
                             operation: MCP_CALL_OP.to_owned(),
@@ -255,15 +263,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
         let model = get("model").unwrap_or_else(|| model.to_owned());
         let mut request = chat_request(&model, &task, tools_enabled && !final_only, false);
         if let Some(m) = request["messages"].as_array_mut() {
+            let content = mcp_follow_up_content(&note, &result_for_note(&latest), mcp_hops);
             m.push(json!({
                 "role": "user",
-                "content": format!(
-                    "MCP tool call #{mcp_hops} has finished. {note}\n\
-                     The `request` field identifies the completed call. Do not \
-                     immediately repeat that same call. Continue with the next \
-                     pending action from the task, or return `complete` when all \
-                     requested actions are finished."
-                )
+                "content": content
             }));
             if final_only {
                 m.push(json!({
@@ -533,7 +536,7 @@ fn op_count(events: &[u8], prefix: &str) -> u32 {
         // Marker element carries `{.., "op_counts": {op: n}}`.
         Value::Array(a) => a
             .iter()
-            .find(|e| is_marker(e))
+            .find(|e| e.get("op_counts").is_some())
             .and_then(|e| e.get("op_counts").cloned()),
         v => v.get("op_counts").cloned(),
     };
@@ -565,7 +568,7 @@ fn latest_mcp_request_hash(events: &[u8]) -> Option<String> {
     match events_doc(events) {
         Value::Array(events) => events
             .iter()
-            .find(|event| is_marker(event))
+            .find(|event| event.get("latest_mcp_request_hash").is_some())
             .and_then(|event| event.get("latest_mcp_request_hash"))
             .and_then(Value::as_str)
             .filter(|hash| !hash.is_empty())
@@ -636,13 +639,7 @@ fn parse_mcp_plan(content: &str, task: &str) -> Option<Value> {
         .collect::<Option<Vec<_>>>()?;
     let mut first = normalized.remove(0);
     first["remaining_calls"] = Value::Array(normalized);
-    let final_output = exact_requested_output(task)
-        .or_else(|| {
-            plan.get("final_output")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_default();
+    let final_output = exact_requested_output(task).unwrap_or_default();
     if !final_output.is_empty() {
         first["final_output"] = Value::String(final_output);
     }
@@ -722,6 +719,49 @@ fn summarize_mcp_result(result: &str) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| result.to_owned())
 }
 
+fn result_for_note(effect: &Option<Value>) -> String {
+    effect
+        .as_ref()
+        .and_then(|value| value.get("result_ref"))
+        .and_then(Value::as_str)
+        .and_then(decode_data_uri)
+        .unwrap_or_default()
+}
+
+fn mcp_follow_up_content(note: &str, result: &str, mcp_hops: u32) -> Value {
+    let instruction = format!(
+        "MCP tool call #{mcp_hops} has finished. {note}\n\
+         The `request` field identifies the completed call. Do not immediately \
+         repeat that same call. Continue with the next pending action from the \
+         task, or return `complete` when all requested actions are finished."
+    );
+    let images = serde_json::from_str::<Value>(result)
+        .ok()
+        .and_then(|value| value.get("content").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            if item.get("type").and_then(Value::as_str) != Some("image") {
+                return None;
+            }
+            let mime = item.get("mimeType").and_then(Value::as_str)?;
+            let data = item.get("data").and_then(Value::as_str)?;
+            (data != "[image attached]").then(|| {
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:{mime};base64,{data}")}
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return Value::String(instruction);
+    }
+    let mut content = vec![json!({"type": "text", "text": instruction})];
+    content.extend(images);
+    Value::Array(content)
+}
+
 fn chat_request(model: &str, task: &str, tools_enabled: bool, tools_required: bool) -> Value {
     let system = "You are the decision loop of an agent operating system. \
         You receive the task (what the user asked the agent to do). \
@@ -750,9 +790,10 @@ fn chat_request(model: &str, task: &str, tools_enabled: bool, tools_required: bo
     let required_clause = if tools_required {
         "\n\nComputer mode is active. Reply with exactly one plan object:\n\
         {\"mcp_plan\":{\"calls\":[{\"server\":\"computer\",\"tool\":\"<tool>\",\
-        \"arguments\":{}}],\"final_output\":\"<final response after all calls>\"}}\n\
+        \"arguments\":{}}],\"final_output\":\"<exact literal response only when requested>\"}}\n\
         Include every requested computer action in order, with no more than \
-        four calls. Preserve any exact final response text from the task. Do \
+        four calls. Use `final_output` only when the task gives exact final \
+        response text; visual answers are produced after inspecting the result. Do \
         not return `complete`, `mcp_call`, prose, or markdown."
     } else {
         ""
@@ -978,6 +1019,22 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_dependent_plan_does_not_use_prewritten_answer() {
+        let plan = json!({
+            "mcp_plan": {
+                "calls": [
+                    {"server": "computer", "tool": "screenshot", "arguments": {}}
+                ],
+                "final_output": "The screen says something unverified."
+            }
+        });
+        let first = parse_mcp_plan(&plan.to_string(), "What does the screen say?").expect("plan");
+        assert!(first.get("final_output").is_none());
+        let result = json!({"request": first, "content": []}).to_string();
+        assert!(planned_final_output(&result).is_none());
+    }
+
+    #[test]
     fn mcp_result_summary_keeps_request_metadata() {
         let result = json!({
             "request": {
@@ -995,5 +1052,31 @@ mod tests {
         assert!(summary.contains("\"tool\":\"screenshot\""));
         assert!(summary.contains("[image attached]"));
         assert!(!summary.contains("\"data\":\"abc\""));
+    }
+
+    #[test]
+    fn screenshot_result_is_forwarded_as_vision_input() {
+        let result = json!({
+            "content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image", "mimeType": "image/jpeg", "data": "abc"}
+            ]
+        });
+        let content = mcp_follow_up_content("captured", &result.to_string(), 1);
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,abc");
+    }
+
+    #[test]
+    fn inline_run_metadata_preserves_budget_and_duplicate_guard() {
+        let events = serde_json::to_vec(&json!([{
+            "operation": "mcp.call_tool",
+            "state": "committed",
+            "op_counts": {"mcp.call_tool": 4},
+            "latest_mcp_request_hash": "hash"
+        }]))
+        .unwrap();
+        assert_eq!(op_count(&events, "mcp."), 4);
+        assert_eq!(latest_mcp_request_hash(&events).as_deref(), Some("hash"));
     }
 }

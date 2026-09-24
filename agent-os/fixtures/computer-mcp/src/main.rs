@@ -271,10 +271,13 @@ fn type_text(text: &str) -> Result<(), String> {
         "osascript",
         &[
             "-e",
-            &format!(
-                "tell application \"System Events\" to keystroke \"{}\"",
-                apple_quote(text)
-            ),
+            "on run argv",
+            "-e",
+            "tell application \"System Events\" to keystroke (item 1 of argv)",
+            "-e",
+            "end run",
+            "--",
+            text,
         ],
     )
 }
@@ -298,13 +301,24 @@ fn press_key(key: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn press_key(key: &str) -> Result<(), String> {
     let normalized = key.to_ascii_uppercase();
-    let (code, modifiers) = if let Some((modifier, value)) = normalized.split_once('+') {
-        (
-            mac_key_code(value),
-            format!(" using {{{} down}}", mac_modifier(modifier)),
-        )
+    let mut parts = normalized.split('+').collect::<Vec<_>>();
+    let value = parts.pop().ok_or("missing key")?;
+    let code = mac_key_code(value)?;
+    let modifiers = parts
+        .into_iter()
+        .map(mac_modifier)
+        .collect::<Result<Vec<_>, _>>()?;
+    let modifiers = if modifiers.is_empty() {
+        String::new()
     } else {
-        (mac_key_code(&normalized), String::new())
+        format!(
+            " using {{{}}}",
+            modifiers
+                .iter()
+                .map(|modifier| format!("{modifier} down"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     run_status(
         "osascript",
@@ -340,9 +354,45 @@ fn press_key(key: &str) -> Result<(), String> {
     run_status("powershell", &["-NoProfile", "-Command", &script])
 }
 
-#[cfg(target_os = "macos")]
-fn mac_key_code(key: &str) -> u8 {
-    match key {
+#[cfg(any(target_os = "macos", test))]
+fn mac_key_code(key: &str) -> Result<u8, String> {
+    let code = match key {
+        "A" => 0,
+        "S" => 1,
+        "D" => 2,
+        "F" => 3,
+        "H" => 4,
+        "G" => 5,
+        "Z" => 6,
+        "X" => 7,
+        "C" => 8,
+        "V" => 9,
+        "B" => 11,
+        "Q" => 12,
+        "W" => 13,
+        "E" => 14,
+        "R" => 15,
+        "Y" => 16,
+        "T" => 17,
+        "1" => 18,
+        "2" => 19,
+        "3" => 20,
+        "4" => 21,
+        "6" => 22,
+        "5" => 23,
+        "9" => 25,
+        "7" => 26,
+        "8" => 28,
+        "0" => 29,
+        "O" => 31,
+        "U" => 32,
+        "I" => 34,
+        "P" => 35,
+        "L" => 37,
+        "J" => 38,
+        "K" => 40,
+        "N" => 45,
+        "M" => 46,
         "ENTER" => 36,
         "TAB" => 48,
         "SPACE" => 49,
@@ -352,17 +402,31 @@ fn mac_key_code(key: &str) -> u8 {
         "ARROWRIGHT" => 124,
         "ARROWDOWN" => 125,
         "ARROWUP" => 126,
-        _ => 36,
-    }
+        "F1" => 122,
+        "F2" => 120,
+        "F3" => 99,
+        "F4" => 118,
+        "F5" => 96,
+        "F6" => 97,
+        "F7" => 98,
+        "F8" => 100,
+        "F9" => 101,
+        "F10" => 109,
+        "F11" => 103,
+        "F12" => 111,
+        _ => return Err(format!("unsupported macOS key: {key}")),
+    };
+    Ok(code)
 }
 
-#[cfg(target_os = "macos")]
-fn mac_modifier(key: &str) -> &'static str {
+#[cfg(any(target_os = "macos", test))]
+fn mac_modifier(key: &str) -> Result<&'static str, String> {
     match key {
-        "CMD" | "COMMAND" => "command",
-        "ALT" | "OPTION" => "option",
-        "SHIFT" => "shift",
-        _ => "control",
+        "CMD" | "COMMAND" => Ok("command"),
+        "ALT" | "OPTION" => Ok("option"),
+        "SHIFT" => Ok("shift"),
+        "CTRL" | "CONTROL" => Ok("control"),
+        _ => Err(format!("unsupported macOS modifier: {key}")),
     }
 }
 
@@ -389,11 +453,6 @@ fn run_status(program: &str, args: &[&str]) -> Result<(), String> {
 fn path_str(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| "temporary path is not UTF-8".to_owned())
-}
-
-#[cfg(target_os = "macos")]
-fn apple_quote(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(target_os = "windows")]
@@ -439,4 +498,24 @@ fn respond(out: &mut impl Write, id: Value, result: Option<Value>, error: Option
     bytes.push(b'\n');
     let _ = out.write_all(&bytes);
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mac_key_code, mac_modifier};
+
+    #[test]
+    fn macos_shortcut_keys_cover_letters_digits_and_functions() {
+        assert_eq!(mac_key_code("K"), Ok(40));
+        assert_eq!(mac_key_code("7"), Ok(26));
+        assert_eq!(mac_key_code("F12"), Ok(111));
+        assert!(mac_key_code("UNKNOWN").is_err());
+    }
+
+    #[test]
+    fn macos_shortcut_modifiers_reject_unknown_values() {
+        assert_eq!(mac_modifier("CMD"), Ok("command"));
+        assert_eq!(mac_modifier("CTRL"), Ok("control"));
+        assert!(mac_modifier("META").is_err());
+    }
 }

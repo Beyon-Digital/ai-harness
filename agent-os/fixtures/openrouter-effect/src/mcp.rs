@@ -64,7 +64,28 @@ pub fn call(payload: &Value, timeout: Duration) -> Result<String, String> {
         } => stdio_call(command, args, env, cwd.as_deref(), method, params, timeout)?,
         ServerSpec::Http { url, headers } => http_call(url, headers, method, params, timeout)?,
     };
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(tool_error(&result));
+    }
     Ok(encode_result(&result, payload))
+}
+
+fn tool_error(result: &Value) -> String {
+    let message = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    if message.is_empty() {
+        "mcp_tool_error".to_owned()
+    } else {
+        format!("mcp_tool_error: {message}")
+    }
 }
 
 /// Preserve MCP content for the UI and include the completed request so
@@ -379,6 +400,16 @@ mod tests {
         let encoded: Value =
             serde_json::from_str(&encode_result(&value, &json!({}))).expect("encoded result");
         assert_eq!(encoded["content"], value["content"]);
+    }
+
+    #[test]
+    fn tool_reported_errors_become_effect_errors() {
+        let error = tool_error(&json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "window unavailable"}]
+        }));
+        assert_eq!(error, "mcp_tool_error: window unavailable");
+        assert_eq!(tool_error(&json!({"isError": true})), "mcp_tool_error");
     }
 
     #[test]
