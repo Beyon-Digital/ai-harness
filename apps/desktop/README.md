@@ -69,9 +69,9 @@ Produces platform installers: `.dmg`/`.app` (macOS), `.msi`/`.exe`
   workflow (see the workflow's path filter) rebuild the matrix and
   refresh the rolling **`dev-latest`** prerelease —
   `releases/tag/dev-latest` always carries the newest build. Asset names
-  carry a `-dev.<sha>` suffix so a refresh never mutates the live set:
-  the new files upload alongside the old, obsolete assets are pruned
-  after a successful upload, and the tag moves last.
+  carry a `-dev.<sha>.<run>.<attempt>` suffix so a refresh never mutates
+  the live set: the new files upload alongside the old, the tag moves
+  once the full set is in place, and obsolete assets are pruned last.
 - **`v*` tags publish a full release** directly (tag names containing
   `-`, e.g. `v1.0.0-rc1`, land as prereleases).
 - **Manual `workflow_dispatch`** with `publish: true` does the same on
