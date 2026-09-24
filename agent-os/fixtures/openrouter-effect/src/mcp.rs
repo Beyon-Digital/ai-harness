@@ -64,22 +64,53 @@ pub fn call(payload: &Value, timeout: Duration) -> Result<String, String> {
         } => stdio_call(command, args, env, cwd.as_deref(), method, params, timeout)?,
         ServerSpec::Http { url, headers } => http_call(url, headers, method, params, timeout)?,
     };
-    Ok(flatten_result(&result))
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(tool_error(&result));
+    }
+    Ok(encode_result(&result, payload))
 }
 
-/// `tools/call` returns `{content: [{type:"text",text}...]}` — join the
-/// text parts; anything else is returned as compact JSON.
-fn flatten_result(result: &Value) -> String {
-    if let Some(content) = result.get("content").and_then(Value::as_array) {
-        let texts: Vec<&str> = content
-            .iter()
-            .filter_map(|c| c.get("text").and_then(Value::as_str))
-            .collect();
-        if !texts.is_empty() {
-            return texts.join("\n");
-        }
+fn tool_error(result: &Value) -> String {
+    let message = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    if message.is_empty() {
+        "mcp_tool_error".to_owned()
+    } else {
+        format!("mcp_tool_error: {message}")
     }
-    serde_json::to_string(result).unwrap_or_default()
+}
+
+/// Preserve MCP content for the UI and include the completed request so
+/// the model can continue a multi-tool task without repeating the last call.
+fn encode_result(result: &Value, request: &Value) -> String {
+    let mut result = result.clone();
+    if !result.is_object() {
+        result = json!({"content": [{"type": "text", "text": result.to_string()}]});
+    }
+    if let Some(object) = result.as_object_mut() {
+        let mut encoded_request = json!({
+            "op": request.get("op").cloned().unwrap_or(Value::Null),
+            "server": request.get("server").cloned().unwrap_or(Value::Null),
+            "tool": request.get("tool").cloned().unwrap_or(Value::Null),
+            "arguments": request.get("arguments").cloned().unwrap_or(json!({})),
+        });
+        if let Some(remaining_calls) = request.get("remaining_calls") {
+            encoded_request["remaining_calls"] = remaining_calls.clone();
+        }
+        if let Some(final_output) = request.get("final_output") {
+            encoded_request["final_output"] = final_output.clone();
+        }
+        object.insert("request".to_owned(), encoded_request);
+    }
+    serde_json::to_string(&result).unwrap_or_default()
 }
 
 enum ServerSpec {
@@ -335,15 +366,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flatten_joins_text_content() {
+    fn encode_preserves_text_content_and_request() {
         let v = json!({"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]});
-        assert_eq!(flatten_result(&v), "a\nb");
+        let request = json!({
+            "op": "mcp.call_tool",
+            "server": "computer",
+            "tool": "wait",
+            "arguments": {"milliseconds": 50}
+        });
+        let encoded: Value =
+            serde_json::from_str(&encode_result(&v, &request)).expect("encoded result");
+        assert_eq!(encoded["content"], v["content"]);
+        assert_eq!(encoded["request"], request);
     }
 
     #[test]
-    fn flatten_falls_back_to_json() {
+    fn encode_preserves_non_content_results() {
         let v = json!({"tools": [{"name": "echo"}]});
-        assert_eq!(flatten_result(&v), r#"{"tools":[{"name":"echo"}]}"#);
+        let encoded: Value =
+            serde_json::from_str(&encode_result(&v, &json!({}))).expect("encoded result");
+        assert_eq!(encoded["tools"], v["tools"]);
+        assert!(encoded["request"].is_object());
+    }
+
+    #[test]
+    fn encode_preserves_mixed_content() {
+        let value = json!({
+            "content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image", "mimeType": "image/jpeg", "data": "abc"}
+            ]
+        });
+        let encoded: Value =
+            serde_json::from_str(&encode_result(&value, &json!({}))).expect("encoded result");
+        assert_eq!(encoded["content"], value["content"]);
+    }
+
+    #[test]
+    fn tool_reported_errors_become_effect_errors() {
+        let error = tool_error(&json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "window unavailable"}]
+        }));
+        assert_eq!(error, "mcp_tool_error: window unavailable");
+        assert_eq!(tool_error(&json!({"isError": true})), "mcp_tool_error");
     }
 
     #[test]
@@ -450,7 +516,17 @@ mod tests {
         )
         .expect("http_call");
         handle.join().unwrap();
-        assert_eq!(flatten_result(&out), "http-mcp-ok");
+        let encoded: Value = serde_json::from_str(&encode_result(
+            &out,
+            &json!({
+                "op": "mcp.call_tool",
+                "server": "http",
+                "tool": "echo",
+                "arguments": {}
+            }),
+        ))
+        .expect("encoded result");
+        assert_eq!(encoded["content"][0]["text"], "http-mcp-ok");
         assert!(
             seen.lock()
                 .unwrap()

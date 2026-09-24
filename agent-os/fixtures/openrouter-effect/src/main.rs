@@ -46,7 +46,7 @@ use serde_json::Value;
 
 const PORT_ID: &str = "effect.execute";
 const PROTOCOL_VERSION: u32 = 1;
-const MAX_RESULT_BYTES: usize = 64 * 1024;
+const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
     match run() {
@@ -255,7 +255,9 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
     if mcp::is_mcp_payload(&payload) {
         return match mcp::call(&payload, config.mcp_timeout) {
             Ok(text) => {
-                let result_ref = data_uri(&text);
+                let Ok(result_ref) = data_uri(&text) else {
+                    return fail("mcp_result_too_large");
+                };
                 store.insert(
                     req.operation_id.clone(),
                     OpRecord {
@@ -337,7 +339,9 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
 
     match call_chat(config, &base_url, &api_key, &body) {
         Ok(content) => {
-            let result_ref = data_uri(&content);
+            let Ok(result_ref) = data_uri(&content) else {
+                return fail("model_result_too_large");
+            };
             store.insert(
                 req.operation_id.clone(),
                 OpRecord {
@@ -451,15 +455,14 @@ fn call_chat(
     Err("provider_bad_response".to_owned())
 }
 
-fn data_uri(text: &str) -> String {
-    let mut end = MAX_RESULT_BYTES.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
+fn data_uri(text: &str) -> Result<String, ()> {
+    if text.len() > MAX_RESULT_BYTES {
+        return Err(());
     }
-    format!(
+    Ok(format!(
         "data:text/plain;base64,{}",
-        base64_encode(&text.as_bytes()[..end])
-    )
+        base64_encode(text.as_bytes())
+    ))
 }
 
 fn base64_encode(input: &[u8]) -> String {
@@ -504,6 +507,12 @@ fn err_msg(msg: impl Into<String>) -> std::io::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn data_uri_rejects_oversized_results_without_truncating() {
+        assert!(data_uri(&"x".repeat(MAX_RESULT_BYTES)).is_ok());
+        assert!(data_uri(&"x".repeat(MAX_RESULT_BYTES + 1)).is_err());
+    }
+
     /// The MCP dispatch path drives a real `echo-mcp` subprocess through
     /// `MCP_SERVERS` — covers the stdio transport + result flattening the
     /// daemon relies on for `mcp.*` effects.
@@ -532,7 +541,10 @@ mod tests {
             Duration::from_secs(15),
         )
         .expect("mcp.call_tool");
-        assert_eq!(out, "mcp-ok");
+        let result: Value = serde_json::from_str(&out).expect("MCP result JSON");
+        assert_eq!(result["content"][0]["text"], "mcp-ok");
+        assert_eq!(result["request"]["server"], "echo");
+        assert_eq!(result["request"]["tool"], "echo");
 
         let err = mcp::call(
             &serde_json::json!({"op": "mcp.list_tools", "server": "ghost"}),

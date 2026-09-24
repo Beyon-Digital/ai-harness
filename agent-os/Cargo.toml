@@ -39,6 +39,7 @@ members = [
     "fixtures/agent-loop",
     "fixtures/echo-acp",
     "fixtures/echo-mcp",
+    "fixtures/computer-mcp",
     "fixtures/effect-adapter",
     "fixtures/local-memory",
     "fixtures/openrouter-effect",

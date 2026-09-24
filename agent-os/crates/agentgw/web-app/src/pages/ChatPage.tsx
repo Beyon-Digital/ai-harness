@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, ExternalLink, Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowUp,
+  Bot,
+  ChevronDown,
+  ExternalLink,
+  Monitor,
+  Plus,
+  Square,
+  Workflow,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   Conversation,
   ConversationContent,
-  ConversationEmptyState,
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
-import { Message, MessageContent } from "@/components/ai-elements/message";
-import {
-  ChainOfThought,
-  ChainOfThoughtContent,
-  ChainOfThoughtHeader,
-  ChainOfThoughtStep,
-} from "@/components/ai-elements/chain-of-thought";
+import { ToolActivity } from "@/components/ToolActivity";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,10 +35,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  cancelRun,
   createRun,
   createSession,
   decodeDataUri,
@@ -52,73 +54,116 @@ import {
 import { loadProviders, type Provider } from "@/lib/providers";
 import { cn } from "@/lib/utils";
 
-interface ChatMsg {
+interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
   runId?: string;
   state?: string;
+  revision?: number;
   decisions?: Decision[];
   error?: boolean;
 }
 
-/** Short human label for a decision's detail blob — never raw objects. */
-function describeDecision(d: Decision): string | undefined {
-  const det = (d.detail ?? {}) as Record<string, unknown>;
-  const v = det.operation ?? det.output_ref ?? Object.values(det)[0];
-  if (v == null) return undefined;
-  const s = typeof v === "string" ? v : JSON.stringify(v);
-  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+const STARTERS = [
+  "Inspect the current screen and summarize what is open",
+  "Use the computer to complete the task in the active app",
+  "Plan and run a custom agent workflow",
+];
+
+function computerOriginIsSecure() {
+  const { hostname, protocol } = window.location;
+  return (
+    protocol === "https:" ||
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
 }
 
-export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) {
+function describeDecision(decision: Decision): string | undefined {
+  const detail = decision.detail ?? {};
+  const value =
+    detail.reason_code ?? detail.reason ?? detail.operation ?? detail.output_ref;
+  if (value == null) return undefined;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+function statusLabel(state?: string) {
+  if (!state || state === "created") return "Starting";
+  if (state === "completed") return "Done";
+  if (state === "failed") return "Failed";
+  if (state === "cancelled") return "Cancelled";
+  return state.replaceAll("_", " ");
+}
+
+export function ChatPage({
+  onOpenRun,
+  onOpenWorkflows,
+}: {
+  onOpenRun: (runId: string) => void;
+  onOpenWorkflows: () => void;
+}) {
   const [specs, setSpecs] = useState<Spec[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [specId, setSpecId] = useState("");
   const [sessionId, setSessionId] = useState("");
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [providers] = useState<Provider[]>(loadProviders);
-  const [providerId, setProviderId] = useState("default");
-  // When on, the run envelope carries `tools: true` — the agent loop may
-  // then issue `mcp.call_tool` effects against the daemon's MCP_SERVERS.
+  const [providerId, setProviderId] = useState("openrouter");
   const [toolsOn, setToolsOn] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agentProfile, setAgentProfile] = useState("");
   const [agentDesc, setAgentDesc] = useState("");
+  const [activeRunId, setActiveRunId] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+
+  const selectedSpec = useMemo(() => {
+    const [id, version] = specId.split("@");
+    return specs.find(
+      (spec) => spec.agent_spec_id === id && spec.version === version,
+    );
+  }, [specId, specs]);
 
   const refreshSpecs = useCallback(async () => {
     try {
-      const [idx, profs] = await Promise.all([getIndex(), getProfiles()]);
-      setSpecs(idx.specs);
-      setProfiles(profs);
-      if (!specId && idx.specs.length)
-        setSpecId(`${idx.specs[0].agent_spec_id}@${idx.specs[0].version}`);
-      if (!agentProfile && profs.length) setAgentProfile(profs[0].name);
-    } catch (e) {
-      toast.error((e as Error).message);
+      const [index, nextProfiles] = await Promise.all([
+        getIndex(),
+        getProfiles(),
+      ]);
+      setSpecs(index.specs);
+      setProfiles(nextProfiles);
+      setSpecId((current) =>
+        current || !index.specs.length
+          ? current
+          : `${index.specs[0].agent_spec_id}@${index.specs[0].version}`,
+      );
+      setAgentProfile((current) => current || nextProfiles[0]?.name || "");
+    } catch (error) {
+      toast.error((error as Error).message);
     }
-  }, [specId, agentProfile]);
+  }, []);
 
   useEffect(() => {
     refreshSpecs();
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshSpecs]);
 
   const ensureSession = async () => {
     if (sessionId) return sessionId;
-    const s = await createSession(uuidv7(), "chat session");
-    setSessionId(s.session_id);
-    return s.session_id;
+    const session = await createSession(uuidv7(), "Agent OS chat");
+    setSessionId(session.session_id);
+    return session.session_id;
   };
 
-  const pollRun = useCallback((runId: string, msgId: string) => {
+  const pollRun = useCallback((runId: string, messageId: string) => {
     const tick = async () => {
       try {
         const [run, decisions] = await Promise.all([
@@ -127,101 +172,134 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
         ]);
         const decoded = decodeDataUri(run.output_ref);
         const lastDecision = decisions.at(-1);
-        const reason = lastDecision ? describeDecision(lastDecision) : undefined;
-        setMessages((ms) =>
-          ms.map((m) =>
-            m.id === msgId
+        const reason = lastDecision
+          ? describeDecision(lastDecision)
+          : undefined;
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === messageId
               ? {
-                  ...m,
+                  ...message,
                   state: run.state_name,
+                  revision: run.run_revision,
                   decisions,
                   error: run.state === 10 || run.state === 11,
-                  // Every terminal state resolves the placeholder —
-                  // failed/cancelled runs never ship an output_ref.
                   text:
                     decoded ||
                     (run.state === 9
                       ? "(no text output)"
                       : run.state === 10
-                        ? `(run failed${reason ? `: ${reason}` : ""})`
+                        ? `Run failed${reason ? `: ${reason}` : ""}`
                         : run.state === 11
-                          ? "(run cancelled)"
-                          : m.text),
+                          ? "Run cancelled"
+                          : message.text),
                 }
-              : m,
+              : message,
           ),
         );
         if (run.state >= 9 && pollRef.current) {
           clearInterval(pollRef.current);
           pollRef.current = undefined;
           setBusy(false);
+          setActiveRunId("");
         }
       } catch {
-        /* transient — keep polling */
+        return;
       }
     };
-    pollRef.current = setInterval(tick, 1200);
+    pollRef.current = setInterval(tick, 1000);
     tick();
   }, []);
 
-  const send = async () => {
-    const task = input.trim();
+  const send = async (draft = input) => {
+    const task = draft.trim();
     if (!task || busy) return;
-    if (!specId) return toast.error("create or pick an agent first");
-    const [id, version] = specId.split("@");
-    const spec = specs.find(
-      (s) => s.agent_spec_id === id && s.version === version,
-    );
+    if (!selectedSpec) {
+      toast.error("Create or select an agent first");
+      return;
+    }
+    if (toolsOn && !computerOriginIsSecure()) {
+      toast.error("Computer mode requires HTTPS for remote gateways");
+      return;
+    }
     setBusy(true);
     setInput("");
-    const userMsg: ChatMsg = { id: uuidv7(), role: "user", text: task };
-    const asstId = uuidv7();
-    setMessages((ms) => [
-      ...ms,
-      userMsg,
-      { id: asstId, role: "assistant", text: "thinking…", state: "created" },
+    const userMessage: ChatMessage = {
+      id: uuidv7(),
+      role: "user",
+      text: task,
+    };
+    const assistantId = uuidv7();
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        state: "created",
+      },
     ]);
     try {
       const sid = await ensureSession();
-      const provider = providers.find((p) => p.id === providerId);
-      // Payload envelope understood by openrouter-loop: plain text is a
-      // bare task; an object can pin model / base_url per request and
-      // opt in to MCP tool calls.
-      const payload =
-        provider || toolsOn
-          ? JSON.stringify({
-              task,
-              ...(provider
-                ? {
-                    model: provider.model,
-                    base_url: provider.baseUrl,
-                    ...(provider.keyEnv ? { api_key_env: provider.keyEnv } : {}),
-                  }
-                : {}),
-              ...(toolsOn ? { tools: true } : {}),
-            })
-          : task;
+      const provider = providers.find((item) => item.id === providerId);
+      const payload = JSON.stringify({
+        task,
+        ...(provider
+          ? {
+              model: provider.model,
+              base_url: provider.baseUrl,
+              ...(provider.keyEnv ? { api_key_env: provider.keyEnv } : {}),
+            }
+          : {}),
+        ...(toolsOn ? { tools: true, tool_choice: "required" } : {}),
+      });
       const { run_id } = await createRun({
         sessionId: sid,
-        specId: id,
-        specVersion: version,
-        specDigest: spec?.digest || "",
+        specId: selectedSpec.agent_spec_id,
+        specVersion: selectedSpec.version,
+        specDigest: selectedSpec.digest,
         taskPayload: payload,
-        profile: spec?.profile,
+        profile: selectedSpec.profile,
       });
-      setMessages((ms) =>
-        ms.map((m) => (m.id === asstId ? { ...m, runId: run_id } : m)),
-      );
-      pollRun(run_id, asstId);
-    } catch (e) {
-      setBusy(false);
-      setMessages((ms) =>
-        ms.map((m) =>
-          m.id === asstId
-            ? { ...m, text: (e as Error).message, error: true, state: "failed" }
-            : m,
+      setActiveRunId(run_id);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? { ...message, runId: run_id }
+            : message,
         ),
       );
+      pollRun(run_id, assistantId);
+    } catch (error) {
+      setBusy(false);
+      setActiveRunId("");
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                text: (error as Error).message,
+                error: true,
+                state: "failed",
+              }
+            : message,
+        ),
+      );
+    }
+  };
+
+  const stop = async () => {
+    const message = [...messages]
+      .reverse()
+      .find((item) => item.runId === activeRunId);
+    if (!activeRunId || !message) return;
+    try {
+      const revision =
+        message.revision ?? (await getRun(activeRunId)).run_revision;
+      await cancelRun(activeRunId, "cancelled from chat", revision);
+    } catch (error) {
+      toast.error((error as Error).message);
     }
   };
 
@@ -234,240 +312,328 @@ export function ChatPage({ onOpenRun }: { onOpenRun: (runId: string) => void }) 
         JSON.stringify({
           display_name: agentName.trim(),
           runtime_profile_name: agentProfile,
-          description: agentDesc,
+          description: agentDesc.trim(),
         }),
       );
-      toast.success(`agent "${agentName}" created`);
+      toast.success(`Created ${agentName.trim()}`);
       setNewAgentOpen(false);
       setAgentName("");
       setAgentDesc("");
       refreshSpecs();
-    } catch (e) {
-      toast.error((e as Error).message);
+    } catch (error) {
+      toast.error((error as Error).message);
     }
   };
 
   return (
-    <div className="flex h-full">
-      <div className="flex w-60 flex-col border-r">
-        <div className="flex items-center justify-between border-b p-3">
-          <span className="text-sm font-medium">Agents</span>
+    <div className="flex h-full min-w-0 bg-background">
+      <aside className="hidden w-56 shrink-0 flex-col border-r bg-sidebar/60 md:flex">
+        <div className="flex h-12 items-center justify-between px-3">
+          <span className="text-xs font-medium text-muted-foreground">
+            Agents
+          </span>
           <Dialog open={newAgentOpen} onOpenChange={setNewAgentOpen}>
             <DialogTrigger
               render={
                 <Button size="icon" variant="ghost" className="size-7">
-                  <Plus className="size-4" />
+                  <Plus className="size-3.5" />
                 </Button>
               }
             />
-            <DialogContent>
+            <DialogContent className="sm:max-w-md">
               <DialogHeader>
-                <DialogTitle>New agent</DialogTitle>
+                <DialogTitle>Create agent</DialogTitle>
               </DialogHeader>
-              <div className="space-y-3">
-                <div>
+              <div className="space-y-4">
+                <div className="space-y-1.5">
                   <Label>Name</Label>
                   <Input
                     value={agentName}
-                    onChange={(e) => setAgentName(e.target.value)}
-                    placeholder="e.g. research-assistant"
+                    onChange={(event) => setAgentName(event.target.value)}
+                    placeholder="Research assistant"
                   />
                 </div>
-                <div>
-                  <Label>Runtime profile</Label>
+                <div className="space-y-1.5">
+                  <Label>Workflow</Label>
                   <Select
                     value={agentProfile}
-                    onValueChange={(v) => v && setAgentProfile(v)}
+                    onValueChange={(value) => value && setAgentProfile(value)}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="pick a profile" />
+                      <SelectValue placeholder="Select a runtime profile" />
                     </SelectTrigger>
                     <SelectContent>
-                      {profiles.map((p) => (
-                        <SelectItem key={p.name} value={p.name}>
-                          {p.name}
+                      {profiles.map((profile) => (
+                        <SelectItem key={profile.name} value={profile.name}>
+                          {profile.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    The profile pins which adapters this agent uses (loop,
-                    effects, memory, sandbox). Manage profiles on the Pipelines
-                    page.
-                  </p>
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label>Description</Label>
                   <Textarea
                     value={agentDesc}
-                    onChange={(e) => setAgentDesc(e.target.value)}
-                    placeholder="what this agent is for"
+                    onChange={(event) => setAgentDesc(event.target.value)}
+                    placeholder="What this agent is best at"
+                    className="min-h-20 resize-none"
                   />
                 </div>
               </div>
               <DialogFooter>
-                <Button onClick={createAgent}>Create agent</Button>
+                <Button onClick={createAgent} disabled={!agentName.trim()}>
+                  Create
+                </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
-        <div className="flex-1 space-y-1 overflow-y-auto p-2">
-          {specs.map((s) => {
-            const key = `${s.agent_spec_id}@${s.version}`;
+        <div className="flex-1 space-y-0.5 overflow-y-auto px-2">
+          {specs.map((spec) => {
+            const key = `${spec.agent_spec_id}@${spec.version}`;
             return (
               <button
                 key={key}
                 onClick={() => setSpecId(key)}
                 className={cn(
-                  "w-full rounded-md px-3 py-2 text-left text-sm",
-                  specId === key ? "bg-accent" : "hover:bg-accent/50",
+                  "w-full rounded-md px-2.5 py-2 text-left transition-colors",
+                  specId === key
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
                 )}
               >
-                <div className="flex items-center gap-2 font-medium">
-                  <Bot className="size-3.5" />
-                  {s.display_name || "agent"}
+                <div className="flex items-center gap-2 text-sm">
+                  <Bot className="size-3.5 shrink-0" />
+                  <span className="truncate font-medium">
+                    {spec.display_name || "Agent"}
+                  </span>
                 </div>
-                <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                  {s.agent_spec_id.slice(0, 13)}… · v{s.version}
+                <div className="mt-1 truncate pl-5.5 text-[11px] opacity-70">
+                  {spec.profile || `v${spec.version}`}
                 </div>
               </button>
             );
           })}
           {!specs.length && (
-            <p className="p-3 text-xs text-muted-foreground">
-              No agents yet — create one with +
-            </p>
+            <button
+              className="w-full rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground hover:bg-muted/50"
+              onClick={() => setNewAgentOpen(true)}
+            >
+              Create your first agent
+            </button>
           )}
         </div>
-      </div>
+        <button
+          onClick={onOpenWorkflows}
+          className="m-2 flex items-center gap-2 rounded-md px-2.5 py-2 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+        >
+          <Workflow className="size-3.5" />
+          Compose workflows
+        </button>
+      </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <section className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+          <Bot className="size-4" />
+          <span className="truncate text-sm font-medium">
+            {selectedSpec?.display_name || "New conversation"}
+          </span>
+          {selectedSpec?.profile && (
+            <Badge variant="secondary" className="h-5 rounded px-1.5 text-[10px]">
+              {selectedSpec.profile}
+            </Badge>
+          )}
+          <div className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                toolsOn ? "bg-emerald-500" : "bg-muted-foreground/40",
+              )}
+            />
+            {toolsOn ? "computer enabled" : "tools off"}
+          </div>
+        </header>
+
         <Conversation className="flex-1">
-          <ConversationContent>
+          <ConversationContent className="mx-auto w-full max-w-3xl gap-7 px-5 py-8">
             {!messages.length && (
-              <ConversationEmptyState
-                title="Talk to an agent"
-                description="Pick an agent on the left (or create one), then send a task — it runs on the kernel with a full decision trail."
-              />
+              <div className="flex min-h-[55vh] flex-col justify-center">
+                <div className="mb-8">
+                  <div className="mb-3 flex size-9 items-center justify-center rounded-lg border bg-card shadow-sm">
+                    <Bot className="size-4.5" />
+                  </div>
+                  <h1 className="text-xl font-semibold tracking-tight">
+                    What should we work on?
+                  </h1>
+                  <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+                    Ask an agent to reason, run workflows, and use the computer.
+                    Every action stays attached to the conversation.
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {STARTERS.map((starter) => (
+                    <button
+                      key={starter}
+                      onClick={() => setInput(starter)}
+                      className="rounded-lg border bg-card/50 p-3 text-left text-xs leading-relaxed text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    >
+                      {starter}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
-            {messages.map((m) => (
-              <Message key={m.id} from={m.role}>
-                <MessageContent
-                  className={cn(m.error && "border-destructive/50 text-destructive")}
+            {messages.map((message) => (
+              <article
+                key={message.id}
+                className={cn(
+                  "group flex min-w-0 gap-3",
+                  message.role === "user" && "justify-end",
+                )}
+              >
+                {message.role === "assistant" && (
+                  <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border bg-card">
+                    <Bot className="size-3.5" />
+                  </div>
+                )}
+                <div
+                  className={cn(
+                    "min-w-0 text-sm leading-6",
+                    message.role === "user"
+                      ? "max-w-[85%] rounded-xl bg-muted px-3.5 py-2"
+                      : "max-w-[calc(100%-2.25rem)] flex-1",
+                    message.error && "text-destructive",
+                  )}
                 >
-                  <div className="whitespace-pre-wrap">{m.text}</div>
-                  {m.state && m.role === "assistant" && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <Badge
-                        variant={
-                          m.state === "completed"
-                            ? "default"
-                            : m.error || m.state === "failed"
-                              ? "destructive"
-                              : "secondary"
-                        }
-                      >
-                        {m.state}
-                      </Badge>
-                      {m.runId && (
-                        <button
-                          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                          onClick={() => onOpenRun(m.runId!)}
-                        >
-                          run <ExternalLink className="size-3" />
-                        </button>
-                      )}
+                  {message.role === "assistant" &&
+                  !message.text &&
+                  message.state !== "failed" ? (
+                    <div className="flex items-center gap-2 py-0.5 text-muted-foreground">
+                      <span className="flex gap-1">
+                        <span className="size-1 animate-pulse rounded-full bg-current" />
+                        <span className="size-1 animate-pulse rounded-full bg-current [animation-delay:120ms]" />
+                        <span className="size-1 animate-pulse rounded-full bg-current [animation-delay:240ms]" />
+                      </span>
+                      {statusLabel(message.state)}
                     </div>
+                  ) : (
+                    <div className="whitespace-pre-wrap">{message.text}</div>
                   )}
-                  {!!m.decisions?.length && (
-                    <ChainOfThought className="mt-3">
-                      <ChainOfThoughtHeader>
-                        decision trail ({m.decisions.length})
-                      </ChainOfThoughtHeader>
-                      <ChainOfThoughtContent>
-                        {m.decisions.map((d) => (
-                          <ChainOfThoughtStep
-                            key={d.sequence}
-                            label={`step ${d.step_sequence} · ${d.kind}`}
-                            description={describeDecision(d)}
-                            status={
-                              d.kind === "complete"
-                                ? "complete"
-                                : d.kind === "fail"
-                                  ? "complete"
-                                  : "active"
-                            }
-                          />
-                        ))}
-                      </ChainOfThoughtContent>
-                    </ChainOfThought>
+                  {message.role === "assistant" && (
+                    <>
+                      <ToolActivity decisions={message.decisions ?? []} />
+                      <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                        {message.state && <span>{statusLabel(message.state)}</span>}
+                        {message.runId && (
+                          <button
+                            className="inline-flex items-center gap-1 hover:text-foreground"
+                            onClick={() => onOpenRun(message.runId!)}
+                          >
+                            Open run
+                            <ExternalLink className="size-3" />
+                          </button>
+                        )}
+                      </div>
+                    </>
                   )}
-                </MessageContent>
-              </Message>
+                </div>
+              </article>
             ))}
           </ConversationContent>
-          <ConversationScrollButton />
+          <ConversationScrollButton className="bottom-3" />
         </Conversation>
 
-        <div className="border-t p-3">
-          <div className="flex items-end gap-2">
-            <Select
-              value={providerId}
-              onValueChange={(v) => v && setProviderId(v)}
-            >
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="provider">
-                  {(v: unknown) =>
-                    v === "default"
-                      ? "default provider"
-                      : providers.find((p) => p.id === v)?.name ??
-                        String(v ?? "provider")
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">default provider</SelectItem>
-                {providers.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div className="flex items-center gap-2 self-center">
-              <Switch
-                id="mcp-tools"
-                checked={toolsOn}
-                onCheckedChange={(v) => setToolsOn(v === true)}
-              />
-              <Label
-                className="cursor-pointer whitespace-nowrap text-xs text-muted-foreground"
-                onClick={() => setToolsOn((v) => !v)}
-              >
-                MCP tools
-              </Label>
-            </div>
+        <div className="shrink-0 px-4 pb-4">
+          <div className="mx-auto max-w-3xl rounded-xl border bg-card shadow-[0_10px_35px_-18px_rgba(0,0,0,0.35)]">
             <Textarea
-              className="min-h-11 flex-1 resize-none"
+              className="min-h-14 max-h-44 resize-none border-0 bg-transparent px-4 py-3 shadow-none focus-visible:ring-0"
               placeholder={
-                specId ? "send a task to the agent…" : "create an agent first"
+                selectedSpec
+                  ? "Ask anything or describe a computer task"
+                  : "Create an agent to start"
               }
               value={input}
-              disabled={!specId}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
+              disabled={!selectedSpec}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key === "Enter" &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
                   send();
                 }
               }}
             />
-            <Button onClick={send} disabled={busy || !input.trim() || !specId}>
-              Send
-            </Button>
+            <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+              <Select
+                value={providerId}
+                onValueChange={(value) => value && setProviderId(value)}
+              >
+                <SelectTrigger className="h-7 w-auto max-w-44 gap-1 rounded-md border-0 bg-muted/70 px-2 text-[11px] shadow-none">
+                  <SelectValue>
+                    {(value: unknown) => {
+                      const provider = providers.find(
+                        (item) => item.id === value,
+                      );
+                      return provider
+                        ? `${provider.name} · ${provider.model}`
+                        : "Default model";
+                    }}
+                  </SelectValue>
+                  <ChevronDown className="size-3" />
+                </SelectTrigger>
+                <SelectContent>
+                  {providers.map((provider) => (
+                    <SelectItem key={provider.id} value={provider.id}>
+                      {provider.name} · {provider.model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <button
+                onClick={() => setToolsOn((value) => !value)}
+                className={cn(
+                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors",
+                  toolsOn
+                    ? "bg-foreground text-background"
+                    : "bg-muted/70 text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Monitor className="size-3" />
+                Computer
+              </button>
+              <div className="flex-1" />
+              <span className="hidden text-[10px] text-muted-foreground sm:block">
+                Enter to send · Shift Enter for newline
+              </span>
+              {busy ? (
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="size-8 rounded-lg"
+                  onClick={stop}
+                >
+                  <Square className="size-3 fill-current" />
+                  <span className="sr-only">Stop run</span>
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  className="size-8 rounded-lg"
+                  onClick={() => send()}
+                  disabled={!input.trim() || !selectedSpec}
+                >
+                  <ArrowUp className="size-4" />
+                  <span className="sr-only">Send</span>
+                </Button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

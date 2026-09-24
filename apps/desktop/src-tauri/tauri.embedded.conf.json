@@ -4,7 +4,8 @@
     "externalBin": [
       "binaries/agentd",
       "binaries/agentgw",
-      "binaries/agentos-wasm-host"
+      "binaries/agentos-wasm-host",
+      "binaries/computer-mcp"
     ],
     "resources": {
       "resources/agentos": "agentos"

@@ -103,7 +103,7 @@ limits:
   context:
     max_state_bytes: 65536
     max_fed_events: 64
-    max_fed_event_bytes: 65536
+    max_fed_event_bytes: 3000000
 
 observability:
   log_level: info
