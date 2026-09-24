@@ -84,6 +84,13 @@ jobs:
         # tests (CARGO_BIN_EXE), so build the full workspace explicitly.
         run: cargo build --workspace
       - name: Test
+        # e2e workspace tests merge git branches — provide a committer
+        # identity (hosted runners don't ship one on every image).
+        env:
+          GIT_AUTHOR_NAME: agent-os-ci
+          GIT_AUTHOR_EMAIL: agent-os-ci@localhost
+          GIT_COMMITTER_NAME: agent-os-ci
+          GIT_COMMITTER_EMAIL: agent-os-ci@localhost
         run: cargo test --workspace
       - name: Check
         run: cargo check --workspace
