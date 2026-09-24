@@ -1,7 +1,11 @@
 name: agent-os
 
 on:
+  # PR branches are already covered by pull_request — an unfiltered push
+  # trigger fires the whole suite a second time on every push to an open
+  # PR branch. Keep push to main only (merge-result coverage).
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -51,7 +55,11 @@ jobs:
 
   quality:
     name: Rust quality gates
-    runs-on: macos-latest
+    # Ubuntu over macOS: macOS runners bill ~10x and the only
+    # macOS-specific tests are opt-in keychain tests that stay skipped
+    # in CI anyway. macOS compile coverage still comes from the release
+    # matrix building mac binaries on main.
+    runs-on: ubuntu-latest
     # Suite takes ~6 min; cap so a deadlocked test fails fast instead of
     # running to the 6h platform limit.
     timeout-minutes: 20
@@ -76,6 +84,13 @@ jobs:
         # tests (CARGO_BIN_EXE), so build the full workspace explicitly.
         run: cargo build --workspace
       - name: Test
+        # e2e workspace tests merge git branches — provide a committer
+        # identity (hosted runners don't ship one on every image).
+        env:
+          GIT_AUTHOR_NAME: agent-os-ci
+          GIT_AUTHOR_EMAIL: agent-os-ci@localhost
+          GIT_COMMITTER_NAME: agent-os-ci
+          GIT_COMMITTER_EMAIL: agent-os-ci@localhost
         run: cargo test --workspace
       - name: Check
         run: cargo check --workspace
