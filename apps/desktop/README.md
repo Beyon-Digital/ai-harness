@@ -110,15 +110,17 @@ always exercised before a tag.
 Stable `v*` tags require these GitHub Actions secrets:
 
 - macOS: `APPLE_CERTIFICATE` (base64 `.p12`),
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-  `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`, and
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+  `APPLE_API_KEY` (App Store Connect key ID), `APPLE_API_ISSUER`,
+  `APPLE_API_PRIVATE_KEY` (base64 `AuthKey_<id>.p8`), and
   `KEYCHAIN_PASSWORD`.
 - Windows: `WINDOWS_CERTIFICATE` (base64 `.pfx`) and
   `WINDOWS_CERTIFICATE_PASSWORD`.
 
 The workflow imports the platform certificates only for stable tags,
-uses Tauri to sign/notarize macOS bundles and Authenticode-sign Windows
-installers, and fails the release if required credentials are absent.
+uses Tauri to sign macOS bundles and notarize them via the App Store
+Connect API key, Authenticode-signs Windows installers, and fails the
+release if required credentials are absent.
 PR and rolling `dev-latest` builds remain certificate-free. Every
 published installer and CLI archive is also signed keylessly with
 Sigstore using GitHub OIDC; the matching `.sigstore.json` bundle is
