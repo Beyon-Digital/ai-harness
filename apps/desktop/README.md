@@ -101,9 +101,10 @@ git tag v0.1.0 && git push origin v0.1.0
 # → release workflow → published release with all artifacts attached
 ```
 
-PRs touching `apps/desktop/**` execute the same matrix build-only
-(artifacts on the run, nothing published), so the packaging path is
-always exercised before a tag.
+PRs are covered by the `agent-os` workflow; the release matrix runs only
+on merges to `main`, `v*` tags, and manual `workflow_dispatch`. To
+validate the packaging path on demand, dispatch the workflow without
+`publish`.
 
 ### Release signing
 

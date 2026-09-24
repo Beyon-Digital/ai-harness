@@ -203,7 +203,24 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: runtime-${{ matrix.label }}
-          path: agent-os
+          # The upload's common ancestor is agent-os/target — restore under it.
+          path: agent-os/target
+      - name: Sign runtime binaries for notarization
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          # codesign rewrites Mach-O bytes, so sign BEFORE staging:
+          # make-adapter-bundle.sh hashes every adapter binary into its
+          # bundle.lock and agentd verifies those digests at boot.
+          # Notarization also requires each embedded Mach-O to carry a
+          # Developer ID signature + hardened runtime + secure timestamp.
+          find "$GITHUB_WORKSPACE/agent-os/target/release" -type f |
+          while IFS= read -r f; do
+            file "$f" | grep -q 'Mach-O' || continue
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$f"
+          done
       - name: Stage embedded runtime (Unix sidecars)
         if: runner.os != 'Windows'
         run: |
@@ -211,20 +228,6 @@ jobs:
             "$GITHUB_WORKSPACE/agent-os/target/wasm32-wasip1/release"
           triple=$(rustc -vV | awk '/^host:/{print $2}')
           "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
-      - name: Sign embedded runtime binaries
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          # Notarization rejects the .app if ANY embedded Mach-O lacks a
-          # Developer ID signature + hardened runtime + secure timestamp;
-          # Tauri only signs the app shell, not the staged sidecars.
-          find src-tauri/binaries src-tauri/resources/agentos/share/bundles \
-            -type f -perm -111 | while IFS= read -r f; do
-            file "$f" | grep -q 'Mach-O' || continue
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$f"
-          done
       - name: Build bundles (self-contained app)
         if: runner.os != 'Windows'
         # Finder-AppleScript DMG styling times out on headless CI;
@@ -271,7 +274,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: runtime-${{ matrix.label }}
-          path: agent-os
+          path: agent-os/target
       - name: Stage archive
         run: |
           set -euo pipefail
