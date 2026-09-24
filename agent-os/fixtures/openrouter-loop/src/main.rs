@@ -301,23 +301,39 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     if latest_mcp_request_hash(&input.events).as_deref()
                         == Some(request_hash(&call).as_str())
                     {
-                        if model_hops <= mcp_hops.saturating_add(1) {
+                        let first_duplicate = model_hops <= mcp_hops.saturating_add(1);
+                        let retry_duplicate = model_hops <= mcp_hops.saturating_add(2);
+                        if first_duplicate || retry_duplicate {
                             let model = get("model").unwrap_or_else(|| model.to_owned());
-                            let mut request = chat_request(&model, &task, true, false);
+                            let keep_tools = first_duplicate && mcp_hops == 1;
+                            let mut request = chat_request(&model, &task, keep_tools, false);
                             if let Some(messages) = request["messages"].as_array_mut() {
                                 messages.push(json!({
                                     "role": "assistant",
                                     "content": content,
                                 }));
-                                messages.push(json!({
-                                    "role": "user",
-                                    "content": format!(
-                                        "That repeats the most recently completed MCP call. \
-                                         {mcp_hops} tool call(s) have already finished. Choose \
-                                         the next pending action, or return `complete` if the \
-                                         task is finished. Do not repeat the same call now."
-                                    ),
-                                }));
+                                if keep_tools {
+                                    messages.push(json!({
+                                        "role": "user",
+                                        "content": format!(
+                                            "That repeats the most recently completed MCP call. \
+                                             {mcp_hops} tool call has already finished. Choose \
+                                             the next different action from the task, or return \
+                                             `complete` if no action remains."
+                                        ),
+                                    }));
+                                } else {
+                                    messages.push(json!({
+                                        "role": "user",
+                                        "content": format!(
+                                            "{mcp_hops} computer tool calls have already finished, \
+                                             and the latest request repeats the last completed call. \
+                                             Tool use is now closed. Return `complete` with the final \
+                                             result using the available evidence. If the task names \
+                                             exact response text, use it verbatim."
+                                        ),
+                                    }));
+                                }
                             }
                             if let Some(url) = get("base_url") {
                                 request["base_url"] = Value::String(url);
