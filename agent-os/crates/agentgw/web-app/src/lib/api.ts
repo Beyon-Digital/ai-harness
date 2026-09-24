@@ -87,7 +87,16 @@ export interface Decision {
   sequence: number;
   step_sequence: number;
   kind: string;
-  detail: Record<string, string>;
+  detail: Record<string, unknown>;
+}
+
+export interface EffectTrace {
+  effect_id: string;
+  operation: string;
+  state: string;
+  result_ref?: string | null;
+  error_code?: string | null;
+  updated_at_ms: number;
 }
 
 export interface Environment {
@@ -261,10 +270,17 @@ export function createRun(a: CreateRunArgs) {
   });
 }
 
-export function cancelRun(runId: string, reason: string) {
+export function cancelRun(
+  runId: string,
+  reason: string,
+  expectedRunRevision = 0,
+) {
   return api(`/api/runs/${runId}/cancel`, {
     method: "POST",
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({
+      reason,
+      expected_run_revision: expectedRunRevision,
+    }),
   });
 }
 

@@ -88,8 +88,9 @@ const ENV_TEMPLATE: &str = "\
 # OPENROUTER_API_KEY is set → openrouter.yaml):
 # AGENTOS_CONFIG=default.yaml
 #
-# MCP tool servers (JSON array) for the mcp-enabled profile:
-# MCP_SERVERS=[]
+# MCP tool servers (JSON object) for the mcp-enabled profile. The embedded
+# desktop registers its bundled `computer` server automatically.
+# MCP_SERVERS={\"server-name\":{\"command\":\"/path/to/server\",\"args\":[]}}
 # ACP agent CLI for the acp-local profile:
 # ACP_COMMAND=
 # ACP_ARGS=
@@ -617,6 +618,20 @@ fn child_env() -> Vec<(String, String)> {
         let k = (*k).to_owned();
         if env::var_os(&k).is_none() && !file.contains_key(&k) {
             out.push((k, (*v).to_owned()));
+        }
+    }
+    if env::var_os("MCP_SERVERS").is_none() && !file.contains_key("MCP_SERVERS") {
+        if let Some(command) = find_sidecar("computer-mcp") {
+            out.push((
+                "MCP_SERVERS".to_owned(),
+                serde_json::json!({
+                    "computer": {
+                        "command": command.to_string_lossy(),
+                        "args": []
+                    }
+                })
+                .to_string(),
+            ));
         }
     }
     out

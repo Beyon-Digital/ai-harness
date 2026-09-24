@@ -205,7 +205,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     .and_then(Value::as_str)
                     .and_then(decode_data_uri)
                     .unwrap_or_default();
-                format!("The MCP tool call succeeded with result:\n{result}")
+                format!(
+                    "The MCP tool call succeeded with result:\n{}",
+                    summarize_mcp_result(&result)
+                )
             }
             "failed" => {
                 let err = effect
@@ -436,6 +439,20 @@ fn parse_mcp_call(content: &str) -> Option<Value> {
     }))
 }
 
+fn summarize_mcp_result(result: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(result) else {
+        return result.to_owned();
+    };
+    if let Some(content) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for item in content {
+            if item.get("type").and_then(Value::as_str) == Some("image") {
+                item["data"] = Value::String("[image attached]".to_owned());
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| result.to_owned())
+}
+
 fn chat_request(model: &str, task: &str, tools_enabled: bool) -> Value {
     let system = "You are the decision loop of an agent operating system. \
         You receive the task (what the user asked the agent to do). \
@@ -452,7 +469,9 @@ fn chat_request(model: &str, task: &str, tools_enabled: bool) -> Value {
         "\n\nYou may also call an MCP tool by replying \
         {\"mcp_call\": {\"server\": \"<server name>\", \"tool\": \"<tool>\", \
         \"arguments\": {...}}} — the kernel executes it and hands you the \
-        result on the next turn."
+        result on the next turn. The built-in `computer` server provides \
+        screenshot {}, click {x,y,button}, type {text}, key {key}, and \
+        wait {milliseconds}. Use screenshot before and after visual actions."
     } else {
         ""
     };

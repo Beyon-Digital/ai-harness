@@ -3,6 +3,28 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
+html,
+body,
+#root {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    overflow: hidden;
+    font-feature-settings: "ss01", "cv02", "cv03";
+    -webkit-font-smoothing: antialiased;
+}
+
+button,
+[role="button"] {
+    -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+    background: color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

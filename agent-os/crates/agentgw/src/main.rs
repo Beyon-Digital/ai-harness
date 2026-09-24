@@ -10,7 +10,7 @@
 //! of entity ids it has seen created, so the GUI can list sessions,
 //! tasks and runs — the frozen MVP contract has no list RPCs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -941,6 +941,49 @@ async fn api_run_decisions(
     State(state): State<Arc<AppState>>,
     AxPath(run_id): AxPath<String>,
 ) -> Response {
+    use sqlx::Row as _;
+
+    let effects = match open_db_ro(&state.runtime_dir.join("kernel.db")).await {
+        Ok(mut conn) => {
+            let rows = sqlx::query(
+                "SELECT decision_id, effect_id, operation, state, result_ref,
+                        error_code, updated_at_ms
+                 FROM effects WHERE run_id = ?",
+            )
+            .bind(&run_id)
+            .fetch_all(&mut conn)
+            .await
+            .unwrap_or_default();
+            rows.iter()
+                .map(|row| {
+                    let state: i64 = row.get("state");
+                    let state_name = match state {
+                        1 => "prepared",
+                        2 => "claimed",
+                        3 => "dispatched",
+                        4 => "acknowledged",
+                        5 => "committed",
+                        6 => "failed",
+                        7 => "cancelled",
+                        8 => "unknown",
+                        _ => "unspecified",
+                    };
+                    (
+                        row.get::<String, _>("decision_id"),
+                        json!({
+                            "effect_id": row.get::<String, _>("effect_id"),
+                            "operation": row.get::<String, _>("operation"),
+                            "state": state_name,
+                            "result_ref": row.get::<Option<String>, _>("result_ref"),
+                            "error_code": row.get::<Option<String>, _>("error_code"),
+                            "updated_at_ms": row.get::<i64, _>("updated_at_ms"),
+                        }),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        }
+        Err(_) => HashMap::new(),
+    };
     let mut decisions = Vec::new();
     let mut from = 0u64;
     loop {
@@ -980,6 +1023,7 @@ async fn api_run_decisions(
                         "operation": i.operation,
                         "payload": String::from_utf8_lossy(&i.payload)
                             .chars().take(2_000).collect::<String>(),
+                        "effect": effects.get(&decision.decision_id),
                     }),
                 ),
                 Some(contract::loop_decision::Decision::RequestApproval(_)) => {

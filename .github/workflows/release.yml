@@ -34,6 +34,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || inputs.publish }}
@@ -80,6 +81,69 @@ jobs:
             librsvg2-dev patchelf libxdo-dev libssl-dev libfuse2 file
       - name: Install JS deps
         run: npm ci
+      - name: Require Apple signing credentials for stable releases
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+            KEYCHAIN_PASSWORD; do
+            test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
+          done
+      - name: Import Apple Developer ID certificate
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+      - name: Require Windows signing credentials for stable releases
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "WINDOWS_CERTIFICATE_PASSWORD is required" }
+      - name: Import Windows Authenticode certificate
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.Thumbprint) { throw "certificate import failed" }
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = "http://timestamp.digicert.com"
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Out-File src-tauri/tauri.windows.conf.json -Encoding utf8
       - name: Build + stage embedded runtime (Unix sidecars)
         if: runner.os != 'Windows'
         run: |
@@ -88,7 +152,8 @@ jobs:
           cargo build --release --target "$triple" \
             -p agentd -p agentgw -p wasm-host \
             -p local-memory -p openrouter-loop -p openrouter-effect \
-            -p acp-loop -p fixture-agent-loop -p fixture-effect-adapter
+            -p acp-loop -p fixture-agent-loop -p fixture-effect-adapter \
+            -p computer-mcp
           cargo build --release --target wasm32-wasip1 -p wasm-echo
           "$GITHUB_WORKSPACE/apps/desktop/scripts/stage-embedded-runtime.sh" "$triple"
       - name: Build bundles (self-contained app)
@@ -97,6 +162,10 @@ jobs:
         # respecting CI skips it (slightly plainer DMG layout).
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: false
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_TEAM_ID || '' }}
         run: npm run build:embedded
       - name: Build bundles (remote-gateway shell)
         if: runner.os == 'Windows'
@@ -136,14 +205,14 @@ jobs:
           cargo build --release \
             -p agentd -p agentctl -p agentgw -p wasm-host \
             -p local-memory -p openrouter-loop -p openrouter-effect -p acp-loop \
-            -p fixture-agent-loop -p fixture-effect-adapter
+            -p fixture-agent-loop -p fixture-effect-adapter -p computer-mcp
           cargo build --release -p wasm-echo --target wasm32-wasip1
       - name: Stage archive
         run: |
           set -euo pipefail
           pkg="agentos-${{ env.RELEASE_NAME }}-${{ matrix.label }}"
           mkdir -p "dist/$pkg/bin" "dist/$pkg/share/manifests" "dist/$pkg/share/bundles"
-          cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop,fixture-agent-loop,fixture-effect-adapter} \
+          cp agent-os/target/release/{agentd,agentctl,agentgw,agentos-wasm-host,local-memory,openrouter-loop,openrouter-effect,acp-loop,fixture-agent-loop,fixture-effect-adapter,computer-mcp} \
              "dist/$pkg/bin/"
           cp agent-os/target/wasm32-wasip1/release/wasm-echo.wasm "dist/$pkg/bin/"
           cp agent-os/scripts/make-adapter-bundle.sh "dist/$pkg/bin/"
@@ -201,6 +270,21 @@ jobs:
             mv "$f" "$(dirname "$f")/$new"
             printf '%s\n' "$new" >> "$RUNNER_TEMP/expected-assets.txt"
           done
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.0.0
+      - name: Sign release artifacts with GitHub OIDC
+        working-directory: artifacts
+        env:
+          COSIGN_YES: "true"
+        run: |
+          find . -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+            -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' -o -name '*.tar.gz' \) -print0 |
+          while IFS= read -r -d '' file; do
+            cosign sign-blob --bundle "$file.sigstore.json" "$file"
+            if [ "${{ env.RELEASE_NAME }}" = "dev-latest" ]; then
+              basename "$file.sigstore.json" >> "$RUNNER_TEMP/expected-assets.txt"
+            fi
+          done
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -220,6 +304,7 @@ jobs:
             artifacts/desktop-*/rpm/*.rpm
             artifacts/desktop-*/msi/*.msi
             artifacts/desktop-*/nsis/*.exe
+            artifacts/**/*.sigstore.json
           body: |
             Desktop installers plus CLI binaries (agentd / agentctl /
             agentgw / agentos-wasm-host and the bundled adapters).
@@ -231,8 +316,10 @@ jobs:
             `agentgw` first (see docs/guides/web-gui-and-llm-adapter.md)
             or set AGENTOS_GATEWAY to a reachable gateway URL.
 
-            Binaries are unsigned: macOS Gatekeeper and Windows
-            SmartScreen will warn on first launch.
+            Stable releases are notarized and signed with Apple
+            Developer ID on macOS and Authenticode on Windows. Every
+            published asset includes a keyless Sigstore bundle
+            (`.sigstore.json`) for identity-based verification.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Move the rolling tag once the full new set is uploaded — before

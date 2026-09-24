@@ -46,7 +46,7 @@ use serde_json::Value;
 
 const PORT_ID: &str = "effect.execute";
 const PROTOCOL_VERSION: u32 = 1;
-const MAX_RESULT_BYTES: usize = 64 * 1024;
+const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
     match run() {

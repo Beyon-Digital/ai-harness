@@ -528,6 +528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "computer-mcp"
+version = "0.1.0"
+dependencies = [
+ "ndjson-rpc",
+ "serde_json",
+]
+
+[[package]]
 name = "config-engine"
 version = "0.1.0"
 dependencies = [

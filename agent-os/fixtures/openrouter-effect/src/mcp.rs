@@ -71,6 +71,12 @@ pub fn call(payload: &Value, timeout: Duration) -> Result<String, String> {
 /// text parts; anything else is returned as compact JSON.
 fn flatten_result(result: &Value) -> String {
     if let Some(content) = result.get("content").and_then(Value::as_array) {
+        if content
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) != Some("text"))
+        {
+            return serde_json::to_string(result).unwrap_or_default();
+        }
         let texts: Vec<&str> = content
             .iter()
             .filter_map(|c| c.get("text").and_then(Value::as_str))
@@ -344,6 +350,20 @@ mod tests {
     fn flatten_falls_back_to_json() {
         let v = json!({"tools": [{"name": "echo"}]});
         assert_eq!(flatten_result(&v), r#"{"tools":[{"name":"echo"}]}"#);
+    }
+
+    #[test]
+    fn flatten_preserves_mixed_content() {
+        let value = json!({
+            "content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image", "mimeType": "image/jpeg", "data": "abc"}
+            ]
+        });
+        assert_eq!(
+            flatten_result(&value),
+            serde_json::to_string(&value).unwrap()
+        );
     }
 
     #[test]

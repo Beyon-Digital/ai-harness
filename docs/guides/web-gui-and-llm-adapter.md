@@ -260,6 +260,11 @@ servers are both supported. In the web GUI, enable "MCP tools" in the
 chat composer to make the `openrouter-loop` adapter expose the tool
 contract to the model (it emits `mcp.call_tool` when the model asks for
 a tool). Fixture `fixtures/echo-mcp` is a reference MCP server.
+`fixtures/computer-mcp` provides cross-platform `screenshot`, `click`,
+`type`, `key`, and `wait` tools; embedded macOS/Linux desktop builds
+register it under the `computer` server name automatically. Computer
+calls and screenshots render inline with the assistant response in the
+chat UI.
 
 ## ACP agents (`agent_loop` adapter kind)
 
