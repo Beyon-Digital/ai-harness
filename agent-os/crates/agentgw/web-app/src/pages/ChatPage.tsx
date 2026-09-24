@@ -104,7 +104,7 @@ export function ChatPage({
   const [busy, setBusy] = useState(false);
   const [providers] = useState<Provider[]>(loadProviders);
   const [providerId, setProviderId] = useState("openrouter");
-  const [toolsOn, setToolsOn] = useState(true);
+  const [toolsOn, setToolsOn] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agentProfile, setAgentProfile] = useState("");
@@ -237,7 +237,7 @@ export function ChatPage({
               ...(provider.keyEnv ? { api_key_env: provider.keyEnv } : {}),
             }
           : {}),
-        ...(toolsOn ? { tools: true } : {}),
+        ...(toolsOn ? { tools: true, tool_choice: "required" } : {}),
       });
       const { run_id } = await createRun({
         sessionId: sid,
@@ -280,11 +280,7 @@ export function ChatPage({
       .find((item) => item.runId === activeRunId);
     if (!activeRunId || !message) return;
     try {
-      await cancelRun(
-        activeRunId,
-        "cancelled from chat",
-        message.revision ?? 0,
-      );
+      await cancelRun(activeRunId, "cancelled from chat");
     } catch (error) {
       toast.error((error as Error).message);
     }

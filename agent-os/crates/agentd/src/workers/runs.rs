@@ -774,6 +774,14 @@ impl RunWorker {
                 settled.drain(..drop_n);
             }
             let marker = |counts: &std::collections::BTreeMap<String, u64>| {
+                let latest_mcp_request_hash = run_effects
+                    .iter()
+                    .filter(|effect| {
+                        effects::is_terminal(effect.state) && effect.operation.starts_with("mcp.")
+                    })
+                    .max_by_key(|effect| (effect.step_sequence, effect.updated_at_ms))
+                    .map(|effect| effect.request_hash.as_str())
+                    .unwrap_or_default();
                 serde_json::json!({
                     "effect_id": "",
                     "operation": "kernel.op_counts",
@@ -781,6 +789,7 @@ impl RunWorker {
                     "result_ref": "",
                     "error_code": "",
                     "op_counts": counts,
+                    "latest_mcp_request_hash": latest_mcp_request_hash,
                 })
             };
             let pack = |settled: &[serde_json::Value], counts: Option<&serde_json::Value>| {

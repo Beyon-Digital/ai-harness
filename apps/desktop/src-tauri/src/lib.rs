@@ -622,13 +622,26 @@ fn child_env() -> Vec<(String, String)> {
     }
     if env::var_os("MCP_SERVERS").is_none() && !file.contains_key("MCP_SERVERS") {
         if let Some(command) = find_sidecar("computer-mcp") {
+            let mut computer = serde_json::json!({
+                "command": command.to_string_lossy(),
+                "args": []
+            });
+            if cfg!(target_os = "linux") {
+                let display_env = ["DISPLAY", "XAUTHORITY"]
+                    .into_iter()
+                    .filter_map(|key| {
+                        app_var(key)
+                            .map(|value| (key.to_owned(), serde_json::Value::String(value)))
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                if !display_env.is_empty() {
+                    computer["env"] = serde_json::Value::Object(display_env);
+                }
+            }
             out.push((
                 "MCP_SERVERS".to_owned(),
                 serde_json::json!({
-                    "computer": {
-                        "command": command.to_string_lossy(),
-                        "args": []
-                    }
+                    "computer": computer
                 })
                 .to_string(),
             ));

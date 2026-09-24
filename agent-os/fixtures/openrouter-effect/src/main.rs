@@ -532,7 +532,10 @@ mod tests {
             Duration::from_secs(15),
         )
         .expect("mcp.call_tool");
-        assert_eq!(out, "mcp-ok");
+        let result: Value = serde_json::from_str(&out).expect("MCP result JSON");
+        assert_eq!(result["content"][0]["text"], "mcp-ok");
+        assert_eq!(result["request"]["server"], "echo");
+        assert_eq!(result["request"]["tool"], "echo");
 
         let err = mcp::call(
             &serde_json::json!({"op": "mcp.list_tools", "server": "ghost"}),

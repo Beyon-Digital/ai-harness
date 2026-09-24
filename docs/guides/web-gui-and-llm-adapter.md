@@ -34,20 +34,29 @@ JSON REST + SSE surface and serves an embedded dashboard.
 
 ```sh
 cargo build --workspace
+cargo build --target wasm32-wasip1 -p wasm-echo
+for fixture in agent-loop acp-loop openrouter-loop openrouter-effect; do
+  entrypoint=$(sed -n \
+    's/.*"entrypoint" *: *"\([^"]*\)".*/\1/p' \
+    "fixtures/$fixture/adapter.manifest.json" | head -1)
+  scripts/make-adapter-bundle.sh \
+    "target/debug/$entrypoint" \
+    "fixtures/$fixture/adapter.manifest.json" \
+    "bundles/$fixture"
+done
 scripts/make-adapter-bundle.sh \
-  target/debug/openrouter-loop \
-  fixtures/openrouter-loop/adapter.manifest.json \
-  bundles/openrouter-loop
-scripts/make-adapter-bundle.sh \
-  target/debug/openrouter-effect \
-  fixtures/openrouter-effect/adapter.manifest.json \
-  bundles/openrouter-effect
+  target/wasm32-wasip1/debug/wasm-echo.wasm \
+  fixtures/wasm-echo/adapter.manifest.json \
+  bundles/wasm-echo
 
 OPENROUTER_API_KEY=sk-or-... \
   agentd --runtime-dir run \
          --config config/openrouter.yaml \
+         --adapter-bundle bundles/agent-loop \
+         --adapter-bundle bundles/acp-loop \
          --adapter-bundle bundles/openrouter-loop \
-         --adapter-bundle bundles/openrouter-effect
+         --adapter-bundle bundles/openrouter-effect \
+         --adapter-bundle bundles/wasm-echo
 
 agentgw --socket run/control.sock --listen 127.0.0.1:7740
 # open http://127.0.0.1:7740/
