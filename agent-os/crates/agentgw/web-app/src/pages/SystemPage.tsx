@@ -185,8 +185,9 @@ export function SystemPage() {
             custom ACP server. Runs carry the connector to the{" "}
             <code>acp-loop</code> adapter in the task envelope; pick an
             agent bound to an ACP profile (e.g. <code>acp-local</code>) to
-            use one. Daemon <code>ACP_*</code> env vars stay the defaults
-            when no connector is selected.
+            use one. Requires <code>ACP_ALLOW_CONNECTOR=1</code> in the
+            daemon&apos;s environment — payload connectors are arbitrary
+            executables on the daemon host, so the operator opts in.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">

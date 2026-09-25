@@ -567,7 +567,7 @@ export function ChatPage({
         </Conversation>
 
         <div className="shrink-0 px-4 pb-4">
-          <div className="mx-auto max-w-3xl rounded-xl border bg-card shadow-[0_10px_35px_-18px_rgba(0,0,0,0.35)]">
+          <div className="mx-auto max-w-3xl rounded-xl border bg-card">
             <Textarea
               className="min-h-14 max-h-44 resize-none border-0 bg-transparent px-4 py-3 shadow-none focus-visible:ring-0"
               placeholder={
@@ -594,7 +594,7 @@ export function ChatPage({
                 value={connectorSel}
                 onValueChange={(value) => value && setConnectorSel(value)}
               >
-                <SelectTrigger className="h-7 w-auto max-w-44 gap-1 rounded-md border-0 bg-muted/70 px-2 text-[11px] shadow-none">
+                <SelectTrigger className="h-7 w-auto max-w-44 gap-1 rounded-md border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none transition-colors hover:bg-muted/60 hover:text-foreground">
                   <SelectValue>
                     {(value: unknown) => {
                       const sel = String(value);
@@ -651,7 +651,7 @@ export function ChatPage({
                   "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors",
                   toolsOn
                     ? "bg-foreground text-background"
-                    : "bg-muted/70 text-muted-foreground hover:text-foreground",
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
                 )}
               >
                 <Monitor className="size-3" />

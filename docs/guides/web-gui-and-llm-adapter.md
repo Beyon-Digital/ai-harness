@@ -293,6 +293,18 @@ Profile `acp-local` in `config/openrouter.yaml` binds it; the reference
 agent `fixtures/echo-acp` echoes `acp-echo:<task>` and demonstrates
 `session/request_permission` handling.
 
+Connectors can also be managed in the GUI (System → ACP connectors) and
+chosen in the chat composer: the run's task envelope then carries
+`{"acp": {"command", "args"?, "cwd"?, "timeout_ms"?, "allow_tools"?}}`,
+which fully defines the spawn (absent keys get neutral defaults — env
+`ACP_*` values apply only when no connector is selected). Because a
+payload connector is an arbitrary executable on the daemon host, the
+adapter honors it only when the operator opts in:
+
+```bash
+export ACP_ALLOW_CONNECTOR=1
+```
+
 ## Desktop shell (Tauri)
 
 `apps/desktop` is a Tauri v2 shell around the gateway SPA — build
