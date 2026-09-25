@@ -85,6 +85,27 @@ commands from `agent-os/`.
 
 - Source is `crates/agentgw/web-app/` (React/Vite/Tailwind/shadcn). Left sidebar:
   Chat, Runs, Pipelines, Adapters, Config, Approvals, System. Health badge bottom-left.
+- Standalone frontend-only testing needs no daemon: use Node via nvm or, on this box,
+  `export PATH=$HOME/node22/bin:$PATH` first. Then run
+  `cd agent-os/crates/agentgw/web-app && npm install && npm run dev` →
+  http://localhost:5173 (fresh checkouts have no `node_modules`).
+  Vite proxies `/api`→127.0.0.1:7740; with no daemon every page
+  still renders but polls fail with repeating "Bad Gateway" toasts + red health dot —
+  expected, NOT defects. Machine-local details below (`$HOME/node22`, vite port 5199,
+  CDP 29229) are examples from the Devin test box — adapt to your own environment.
+  Watch for stale vite servers/Chrome windows
+  left by earlier sessions; CDP target list: `curl localhost:29229/json`.
+- Coordinate math on this box: screenshots are real 1600x1200 px but input space is
+  1024x768 (scale 1.5625). DOM `getBoundingClientRect` y is viewport-relative — add
+  ~87px browser-chrome offset, then divide by 1.5625 for tool coords
+  (`tool_y = (css_y + 87) / 1.5625`, `tool_x = css_x / 1.5625`). Verifying aria-labels
+  against rects beats guessing icon positions.
+- Forcing page overflow for scroll tests: `wmctrl -r "<window title>" -b
+  remove,maximized_vert,maximized_horz` then `-e 0,0,0,1600,H` shrinks the window
+  (real px); combine with Ctrl+= browser zoom for short pages whose content still
+  fits. Note the icon rail itself does NOT scroll — below ~400 real px height the
+  bottom rail buttons clip offscreen (pre-existing aside behavior, not a page-scroll
+  bug); reset zoom with Ctrl+0 to reach lower rail icons again.
 - The app is state-based with NO client router — server fallback serves index.html for
   any path (`/runs` → 200, no 404) but the SPA always boots to Chat; deep links are
   cosmetic only.
