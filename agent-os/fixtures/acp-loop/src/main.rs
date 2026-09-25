@@ -176,10 +176,7 @@ fn decide(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| raw.to_string());
 
-    let effective = apply_connector(
-        config,
-        envelope.as_ref().and_then(|v| v.get("acp")),
-    );
+    let effective = apply_connector(config, envelope.as_ref().and_then(|v| v.get("acp")));
     if effective.command.is_empty() {
         return reply(
             Some(loop_decision::Decision::Fail(Fail {
