@@ -113,7 +113,7 @@ export default function App() {
                       className="size-8 justify-center rounded-md border-0 bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-foreground [&>svg:last-child]:hidden"
                       aria-label="Theme"
                     >
-                      <SelectValue>
+                      <SelectValue className="justify-center">
                         {() => <SunMoon className="size-4" />}
                       </SelectValue>
                     </SelectTrigger>

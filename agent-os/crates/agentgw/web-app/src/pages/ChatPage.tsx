@@ -30,7 +30,10 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -50,6 +53,7 @@ import {
   type Profile,
   type Spec,
 } from "@/lib/api";
+import { loadConnectors, type AcpConnector } from "@/lib/connectors";
 import { loadProviders, type Provider } from "@/lib/providers";
 import { cn } from "@/lib/utils";
 
@@ -113,7 +117,8 @@ export function ChatPage({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [providers] = useState<Provider[]>(loadProviders);
-  const [providerId, setProviderId] = useState("openrouter");
+  const [connectors] = useState<AcpConnector[]>(loadConnectors);
+  const [connectorSel, setConnectorSel] = useState("http:openrouter");
   const [toolsOn, setToolsOn] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
@@ -241,7 +246,12 @@ export function ChatPage({
     ]);
     try {
       const sid = await ensureSession();
-      const provider = providers.find((item) => item.id === providerId);
+      const provider = connectorSel.startsWith("http:")
+        ? providers.find((item) => `http:${item.id}` === connectorSel)
+        : undefined;
+      const connector = connectorSel.startsWith("acp:")
+        ? connectors.find((item) => `acp:${item.id}` === connectorSel)
+        : undefined;
       const payload = JSON.stringify({
         task,
         ...(provider
@@ -249,6 +259,19 @@ export function ChatPage({
               model: provider.model,
               base_url: provider.baseUrl,
               ...(provider.keyEnv ? { api_key_env: provider.keyEnv } : {}),
+            }
+          : {}),
+        ...(connector
+          ? {
+              acp: {
+                command: connector.command,
+                ...(connector.args ? { args: connector.args } : {}),
+                ...(connector.cwd ? { cwd: connector.cwd } : {}),
+                ...(connector.timeoutMs
+                  ? { timeout_ms: connector.timeoutMs }
+                  : {}),
+                ...(connector.allowTools ? { allow_tools: true } : {}),
+              },
             }
           : {}),
         ...(toolsOn ? { tools: true, tool_choice: "required" } : {}),
@@ -568,17 +591,23 @@ export function ChatPage({
             />
             <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
               <Select
-                value={providerId}
-                onValueChange={(value) => value && setProviderId(value)}
+                value={connectorSel}
+                onValueChange={(value) => value && setConnectorSel(value)}
               >
                 <SelectTrigger className="h-7 w-auto max-w-44 gap-1 rounded-md border-0 bg-muted/70 px-2 text-[11px] shadow-none">
                   <SelectValue>
                     {(value: unknown) => {
+                      const sel = String(value);
                       const provider = providers.find(
-                        (item) => item.id === value,
+                        (item) => `http:${item.id}` === sel,
                       );
-                      return provider
-                        ? `${provider.name} · ${provider.model}`
+                      if (provider)
+                        return `${provider.name} · ${provider.model}`;
+                      const connector = connectors.find(
+                        (item) => `acp:${item.id}` === sel,
+                      );
+                      return connector
+                        ? `${connector.name} · ${connector.command}`
                         : "Default model";
                     }}
                   </SelectValue>
@@ -587,11 +616,33 @@ export function ChatPage({
                   alignItemWithTrigger={false}
                   className="w-auto min-w-(--anchor-width)"
                 >
-                  {providers.map((provider) => (
-                    <SelectItem key={provider.id} value={provider.id}>
-                      {provider.name} · {provider.model}
-                    </SelectItem>
-                  ))}
+                  <SelectGroup>
+                    <SelectLabel>Providers</SelectLabel>
+                    {providers.map((provider) => (
+                      <SelectItem
+                        key={provider.id}
+                        value={`http:${provider.id}`}
+                      >
+                        {provider.name} · {provider.model}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  {connectors.length > 0 && (
+                    <>
+                      <SelectSeparator />
+                      <SelectGroup>
+                        <SelectLabel>ACP connectors</SelectLabel>
+                        {connectors.map((connector) => (
+                          <SelectItem
+                            key={connector.id}
+                            value={`acp:${connector.id}`}
+                          >
+                            {connector.name} · {connector.command}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </>
+                  )}
                 </SelectContent>
               </Select>
               <button

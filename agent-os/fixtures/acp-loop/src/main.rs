@@ -11,11 +11,17 @@
 //! first `allow*` option is selected.
 //!
 //! Env:
-//! - `ACP_COMMAND` (required) — e.g. `gemini` with `ACP_ARGS=--acp`.
+//! - `ACP_COMMAND` (required unless the task payload carries a connector)
+//!   — e.g. `gemini` with `ACP_ARGS=--acp`.
 //! - `ACP_ARGS` — JSON array or whitespace-split argument list.
 //! - `ACP_CWD` — working dir passed to `session/new` (default `.`).
 //! - `ACP_TIMEOUT_MS` — per-RPC deadline (default 120000).
 //! - `ACP_ALLOW_TOOLS` — `1` auto-selects the first allow option.
+//!
+//! The GUI can pin a connector per run via the task envelope:
+//! `{"task": "...", "acp": {"command": "...", "args": "...", "cwd": "...",
+//! "timeout_ms": 120000, "allow_tools": true}}`. Payload keys override
+//! the corresponding env defaults.
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -160,7 +166,21 @@ fn decide(
         };
     };
 
-    if config.command.is_empty() {
+    // The task payload may be plain text or the GUI's JSON envelope
+    // `{"task": ..., "acp": {...}}` — extract the human text either way.
+    let raw = String::from_utf8_lossy(&input.state);
+    let envelope = serde_json::from_str::<Value>(raw.trim()).ok();
+    let task = envelope
+        .as_ref()
+        .and_then(|v| v.get("task").and_then(Value::as_str).map(str::to_owned))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| raw.to_string());
+
+    let effective = apply_connector(
+        config,
+        envelope.as_ref().and_then(|v| v.get("acp")),
+    );
+    if effective.command.is_empty() {
         return reply(
             Some(loop_decision::Decision::Fail(Fail {
                 reason_code: "missing_acp_command".to_owned(),
@@ -169,16 +189,7 @@ fn decide(
         );
     }
 
-    // The task payload may be plain text or the GUI's JSON envelope
-    // `{"task": ...}` — extract the human text either way.
-    let raw = String::from_utf8_lossy(&input.state);
-    let task = serde_json::from_str::<Value>(raw.trim())
-        .ok()
-        .and_then(|v| v.get("task").and_then(Value::as_str).map(str::to_owned))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| raw.to_string());
-
-    match acp_turn(config, &task) {
+    match acp_turn(&effective, &task) {
         Ok(text) => reply(
             Some(loop_decision::Decision::Complete(Complete {
                 output_ref: data_uri(&text),
@@ -191,6 +202,50 @@ fn decide(
             })),
             String::new(),
         ),
+    }
+}
+
+/// Per-run connector pinned by the GUI: `{"acp": {...}}` keys override
+/// the adapter's env-derived config.
+fn apply_connector(base: &AcpConfig, connector: Option<&Value>) -> AcpConfig {
+    let Some(connector) = connector.and_then(Value::as_object) else {
+        return AcpConfig {
+            command: base.command.clone(),
+            args: base.args.clone(),
+            cwd: base.cwd.clone(),
+            timeout: base.timeout,
+            allow_tools: base.allow_tools,
+        };
+    };
+    let args = match connector.get("args") {
+        Some(Value::String(s)) => parse_args(s),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect(),
+        _ => base.args.clone(),
+    };
+    AcpConfig {
+        command: connector
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| base.command.clone()),
+        args,
+        cwd: connector
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| base.cwd.clone()),
+        timeout: connector
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(base.timeout),
+        allow_tools: connector
+            .get("allow_tools")
+            .and_then(Value::as_bool)
+            .unwrap_or(base.allow_tools),
     }
 }
 
