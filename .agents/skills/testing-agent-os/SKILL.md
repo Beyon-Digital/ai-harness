@@ -85,11 +85,14 @@ commands from `agent-os/`.
 
 - Source is `crates/agentgw/web-app/` (React/Vite/Tailwind/shadcn). Left sidebar:
   Chat, Runs, Pipelines, Adapters, Config, Approvals, System. Health badge bottom-left.
-- Standalone frontend-only testing needs no daemon: `export PATH=$HOME/node22/bin:$PATH`
-  (node also via nvm), `cd agent-os/crates/agentgw/web-app && npm run dev` →
-  http://localhost:5173. Vite proxies `/api`→127.0.0.1:7740; with no daemon every page
+- Standalone frontend-only testing needs no daemon: `cd agent-os/crates/agentgw/web-app
+  && npm install && npm run dev` → http://localhost:5173 (fresh checkouts have no
+  `node_modules`; node via nvm or, on this box, `export PATH=$HOME/node22/bin:$PATH`).
+  Vite proxies `/api`→127.0.0.1:7740; with no daemon every page
   still renders but polls fail with repeating "Bad Gateway" toasts + red health dot —
-  expected, NOT defects. Watches for stale `vite --port 5199` servers/Chrome windows
+  expected, NOT defects. Machine-local details below (`$HOME/node22`, vite port 5199,
+  CDP 29229) are examples from the Devin test box — adapt to your own environment.
+  Watch for stale vite servers/Chrome windows
   left by earlier sessions; CDP target list: `curl localhost:29229/json`.
 - Coordinate math on this box: screenshots are real 1600x1200 px but input space is
   1024x768 (scale 1.5625). DOM `getBoundingClientRect` y is viewport-relative — add
