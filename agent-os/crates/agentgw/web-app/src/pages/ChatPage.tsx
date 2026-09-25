@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Bot,
-  ChevronDown,
   ExternalLink,
   Monitor,
   Plus,
@@ -583,9 +582,11 @@ export function ChatPage({
                         : "Default model";
                     }}
                   </SelectValue>
-                  <ChevronDown className="size-3" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent
+                  alignItemWithTrigger={false}
+                  className="w-auto min-w-(--anchor-width)"
+                >
                   {providers.map((provider) => (
                     <SelectItem key={provider.id} value={provider.id}>
                       {provider.name} · {provider.model}

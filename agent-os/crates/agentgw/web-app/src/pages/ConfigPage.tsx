@@ -85,7 +85,7 @@ export function ConfigPage() {
   };
 
   return (
-    <div className="space-y-5 overflow-auto p-6">
+    <div className="h-full space-y-5 overflow-auto p-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold">Config</h1>

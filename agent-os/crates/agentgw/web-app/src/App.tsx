@@ -3,10 +3,10 @@ import {
   Bot,
   Boxes,
   CheckSquare,
-  GitBranch,
   MessageSquare,
   Play,
   Settings,
+  SlidersHorizontal,
   SunMoon,
   Workflow,
 } from "lucide-react";
@@ -49,7 +49,7 @@ const NAV: { id: Page; label: string; icon: typeof Bot }[] = [
   { id: "runs", label: "Runs", icon: Play },
   { id: "pipelines", label: "Workflows", icon: Workflow },
   { id: "adapters", label: "Adapters", icon: Boxes },
-  { id: "config", label: "Configuration", icon: GitBranch },
+  { id: "config", label: "Configuration", icon: SlidersHorizontal },
   { id: "approvals", label: "Approvals", icon: CheckSquare },
   { id: "system", label: "System", icon: Settings },
 ];

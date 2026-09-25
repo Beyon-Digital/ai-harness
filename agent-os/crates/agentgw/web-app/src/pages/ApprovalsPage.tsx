@@ -37,7 +37,7 @@ export function ApprovalsPage() {
   };
 
   return (
-    <div className="space-y-4 overflow-auto p-6">
+    <div className="h-full space-y-4 overflow-auto p-6">
       <h1 className="text-lg font-semibold">Approvals</h1>
       <Card>
         <CardHeader>
