@@ -1646,6 +1646,7 @@ impl RunWorker {
             "ACP_CWD",
             "ACP_TIMEOUT_MS",
             "ACP_ALLOW_TOOLS",
+            "ACP_ALLOW_CONNECTOR",
             // Test/debug knob: the fixture loop records each LoopInput.
             "FIXTURE_LOOP_RECORD_DIR",
         ] {

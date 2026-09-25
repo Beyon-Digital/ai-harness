@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plug, Plus, Trash2 } from "lucide-react";
+import { Plug, Plus, SquareTerminal, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   TOKEN_KEY,
   flattenMetrics,
@@ -26,6 +27,11 @@ import {
   getMetrics,
   type Health,
 } from "@/lib/api";
+import {
+  CONNECTORS_KEY,
+  loadConnectors,
+  type AcpConnector,
+} from "@/lib/connectors";
 import {
   PROVIDERS_KEY,
   loadProviders,
@@ -38,8 +44,18 @@ export function SystemPage() {
     [],
   );
   const [providers, setProviders] = useState<Provider[]>(loadProviders);
+  const [connectors, setConnectors] = useState<AcpConnector[]>(loadConnectors);
   const [addOpen, setAddOpen] = useState(false);
+  const [acpOpen, setAcpOpen] = useState(false);
   const [np, setNp] = useState({ name: "", baseUrl: "", model: "", keyEnv: "" });
+  const [nc, setNc] = useState({
+    name: "",
+    command: "",
+    args: "",
+    cwd: "",
+    timeoutMs: "",
+    allowTools: false,
+  });
   const [gwToken, setGwToken] = useState(
     () => localStorage.getItem(TOKEN_KEY) ?? "",
   );
@@ -72,8 +88,43 @@ export function SystemPage() {
     toast.success(`provider "${np.name}" added — pick it in Chat`);
   };
 
+  const saveConnectors = (next: AcpConnector[]) => {
+    setConnectors(next);
+    localStorage.setItem(CONNECTORS_KEY, JSON.stringify(next));
+  };
+
+  const addConnector = () => {
+    if (!nc.name || !nc.command) {
+      toast.error("name and command are required");
+      return;
+    }
+    const timeoutMs = Number.parseInt(nc.timeoutMs, 10);
+    saveConnectors([
+      ...connectors,
+      {
+        id: crypto.randomUUID(),
+        name: nc.name,
+        command: nc.command,
+        args: nc.args || undefined,
+        cwd: nc.cwd || undefined,
+        timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : undefined,
+        allowTools: nc.allowTools,
+      },
+    ]);
+    setNc({
+      name: "",
+      command: "",
+      args: "",
+      cwd: "",
+      timeoutMs: "",
+      allowTools: false,
+    });
+    setAcpOpen(false);
+    toast.success(`connector "${nc.name}" added — pick it in Chat`);
+  };
+
   return (
-    <div className="space-y-4 overflow-auto p-6">
+    <div className="h-full space-y-4 overflow-auto p-6">
       <h1 className="text-lg font-semibold">System</h1>
 
       <Card>
@@ -121,6 +172,63 @@ export function SystemPage() {
             onClick={() => setAddOpen(true)}
           >
             <Plus className="mr-1.5 size-3.5" /> Add OpenAI-compatible provider
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">ACP connectors</CardTitle>
+          <CardDescription>
+            Agent CLIs driven over the Agent Client Protocol — e.g.{" "}
+            <code>gemini --acp</code>, <code>claude-code acp</code>, or a
+            custom ACP server. Runs carry the connector to the{" "}
+            <code>acp-loop</code> adapter in the task envelope; pick an
+            agent bound to an ACP profile (e.g. <code>acp-local</code>) to
+            use one. Requires <code>ACP_ALLOW_CONNECTOR=1</code> in the
+            daemon&apos;s environment — payload connectors are arbitrary
+            executables on the daemon host, so the operator opts in.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {connectors.map((c) => (
+            <div
+              key={c.id}
+              className="flex items-center gap-3 rounded-lg border p-3"
+            >
+              <SquareTerminal className="size-4 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{c.name}</div>
+                <div className="truncate font-mono text-xs text-muted-foreground">
+                  {c.command}
+                  {c.args ? ` ${c.args}` : ""}
+                  {c.cwd ? ` · cwd ${c.cwd}` : ""}
+                  {c.timeoutMs ? ` · ${c.timeoutMs}ms` : ""}
+                  {c.allowTools ? " · tools auto-approved" : ""}
+                </div>
+              </div>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() =>
+                  saveConnectors(connectors.filter((x) => x.id !== c.id))
+                }
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))}
+          {!connectors.length && (
+            <p className="text-sm text-muted-foreground">
+              No connectors yet — add one to chat through an ACP agent.
+            </p>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAcpOpen(true)}
+          >
+            <Plus className="mr-1.5 size-3.5" /> Add ACP connector
           </Button>
         </CardContent>
       </Card>
@@ -253,6 +361,80 @@ export function SystemPage() {
               Cancel
             </Button>
             <Button onClick={addProvider}>Add provider</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={acpOpen} onOpenChange={setAcpOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add ACP connector</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>Name</Label>
+              <Input
+                value={nc.name}
+                onChange={(e) => setNc({ ...nc, name: e.target.value })}
+                placeholder="gemini / claude-code / custom acp agent…"
+              />
+            </div>
+            <div>
+              <Label>Command (binary on the daemon host)</Label>
+              <Input
+                value={nc.command}
+                onChange={(e) => setNc({ ...nc, command: e.target.value })}
+                placeholder="gemini"
+              />
+            </div>
+            <div>
+              <Label>Args</Label>
+              <Input
+                value={nc.args}
+                onChange={(e) => setNc({ ...nc, args: e.target.value })}
+                placeholder='--acp   (whitespace or JSON array, e.g. ["--acp"])'
+              />
+            </div>
+            <div>
+              <Label>Working directory (optional)</Label>
+              <Input
+                value={nc.cwd}
+                onChange={(e) => setNc({ ...nc, cwd: e.target.value })}
+                placeholder="."
+              />
+            </div>
+            <div>
+              <Label>Timeout ms (optional)</Label>
+              <Input
+                value={nc.timeoutMs}
+                onChange={(e) =>
+                  setNc({ ...nc, timeoutMs: e.target.value })
+                }
+                placeholder="120000"
+                inputMode="numeric"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <Label>Auto-approve tool requests</Label>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Answers the agent&apos;s <code>session/request_permission</code>{" "}
+                  with the first allow option.
+                </p>
+              </div>
+              <Switch
+                checked={nc.allowTools}
+                onCheckedChange={(checked) =>
+                  setNc({ ...nc, allowTools: checked })
+                }
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setAcpOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={addConnector}>Add connector</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

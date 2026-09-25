@@ -11,11 +11,20 @@
 //! first `allow*` option is selected.
 //!
 //! Env:
-//! - `ACP_COMMAND` (required) — e.g. `gemini` with `ACP_ARGS=--acp`.
+//! - `ACP_COMMAND` (required unless the task payload carries a connector)
+//!   — e.g. `gemini` with `ACP_ARGS=--acp`.
 //! - `ACP_ARGS` — JSON array or whitespace-split argument list.
 //! - `ACP_CWD` — working dir passed to `session/new` (default `.`).
 //! - `ACP_TIMEOUT_MS` — per-RPC deadline (default 120000).
 //! - `ACP_ALLOW_TOOLS` — `1` auto-selects the first allow option.
+//! - `ACP_ALLOW_CONNECTOR` — `1` lets run payloads pick the connector
+//!   (arbitrary executable on this host); env-only config otherwise.
+//!
+//! With `ACP_ALLOW_CONNECTOR=1` the GUI can pin a connector per run via
+//! the task envelope: `{"task": "...", "acp": {"command": "...",
+//! "args": "...", "cwd": "...", "timeout_ms": 120000,
+//! "allow_tools": true}}`. A selected connector is complete: absent keys
+//! fall back to neutral defaults, never to another connector's env values.
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -52,6 +61,7 @@ struct AcpConfig {
     cwd: String,
     timeout: Duration,
     allow_tools: bool,
+    allow_payload_connector: bool,
 }
 
 fn run() -> std::io::Result<()> {
@@ -92,6 +102,7 @@ fn run() -> std::io::Result<()> {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(120_000)),
         allow_tools: env("ACP_ALLOW_TOOLS").as_deref() == Ok("1"),
+        allow_payload_connector: env("ACP_ALLOW_CONNECTOR").as_deref() == Ok("1"),
     };
 
     while let Some(frame) = read_frame(&mut stream).map_err(err)? {
@@ -160,7 +171,28 @@ fn decide(
         };
     };
 
-    if config.command.is_empty() {
+    // The task payload may be plain text or the GUI's JSON envelope
+    // `{"task": ..., "acp": {...}}` — extract the human text either way.
+    let raw = String::from_utf8_lossy(&input.state);
+    let envelope = serde_json::from_str::<Value>(raw.trim()).ok();
+    let task = envelope
+        .as_ref()
+        .and_then(|v| v.get("task").and_then(Value::as_str).map(str::to_owned))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| raw.to_string());
+
+    let effective = match apply_connector(config, envelope.as_ref().and_then(|v| v.get("acp"))) {
+        Ok(config) => config,
+        Err(reason_code) => {
+            return reply(
+                Some(loop_decision::Decision::Fail(Fail {
+                    reason_code: reason_code.to_owned(),
+                })),
+                String::new(),
+            );
+        }
+    };
+    if effective.command.is_empty() {
         return reply(
             Some(loop_decision::Decision::Fail(Fail {
                 reason_code: "missing_acp_command".to_owned(),
@@ -169,16 +201,7 @@ fn decide(
         );
     }
 
-    // The task payload may be plain text or the GUI's JSON envelope
-    // `{"task": ...}` — extract the human text either way.
-    let raw = String::from_utf8_lossy(&input.state);
-    let task = serde_json::from_str::<Value>(raw.trim())
-        .ok()
-        .and_then(|v| v.get("task").and_then(Value::as_str).map(str::to_owned))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| raw.to_string());
-
-    match acp_turn(config, &task) {
+    match acp_turn(&effective, &task) {
         Ok(text) => reply(
             Some(loop_decision::Decision::Complete(Complete {
                 output_ref: data_uri(&text),
@@ -192,6 +215,60 @@ fn decide(
             String::new(),
         ),
     }
+}
+
+/// Per-run connector pinned by the GUI. A selected connector is a
+/// complete definition — absent keys get neutral defaults rather than
+/// another connector's env values — and is honored only when the daemon
+/// operator opted in via `ACP_ALLOW_CONNECTOR=1`.
+fn apply_connector(base: &AcpConfig, connector: Option<&Value>) -> Result<AcpConfig, &'static str> {
+    let Some(connector) = connector else {
+        return Ok(AcpConfig {
+            command: base.command.clone(),
+            args: base.args.clone(),
+            cwd: base.cwd.clone(),
+            timeout: base.timeout,
+            allow_tools: base.allow_tools,
+            allow_payload_connector: base.allow_payload_connector,
+        });
+    };
+    if !base.allow_payload_connector {
+        return Err("payload_connector_disabled");
+    }
+    let Some(connector) = connector.as_object() else {
+        return Err("invalid_acp_connector");
+    };
+    let args = match connector.get("args") {
+        Some(Value::String(s)) => parse_args(s),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(AcpConfig {
+        command: connector
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default(),
+        args,
+        cwd: connector
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| ".".to_owned()),
+        timeout: connector
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(120_000)),
+        allow_tools: connector
+            .get("allow_tools")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        allow_payload_connector: base.allow_payload_connector,
+    })
 }
 
 /// One full ACP turn against a freshly spawned agent.

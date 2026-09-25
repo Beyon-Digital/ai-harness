@@ -3,10 +3,10 @@ import {
   Bot,
   Boxes,
   CheckSquare,
-  GitBranch,
   MessageSquare,
   Play,
   Settings,
+  SlidersHorizontal,
   SunMoon,
   Workflow,
 } from "lucide-react";
@@ -49,7 +49,7 @@ const NAV: { id: Page; label: string; icon: typeof Bot }[] = [
   { id: "runs", label: "Runs", icon: Play },
   { id: "pipelines", label: "Workflows", icon: Workflow },
   { id: "adapters", label: "Adapters", icon: Boxes },
-  { id: "config", label: "Configuration", icon: GitBranch },
+  { id: "config", label: "Configuration", icon: SlidersHorizontal },
   { id: "approvals", label: "Approvals", icon: CheckSquare },
   { id: "system", label: "System", icon: Settings },
 ];
@@ -113,7 +113,7 @@ export default function App() {
                       className="size-8 justify-center rounded-md border-0 bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-foreground [&>svg:last-child]:hidden"
                       aria-label="Theme"
                     >
-                      <SelectValue>
+                      <SelectValue className="justify-center">
                         {() => <SunMoon className="size-4" />}
                       </SelectValue>
                     </SelectTrigger>
