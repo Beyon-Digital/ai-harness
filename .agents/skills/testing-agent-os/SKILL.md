@@ -85,9 +85,10 @@ commands from `agent-os/`.
 
 - Source is `crates/agentgw/web-app/` (React/Vite/Tailwind/shadcn). Left sidebar:
   Chat, Runs, Pipelines, Adapters, Config, Approvals, System. Health badge bottom-left.
-- Standalone frontend-only testing needs no daemon: `cd agent-os/crates/agentgw/web-app
-  && npm install && npm run dev` → http://localhost:5173 (fresh checkouts have no
-  `node_modules`; node via nvm or, on this box, `export PATH=$HOME/node22/bin:$PATH`).
+- Standalone frontend-only testing needs no daemon: use Node via nvm or, on this box,
+  `export PATH=$HOME/node22/bin:$PATH` first. Then run
+  `cd agent-os/crates/agentgw/web-app && npm install && npm run dev` →
+  http://localhost:5173 (fresh checkouts have no `node_modules`).
   Vite proxies `/api`→127.0.0.1:7740; with no daemon every page
   still renders but polls fail with repeating "Bad Gateway" toasts + red health dot —
   expected, NOT defects. Machine-local details below (`$HOME/node22`, vite port 5199,
