@@ -937,8 +937,11 @@ impl RunWorker {
             }
             DecisionInstruction::SpawnAgent { child_request } => {
                 // Kernel-owned spawn facts: the parent is always the
-                // spawning run, and a child created without a task lands
-                // on the parent's task so the run graph shows it.
+                // spawning run. A child created without a task lands on
+                // the parent's task only when it carries no payload of
+                // its own — a payload means "new task", and minting the
+                // parent's task_id here would make `ensure_task` drop it
+                // (the child would re-read the parent's envelope).
                 let mut request = contract::CreateTaskRun::decode(child_request.as_slice())
                     .map_err(|_| {
                         worker_error(
@@ -946,7 +949,7 @@ impl RunWorker {
                             "spawn child request is not a CreateTaskRun",
                         )
                     })?;
-                if request.task_id.is_empty() {
+                if request.task_id.is_empty() && request.task_payload.is_empty() {
                     request.task_id = row.task_id.to_string();
                 }
                 request.parent_run_id = row.run_id.to_string();
