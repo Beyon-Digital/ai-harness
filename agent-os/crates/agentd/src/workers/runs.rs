@@ -768,6 +768,51 @@ impl RunWorker {
                     }));
                 }
             }
+            // Child bookkeeping is indexed by parent_run_id and cheap, so
+            // compute it on EVERY turn: the loop reads `child_count` and
+            // `child_payload_hashes` from the marker for its spawn cap and
+            // duplicate-spawn guard — feeding them only on a WaitingChild
+            // resume would reset both to zero on the next model turn.
+            let children = txn.runs().list_children(row.run_id).await?;
+            let child_count = children.len() as u64;
+            let mut child_payload_hashes = Vec::with_capacity(children.len());
+            // `WaitingChild` resume: every child is terminal (that is
+            // what let the run leave the wait), so feed their outcomes
+            // once as synthetic settled entries — otherwise a loop can
+            // never observe what its children produced.
+            for child in &children {
+                let (task_excerpt, payload_hash) = txn
+                    .tasks()
+                    .get(child.task_id)
+                    .await?
+                    .map(|task| {
+                        let text = String::from_utf8_lossy(&task.payload);
+                        let mut end = text.len().min(400);
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        (
+                            text[..end].to_owned(),
+                            format!("{:x}", Sha256::digest(&task.payload)),
+                        )
+                    })
+                    .unwrap_or_default();
+                if !payload_hash.is_empty() {
+                    child_payload_hashes.push(serde_json::json!(payload_hash));
+                }
+                if row.state == RunState::WaitingChild && child.state.is_terminal() {
+                    settled.push(serde_json::json!({
+                        "effect_id": "",
+                        "operation": "kernel.child_settled",
+                        "run_id": child.run_id.to_string(),
+                        "state": format!("{:?}", child.state).to_ascii_lowercase(),
+                        "result_ref": child.output_ref.clone().unwrap_or_default(),
+                        "error_code": child.terminal_reason.clone().unwrap_or_default(),
+                        "task_excerpt": task_excerpt,
+                        "payload_hash": payload_hash,
+                    }));
+                }
+            }
             let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
             if drop_n > 0 {
                 tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
@@ -782,6 +827,16 @@ impl RunWorker {
                     .max_by_key(|effect| (effect.step_sequence, effect.updated_at_ms))
                     .map(|effect| effect.request_hash.as_str())
                     .unwrap_or_default();
+                let latest_tool_request_hash = run_effects
+                    .iter()
+                    .filter(|effect| {
+                        effects::is_terminal(effect.state)
+                            && (effect.operation.starts_with("mcp.")
+                                || effect.operation.starts_with("harness."))
+                    })
+                    .max_by_key(|effect| (effect.step_sequence, effect.updated_at_ms))
+                    .map(|effect| effect.request_hash.as_str())
+                    .unwrap_or_default();
                 serde_json::json!({
                     "effect_id": "",
                     "operation": "kernel.op_counts",
@@ -789,7 +844,10 @@ impl RunWorker {
                     "result_ref": "",
                     "error_code": "",
                     "op_counts": counts,
+                    "child_count": child_count,
+                    "child_payload_hashes": child_payload_hashes,
                     "latest_mcp_request_hash": latest_mcp_request_hash,
+                    "latest_tool_request_hash": latest_tool_request_hash,
                 })
             };
             let pack = |settled: &[serde_json::Value], counts: Option<&serde_json::Value>| {
@@ -806,6 +864,22 @@ impl RunWorker {
             let marker_value = marker(&op_counts);
             let marker_opt = (!settled.is_empty()).then_some(&marker_value);
             let mut events = pack(&settled, marker_opt);
+            // Bound each child outcome to a decodable text excerpt
+            // BEFORE evicting anything — otherwise the oldest child
+            // result drops out whole while the newest survives, and the
+            // parent's synthesis silently loses completed work.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                for event in &mut settled {
+                    if event.get("operation").and_then(|v| v.as_str())
+                        == Some("kernel.child_settled")
+                        && let Some(result_ref) = event.get("result_ref").and_then(|v| v.as_str())
+                    {
+                        event["result_ref"] =
+                            serde_json::Value::String(bound_child_result_ref(result_ref));
+                    }
+                }
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
+            }
             // Shrink order: old settled entries, then image payloads.
             // Keeping a full newest screenshot when it fits lets a
             // vision-capable model ground its next decision.
@@ -822,6 +896,34 @@ impl RunWorker {
                 }
                 events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
+            // Still over the cap: degrade `kernel.child_settled` entries
+            // to a compact {run_id, state, error_code, truncated} form —
+            // a child outcome too large to feed whole must not empty the
+            // feed and silently drop every other child's result.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                for event in &mut settled {
+                    if event.get("operation").and_then(|v| v.as_str())
+                        == Some("kernel.child_settled")
+                    {
+                        *event = serde_json::json!({
+                            "effect_id": "",
+                            "operation": "kernel.child_settled",
+                            "run_id": event.get("run_id").cloned().unwrap_or_default(),
+                            "state": event.get("state").cloned().unwrap_or_default(),
+                            "error_code": event.get("error_code").cloned().unwrap_or_default(),
+                            "payload_hash": event.get("payload_hash").cloned().unwrap_or_default(),
+                            "truncated": true,
+                        });
+                    }
+                }
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
+            }
+            // Marker fallback when the standalone marker is what tips
+            // the cap: inline every guard field — op counts, request
+            // hashes, and the spawn bookkeeping — onto the newest entry
+            // so spawn caps and dedup survive an oversized feed. Runs
+            // AFTER the child degrade pass so inlined fields are never
+            // replaced wholesale.
             if events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
                 if let Some(newest) = settled.last_mut()
                     && let Some(object) = newest.as_object_mut()
@@ -834,13 +936,27 @@ impl RunWorker {
                         "latest_mcp_request_hash".to_owned(),
                         marker_value["latest_mcp_request_hash"].clone(),
                     );
+                    object.insert(
+                        "latest_tool_request_hash".to_owned(),
+                        marker_value["latest_tool_request_hash"].clone(),
+                    );
+                    object.insert("child_count".to_owned(), serde_json::json!(child_count));
+                    object.insert(
+                        "child_payload_hashes".to_owned(),
+                        marker_value["child_payload_hashes"].clone(),
+                    );
                 }
                 events = pack(&settled, None);
             }
-            // A cap too small even for the settled batch — emit the
-            // empty payload (0 bytes) so the configured bound holds.
+            // A cap too small even for the settled batch: keep just the
+            // guard marker when it fits so spawn limits and dedup still
+            // apply; only then emit the empty payload (0 bytes) so the
+            // configured bound holds.
             if events.len() > limits.max_fed_event_bytes as usize {
-                events = Vec::new();
+                events = pack(&[], Some(&marker_value));
+                if events.len() > limits.max_fed_event_bytes as usize {
+                    events = Vec::new();
+                }
             }
             (state, events)
         };
@@ -887,9 +1003,26 @@ impl RunWorker {
                 Ok(())
             }
             DecisionInstruction::SpawnAgent { child_request } => {
+                // Kernel-owned spawn facts: the parent is always the
+                // spawning run. A child created without a task lands on
+                // the parent's task only when it carries no payload of
+                // its own — a payload means "new task", and minting the
+                // parent's task_id here would make `ensure_task` drop it
+                // (the child would re-read the parent's envelope).
+                let mut request = contract::CreateTaskRun::decode(child_request.as_slice())
+                    .map_err(|_| {
+                        worker_error(
+                            ErrorCode::InvalidArgument,
+                            "spawn child request is not a CreateTaskRun",
+                        )
+                    })?;
+                if request.task_id.is_empty() && request.task_payload.is_empty() {
+                    request.task_id = row.task_id.to_string();
+                }
+                request.parent_run_id = row.run_id.to_string();
                 self.submit(
                     runtime::CMD_CREATE_TASK_RUN,
-                    child_request,
+                    request.encode_to_vec(),
                     format!("spawn.{}.{}", row.run_id, row.step_sequence),
                 )
                 .await
@@ -1333,6 +1466,11 @@ impl RunWorker {
             "MCP_SERVERS",
             "MCP_TIMEOUT_MS",
             "MCP_ALLOW_ANY_URL",
+            // Creative mode: the harness root for `harness.*` ops and
+            // the merged MCP server file; HOME backs the default root.
+            "AGENTOS_HARNESS_ROOT",
+            "MCP_SERVERS_FILE",
+            "HOME",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1495,15 +1633,10 @@ impl RunWorker {
     /// True when every child run of `row` is terminal.
     async fn children_terminal(&self, row: &kernel_store::models::RunRow) -> errors::Result<bool> {
         let mut txn = self.read_txn().await?;
-        let all = txn.runs().list_by_task(row.task_id).await?;
-        let children_done = all
-            .iter()
-            .filter(|child| child.parent_run_id == Some(row.run_id))
-            .all(|child| child.state.is_terminal());
-        let has_children = all
-            .iter()
-            .any(|child| child.parent_run_id == Some(row.run_id));
-        Ok(has_children && children_done)
+        // Children may live under a different task than the parent —
+        // only `parent_run_id` enumerates them reliably.
+        let children = txn.runs().list_children(row.run_id).await?;
+        Ok(!children.is_empty() && children.iter().all(|child| child.state.is_terminal()))
     }
 
     /// `limits.context` for the run's frozen environment, cached by env
@@ -1649,6 +1782,10 @@ impl RunWorker {
             "ACP_ALLOW_CONNECTOR",
             // Test/debug knob: the fixture loop records each LoopInput.
             "FIXTURE_LOOP_RECORD_DIR",
+            // Creative mode: loop reads the installed-skill index from
+            // the harness root (HOME backs the default root).
+            "AGENTOS_HARNESS_ROOT",
+            "HOME",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1946,6 +2083,33 @@ fn run_id_str(run: RunId) -> String {
 
 fn fresh_token(ids: &dyn IdProvider) -> u64 {
     (ids.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
+}
+
+/// Decoded-text budget per fed child outcome — several children's
+/// answers must fit inside the default feed cap as excerpts rather
+/// than the oldest being evicted whole.
+const CHILD_FEED_EXCERPT_BYTES: usize = 4096;
+
+/// Bounds a `data:…;base64,` ref to [`CHILD_FEED_EXCERPT_BYTES`] of
+/// decoded text, re-encoded so the loop's data-URI decode still yields
+/// a readable excerpt (suffixed `[truncated]`). Refs that are not
+/// base64 data URIs pass through untouched.
+fn bound_child_result_ref(result_ref: &str) -> String {
+    let Some((prefix, body)) = result_ref.split_once(";base64,") else {
+        return result_ref.to_owned();
+    };
+    let Some(decoded) = base64_decode(body) else {
+        return result_ref.to_owned();
+    };
+    if decoded.len() <= CHILD_FEED_EXCERPT_BYTES {
+        return result_ref.to_owned();
+    }
+    let mut end = CHILD_FEED_EXCERPT_BYTES;
+    while end > 0 && decoded[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    let excerpt = format!("{}\n[truncated]", String::from_utf8_lossy(&decoded[..end]));
+    format!("{prefix};base64,{}", base64_encode(excerpt.as_bytes()))
 }
 
 fn compact_result_ref_for_loop(result_ref: &str) -> String {

@@ -44,6 +44,10 @@ pub enum PublishKind {
 pub trait RunRead: Send + Sync {
     async fn get(&mut self, id: RunId) -> Result<Option<RunRow>>;
     async fn list_by_task(&mut self, task: TaskId) -> Result<Vec<RunRow>>;
+    /// Direct children of `parent` (`parent_run_id = parent`), ordered
+    /// by run id. Children may live under a different task than the
+    /// parent, so this is the only correct way to enumerate them.
+    async fn list_children(&mut self, parent: RunId) -> Result<Vec<RunRow>>;
     /// Runs whose state is not terminal, ordered by creation.
     async fn list_active(&mut self) -> Result<Vec<RunRow>>;
 }

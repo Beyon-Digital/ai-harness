@@ -1014,8 +1014,20 @@ async fn api_run_decisions(
                 Some(contract::loop_decision::Decision::Wait(w)) => {
                     ("wait", json!({"reason": w.reason}))
                 }
-                Some(contract::loop_decision::Decision::SpawnAgent(_)) => {
-                    ("spawn_agent", json!({}))
+                Some(contract::loop_decision::Decision::SpawnAgent(s)) => {
+                    let detail = contract::CreateTaskRun::decode(s.child_request.as_slice())
+                        .map(|request| {
+                            let envelope: serde_json::Value =
+                                serde_json::from_slice(&request.task_payload)
+                                    .unwrap_or(serde_json::Value::Null);
+                            json!({
+                                "task": envelope.get("task").cloned().unwrap_or_default(),
+                                "profile": request.requested_profile,
+                                "spawn_depth": envelope.get("spawn_depth").cloned().unwrap_or_default(),
+                            })
+                        })
+                        .unwrap_or_else(|_| json!({}));
+                    ("spawn_agent", detail)
                 }
                 Some(contract::loop_decision::Decision::InvokeEffect(i)) => (
                     "invoke_effect",

@@ -19,6 +19,13 @@
 //!   {"wait": {"reason": "<what it is waiting for>"}}
 //!   {"request_approval": {"operation": "<op>", "reason": "<why>"}}
 //!
+//! Creative mode (`{"creative": true}` in the task envelope) adds two
+//! more replies — `{"harness_call": {"op": "harness.*", ...}}` for the
+//! self-extension tool surface, and `{"spawn_agent": {"task": ...}}`
+//! for child runs (spawn context comes from the envelope's
+//! `spawn_defaults`; child outcomes arrive as `kernel.child_settled`
+//! entries when the run leaves `WaitingChild`).
+//!
 //! Env:
 //! - `OPENROUTER_MODEL` — chat model id embedded in the effect payload
 //!   (default `openrouter/free`); the bound effect adapter applies its
@@ -29,12 +36,14 @@
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use adapter_protocol::framing::{read_frame, write_frame};
 use domain::generated::contract::{
-    AdapterFrame, AdapterHello, AdapterPong, Complete, Fail, InvokeEffect, LoopDecision, LoopInput,
-    PortCallResponse, RequestApproval, Wait, adapter_frame::Body, loop_decision,
+    AdapterFrame, AdapterHello, AdapterPong, Complete, CreateTaskRun, Fail, InvokeEffect,
+    LoopDecision, LoopInput, PortCallResponse, RequestApproval, SpawnAgent, VersionedRef, Wait,
+    adapter_frame::Body, loop_decision,
 };
 use prost::Message;
 use serde_json::{Value, json};
@@ -48,6 +57,16 @@ const MCP_CALL_OP: &str = "mcp.call_tool";
 /// Bounded tool-call loop: a run may chain at most this many `mcp.*`
 /// effects before the loop forces a completion off the last result.
 const MAX_MCP_HOPS: u32 = 4;
+/// Creative mode runs longer tool loops — scaffold/validate/write is
+/// multi-step — but still bounded: at most this many `harness.*` ops.
+const MAX_HARNESS_HOPS: u32 = 16;
+/// Default child-run cap per parent; the envelope's `max_children`
+/// overrides it.
+const DEFAULT_MAX_CHILDREN: u64 = 8;
+/// Default spawn recursion depth; the envelope's `spawn_depth`
+/// overrides it and each child inherits `depth - 1`, so descendants
+/// can't fan out forever even though `max_children` is per-parent.
+const DEFAULT_SPAWN_DEPTH: u64 = 3;
 
 /// The daemon's fixed bootstrap principal/actor identities — required
 /// fields on the `CreateApprovalRequest` draft.
@@ -181,10 +200,18 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
             .and_then(|v| v.get("tool_choice"))
             .and_then(Value::as_str)
             == Some("required");
+    // Creative mode (`{"creative": true}` in the envelope) unlocks the
+    // `harness.*` tool surface and `spawn_agent` replies.
+    let creative = envelope
+        .as_ref()
+        .and_then(|v| v.get("creative"))
+        .map(|v| v.as_bool().unwrap_or(false) || v.as_str() == Some("true"))
+        .unwrap_or(false);
     // Run-wide settled `mcp.*` effects — accumulates across steps and
     // survives daemon restarts, so the hop cap cannot be evaded by
     // alternating model/tool turns.
     let mcp_hops = op_count(&input.events, "mcp.");
+    let harness_hops = op_count(&input.events, "harness.");
     let model_hops = op_count(&input.events, MODEL_CHAT_OP);
 
     // Branch on the NEWEST settled effect only — the feed contains just
@@ -261,7 +288,8 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
             }
         };
         let model = get("model").unwrap_or_else(|| model.to_owned());
-        let mut request = chat_request(&model, &task, tools_enabled && !final_only, false);
+        let mut request =
+            chat_request(&model, &task, tools_enabled && !final_only, false, creative);
         if let Some(m) = request["messages"].as_array_mut() {
             let content = mcp_follow_up_content(&note, &result_for_note(&latest), mcp_hops);
             m.push(json!({
@@ -274,6 +302,140 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     "content": "The MCP tool-call budget is exhausted. Do not request another tool. Return `complete` with the available result, or `fail`."
                 }));
             }
+        }
+        if let Some(url) = get("base_url") {
+            request["base_url"] = Value::String(url);
+        }
+        if let Some(ke) = get("api_key_env") {
+            request["api_key_env"] = Value::String(ke);
+        }
+        return reply(
+            Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                operation: MODEL_CHAT_OP.to_owned(),
+                payload: serde_json::to_vec(&request).unwrap_or_default(),
+                effect_claim: Vec::new(),
+            })),
+            String::new(),
+        );
+    }
+
+    // Settled `harness.*` ops feed back exactly like `mcp.*` — the
+    // model sees the op's JSON result and decides the next step.
+    if let Some(ref effect) = latest
+        && effect
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(|o| o.starts_with("harness."))
+            .unwrap_or(false)
+    {
+        let op = effect
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let state = effect
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let final_only = harness_hops >= MAX_HARNESS_HOPS;
+        let note = match state {
+            "committed" => {
+                let result = effect
+                    .get("result_ref")
+                    .and_then(Value::as_str)
+                    .and_then(decode_data_uri)
+                    .unwrap_or_default();
+                format!("The harness op `{op}` succeeded with result:\n{result}")
+            }
+            "failed" => {
+                let err = effect
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("harness op failed");
+                format!("The harness op `{op}` failed: {err}")
+            }
+            _ => {
+                return reply(
+                    Some(loop_decision::Decision::Fail(Fail {
+                        reason_code: format!("harness_effect_{state}"),
+                    })),
+                    String::new(),
+                );
+            }
+        };
+        let model = get("model").unwrap_or_else(|| model.to_owned());
+        let mut request = chat_request(&model, &task, tools_enabled, false, creative);
+        if let Some(m) = request["messages"].as_array_mut() {
+            m.push(json!({
+                "role": "user",
+                "content": format!(
+                    "Harness op #{harness_hops} has finished. {note}\n\
+                     Continue with the next action from the task, or return \
+                     `complete` when it is done."
+                )
+            }));
+            if final_only {
+                m.push(json!({
+                    "role": "user",
+                    "content": "The harness-op budget is exhausted. Do not request another harness op. Return `complete` with what you have, or `fail`."
+                }));
+            }
+        }
+        if let Some(url) = get("base_url") {
+            request["base_url"] = Value::String(url);
+        }
+        if let Some(ke) = get("api_key_env") {
+            request["api_key_env"] = Value::String(ke);
+        }
+        return reply(
+            Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                operation: MODEL_CHAT_OP.to_owned(),
+                payload: serde_json::to_vec(&request).unwrap_or_default(),
+                effect_claim: Vec::new(),
+            })),
+            String::new(),
+        );
+    }
+
+    // `WaitingChild` resume: the kernel fed `kernel.child_settled`
+    // entries for every spawned child — summarize them back to the
+    // model so it can synthesize or continue.
+    if latest
+        .as_ref()
+        .and_then(|e| e.get("operation"))
+        .and_then(Value::as_str)
+        == Some("kernel.child_settled")
+    {
+        let children: Vec<String> = settled_effects(&input.events)
+            .iter()
+            .filter(|e| e.get("operation").and_then(Value::as_str) == Some("kernel.child_settled"))
+            .map(|e| {
+                let run = e.get("run_id").and_then(Value::as_str).unwrap_or("?");
+                let state = e.get("state").and_then(Value::as_str).unwrap_or("?");
+                let task = e
+                    .get("task_excerpt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = e
+                    .get("result_ref")
+                    .and_then(Value::as_str)
+                    .and_then(decode_data_uri)
+                    .unwrap_or_default();
+                let error = e.get("error_code").and_then(Value::as_str).unwrap_or("");
+                format!("- child {run} ({state}) task `{task}`: {result}{error}")
+            })
+            .collect();
+        let model = get("model").unwrap_or_else(|| model.to_owned());
+        let mut request = chat_request(&model, &task, tools_enabled, false, creative);
+        if let Some(m) = request["messages"].as_array_mut() {
+            m.push(json!({
+                "role": "user",
+                "content": format!(
+                    "Every spawned child agent has finished:\n{}\n\
+                     Synthesize their results and continue the task — spawn \
+                     more children only if genuinely needed, or return `complete`.",
+                    children.join("\n")
+                )
+            }));
         }
         if let Some(url) = get("base_url") {
             request["base_url"] = Value::String(url);
@@ -329,7 +491,7 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                     }
                     if model_hops < 2 {
                         let model = get("model").unwrap_or_else(|| model.to_owned());
-                        let mut request = chat_request(&model, &task, true, true);
+                        let mut request = chat_request(&model, &task, true, true, creative);
                         if let Some(messages) = request["messages"].as_array_mut() {
                             messages.push(json!({
                                 "role": "assistant",
@@ -362,7 +524,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                         String::new(),
                     );
                 }
-                if tools_enabled
+                // Creative runs may call tools too: `harness.register
+                // kind=mcp_server` installs a server meant to be invoked
+                // via mcp_call even when computer tools are off.
+                if (tools_enabled || creative)
                     && mcp_hops < MAX_MCP_HOPS
                     && let Some(call) = mcp_call
                 {
@@ -374,7 +539,8 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                         if first_duplicate || retry_duplicate {
                             let model = get("model").unwrap_or_else(|| model.to_owned());
                             let keep_tools = first_duplicate && mcp_hops == 1;
-                            let mut request = chat_request(&model, &task, keep_tools, false);
+                            let mut request =
+                                chat_request(&model, &task, keep_tools, false, creative);
                             if let Some(messages) = request["messages"].as_array_mut() {
                                 messages.push(json!({
                                     "role": "assistant",
@@ -434,13 +600,69 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                         String::new(),
                     );
                 }
-                if tools_enabled && mcp_hops >= MAX_MCP_HOPS && parse_mcp_call(&content).is_some() {
+                if (tools_enabled || creative)
+                    && mcp_hops >= MAX_MCP_HOPS
+                    && parse_mcp_call(&content).is_some()
+                {
                     return reply(
                         Some(loop_decision::Decision::Fail(Fail {
                             reason_code: "mcp_hop_limit".to_owned(),
                         })),
                         String::new(),
                     );
+                }
+                // Creative mode: the model asked for a harness op — same
+                // durable dispatch as model.chat/mcp.*. The op string is
+                // carried in the request payload, not the effect
+                // operation (the profile binds one adapter for all
+                // effect.execute calls).
+                if creative && let Some(call) = parse_harness_call(&content) {
+                    if harness_hops >= MAX_HARNESS_HOPS {
+                        return reply(
+                            Some(loop_decision::Decision::Fail(Fail {
+                                reason_code: "harness_hop_limit".to_owned(),
+                            })),
+                            String::new(),
+                        );
+                    }
+                    if latest_tool_request_hash(&input.events).as_deref()
+                        == Some(request_hash(&call).as_str())
+                    {
+                        return reply(
+                            Some(loop_decision::Decision::Fail(Fail {
+                                reason_code: "repeated_harness_call".to_owned(),
+                            })),
+                            String::new(),
+                        );
+                    }
+                    let operation = call
+                        .get("op")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    return reply(
+                        Some(loop_decision::Decision::InvokeEffect(InvokeEffect {
+                            operation,
+                            payload: serde_json::to_vec(&call).unwrap_or_default(),
+                            effect_claim: Vec::new(),
+                        })),
+                        String::new(),
+                    );
+                }
+                // Creative mode: spawn a child agent run.
+                if creative && let Some(spawn) = parse_spawn_agent(&content) {
+                    return match build_child_request(&spawn, &input, envelope.as_ref()) {
+                        Ok(child_request) => reply(
+                            Some(loop_decision::Decision::SpawnAgent(SpawnAgent {
+                                child_request,
+                            })),
+                            String::new(),
+                        ),
+                        Err(code) => reply(
+                            Some(loop_decision::Decision::Fail(Fail { reason_code: code })),
+                            String::new(),
+                        ),
+                    };
                 }
                 return reply(
                     Some(parse_model_decision(&content, &input.run_id)),
@@ -478,7 +700,13 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
     // or MCP tool use is selected; the base URL is enforced by the
     // effect adapter's endpoint guard.
     let effective_model = get("model").unwrap_or_else(|| model.to_owned());
-    let mut request = chat_request(&effective_model, &task, tools_enabled, tools_required);
+    let mut request = chat_request(
+        &effective_model,
+        &task,
+        tools_enabled,
+        tools_required,
+        creative,
+    );
     if let Some(url) = get("base_url") {
         request["base_url"] = Value::String(url);
     }
@@ -584,6 +812,294 @@ fn latest_mcp_request_hash(events: &[u8]) -> Option<String> {
 fn request_hash(request: &Value) -> String {
     let digest = Sha256::digest(serde_json::to_vec(request).unwrap_or_default());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Marker's `latest_tool_request_hash` — covers `mcp.*` and `harness.*`
+/// alike; falls back to the mcp-only field for older kernels.
+fn latest_tool_request_hash(events: &[u8]) -> Option<String> {
+    match events_doc(events) {
+        Value::Array(events) => events
+            .iter()
+            .find(|event| event.get("latest_tool_request_hash").is_some())
+            .and_then(|event| event.get("latest_tool_request_hash"))
+            .and_then(Value::as_str)
+            .filter(|hash| !hash.is_empty())
+            .map(str::to_owned),
+        value => value
+            .get("latest_tool_request_hash")
+            .and_then(Value::as_str)
+            .filter(|hash| !hash.is_empty())
+            .map(str::to_owned),
+    }
+    .or_else(|| latest_mcp_request_hash(events))
+}
+
+/// Marker's `child_count` — total children the kernel has recorded
+/// under this run (caps `spawn_agent`).
+fn child_count(events: &[u8]) -> u64 {
+    match events_doc(events) {
+        Value::Array(events) => events
+            .iter()
+            .find(|event| event.get("child_count").is_some())
+            .and_then(|event| event.get("child_count"))
+            .and_then(Value::as_u64),
+        value => value.get("child_count").and_then(Value::as_u64),
+    }
+    .unwrap_or(0)
+}
+
+/// Payload hashes of children already known to the kernel — the marker
+/// carries them every turn; `kernel.child_settled` feed entries (fed
+/// once on resume) are a fallback. Blocks a spawn that would duplicate
+/// a known child byte-for-byte.
+fn child_payload_hashes(events: &[u8]) -> Vec<String> {
+    let mut hashes: Vec<String> = match events_doc(events) {
+        Value::Array(events) => events
+            .iter()
+            .find(|event| event.get("child_payload_hashes").is_some())
+            .and_then(|event| event.get("child_payload_hashes"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        value => value
+            .get("child_payload_hashes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    for e in settled_effects(events)
+        .iter()
+        .filter(|e| e.get("operation").and_then(Value::as_str) == Some("kernel.child_settled"))
+    {
+        if let Some(h) = e
+            .get("payload_hash")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+            && !hashes.iter().any(|known| known == h)
+        {
+            hashes.push(h.to_owned());
+        }
+    }
+    hashes
+}
+
+/// `{"harness_call": {"op": "harness.*", ...args}}` out of a model
+/// reply, normalised into the executor's payload shape. The op must be
+/// under `harness.` — other prefixes belong to their own reply kinds.
+fn parse_harness_call(content: &str) -> Option<Value> {
+    let trimmed = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    let call = parsed.get("harness_call")?;
+    let op = call.get("op").and_then(Value::as_str)?;
+    if !op.starts_with("harness.") {
+        return None;
+    }
+    let mut payload = call.clone();
+    payload["op"] = Value::String(op.to_owned());
+    Some(payload)
+}
+
+/// `{"spawn_agent": {"task": ..., "envelope"?: {...}, "profile"?: ...}}`
+/// out of a model reply.
+fn parse_spawn_agent(content: &str) -> Option<Value> {
+    let trimmed = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    let spawn = parsed.get("spawn_agent")?;
+    if !spawn.get("task").map(Value::is_string).unwrap_or(false) {
+        return None;
+    }
+    Some(spawn.clone())
+}
+
+/// Builds the `CreateTaskRun` the kernel submits for `spawn_agent`.
+/// Session/spec/profile come from the envelope's `spawn_defaults`
+/// (injected by the caller that created this run); task_id and
+/// parent_run_id stay kernel-owned — the daemon fills the parent's id
+/// and inherits the task when the child leaves it blank.
+fn build_child_request(
+    spawn: &Value,
+    input: &LoopInput,
+    envelope: Option<&Value>,
+) -> Result<Vec<u8>, String> {
+    let defaults = envelope
+        .and_then(|e| e.get("spawn_defaults"))
+        .ok_or("spawn_not_configured")?;
+    let field = |key: &str| {
+        defaults
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let session_id = field("session_id").ok_or("spawn_not_configured")?;
+    let spec_id = field("agent_spec_id").ok_or("spawn_not_configured")?;
+    let spec_version = field("spec_version").ok_or("spawn_not_configured")?;
+    let spec_digest = field("spec_digest").ok_or("spawn_not_configured")?;
+    let profile = spawn
+        .get("profile")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| field("profile"))
+        .unwrap_or_default();
+    let max_children = envelope
+        .and_then(|e| e.get("max_children"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_MAX_CHILDREN);
+    if child_count(&input.events) >= max_children {
+        return Err("child_limit".to_owned());
+    }
+    let spawn_depth = envelope
+        .and_then(|e| e.get("spawn_depth"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_SPAWN_DEPTH);
+    if spawn_depth == 0 {
+        return Err("spawn_depth_limit".to_owned());
+    }
+    let task_text = spawn
+        .get("task")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("invalid_spawn")?;
+    let mut child_env = spawn.get("envelope").cloned().unwrap_or_else(|| json!({}));
+    if !child_env.is_object() {
+        return Err("invalid_spawn".to_owned());
+    }
+    child_env["task"] = Value::String(task_text.to_owned());
+    // The child inherits the parent's creative context so it can run
+    // harness ops and spawn its own children (the global child cap
+    // still applies). Explicit envelope values win.
+    for key in ["creative", "tools", "model", "base_url", "api_key_env"] {
+        if child_env.get(key).is_none()
+            && let Some(value) = envelope.and_then(|e| e.get(key))
+        {
+            child_env[key] = value.clone();
+        }
+    }
+    if child_env.get("spawn_defaults").is_none() {
+        child_env["spawn_defaults"] = defaults.clone();
+    }
+    // Recursion budgets are parent-owned: the child always inherits the
+    // parent's remaining depth, and its child cap can only narrow — a
+    // caller-supplied envelope may never widen either limit.
+    child_env["spawn_depth"] = json!(spawn_depth - 1);
+    let child_max = child_env
+        .get("max_children")
+        .and_then(Value::as_u64)
+        .unwrap_or(max_children)
+        .min(max_children);
+    child_env["max_children"] = json!(child_max);
+    let payload = serde_json::to_vec(&child_env).unwrap_or_default();
+    let digest = Sha256::digest(&payload);
+    let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    if child_payload_hashes(&input.events)
+        .iter()
+        .any(|h| h == &hash)
+    {
+        return Err("duplicate_spawn".to_owned());
+    }
+    Ok(CreateTaskRun {
+        task_id: String::new(),
+        run_id: String::new(),
+        session_id,
+        task_kind: "agentos.task.v1.Run".to_owned(),
+        task_payload: payload,
+        agent_spec_ref: Some(VersionedRef {
+            id: spec_id,
+            version: spec_version,
+            digest: spec_digest,
+        }),
+        parent_run_id: input.run_id.clone(),
+        observed_parent_cancellation_epoch: 0,
+        requested_profile: profile,
+        workspace_uri: String::new(),
+        requested_capabilities: Vec::new(),
+        requested_budget: Vec::new(),
+    }
+    .encode_to_vec())
+}
+
+/// The harness root — same resolution as the effect adapter's
+/// (`AGENTOS_HARNESS_ROOT`, else `~/.agentos/harness`).
+fn harness_root() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("AGENTOS_HARNESS_ROOT")
+        && !root.trim().is_empty()
+    {
+        return Some(PathBuf::from(root));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".agentos").join("harness"))
+}
+
+/// `(name, description)` pairs from every `<root>/skills/*/SKILL.md`
+/// frontmatter — injected into the creative system prompt so the model
+/// can see and invoke installed skills.
+fn skill_index() -> Vec<(String, String)> {
+    let Some(dir) = harness_root().map(|root| root.join("skills")) else {
+        return Vec::new();
+    };
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut index: Vec<(String, String)> = read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let file = std::fs::read_to_string(entry.path().join("SKILL.md")).ok()?;
+            let front = file
+                .strip_prefix("---")?
+                .split_once("\n---")
+                .map(|(head, _)| head)?;
+            let field = |key: &str| {
+                front.lines().find_map(|line| {
+                    line.trim()
+                        .strip_prefix(&format!("{key}:"))
+                        .map(sanitize_skill_field)
+                })
+            };
+            let name = field("name")?;
+            let description = field("description")?;
+            if name.is_empty() || description.is_empty() {
+                return None;
+            }
+            Some((name, description))
+        })
+        .take(24)
+        .collect();
+    index.sort();
+    index
+}
+
+/// Skill frontmatter is model-written but lands in the SYSTEM prompt —
+/// bound it to one control-free line so a written SKILL.md cannot
+/// smuggle newlines or runaway instruction text into future runs.
+fn sanitize_skill_field(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn latest_effect_matching(events: &[u8], pred: impl Fn(&str) -> bool) -> Option<Value> {
@@ -762,7 +1278,13 @@ fn mcp_follow_up_content(note: &str, result: &str, mcp_hops: u32) -> Value {
     Value::Array(content)
 }
 
-fn chat_request(model: &str, task: &str, tools_enabled: bool, tools_required: bool) -> Value {
+fn chat_request(
+    model: &str,
+    task: &str,
+    tools_enabled: bool,
+    tools_required: bool,
+    creative: bool,
+) -> Value {
     let system = "You are the decision loop of an agent operating system. \
         You receive the task (what the user asked the agent to do). \
         Reply with EXACTLY ONE JSON object and nothing else — no prose, \
@@ -798,7 +1320,49 @@ fn chat_request(model: &str, task: &str, tools_enabled: bool, tools_required: bo
     } else {
         ""
     };
-    let system = format!("{system}{tools_clause}{required_clause}");
+    let creative_clause = if creative {
+        let skills = skill_index()
+            .iter()
+            .map(|(name, desc)| format!("- {name} — {desc}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nCreative mode is active — you may extend the harness itself. \
+            Two additional replies are available:\n\
+            {{\"harness_call\": {{\"op\": \"<harness op>\", ...args}}}} — the kernel \
+            executes the op and hands you its JSON result next turn. Ops:\n\
+              harness.catalog  {{path?}}            file tree of the harness root\n\
+              harness.list     {{path?}}            one directory listing\n\
+              harness.read     {{path}}             file contents\n\
+              harness.write    {{path, content, create_only?}}  write a file\n\
+              harness.scaffold {{kind, name, description?}}     create an extension\n\
+              harness.validate {{path}}             check an extension's files\n\
+              harness.register {{kind, name}}       install an extension\n\
+              harness.registry {{}}                 list registered extensions\n\
+            Every path stays under the harness root. `kind` is one of skill, \
+            workflow, adapter, loop, mcp_server. After scaffold + validate, \
+            register an mcp_server to call it live through `mcp_call`\n\
+            (server = its registered name); skills and workflows install into \
+            the registry; adapter/loop register as needs_build (they require a \
+            compile + profile binding outside the run).\n\
+            {{\"spawn_agent\": {{\"task\": \"<subtask>\", \"envelope\": {{...}}?, \
+            \"profile\": \"<profile>\"?}}}} — spawn a child agent run that inherits \
+            your settings; you resume automatically when all children finish. \
+            Prefer a few well-scoped children.\
+            {}",
+            if skills.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nInstalled skills (invoke by naming them in a child's `task` \
+                     or by following them yourself):\n{skills}"
+                )
+            }
+        )
+    } else {
+        String::new()
+    };
+    let system = format!("{system}{tools_clause}{required_clause}{creative_clause}");
     json!({
         "model": model,
         "messages": [
@@ -971,7 +1535,7 @@ mod tests {
 
     #[test]
     fn required_computer_prompt_requires_an_ordered_plan() {
-        let request = chat_request("openrouter/free", "inspect the screen", true, true);
+        let request = chat_request("openrouter/free", "inspect the screen", true, true, false);
         let system = request["messages"][0]["content"]
             .as_str()
             .expect("system prompt");
@@ -1078,5 +1642,133 @@ mod tests {
         .unwrap();
         assert_eq!(op_count(&events, "mcp."), 4);
         assert_eq!(latest_mcp_request_hash(&events).as_deref(), Some("hash"));
+    }
+
+    #[test]
+    fn harness_call_parses_and_rejects_foreign_ops() {
+        let call = parse_harness_call(
+            r#"{"harness_call":{"op":"harness.read","path":"skills/x/SKILL.md"}}"#,
+        )
+        .expect("harness call");
+        assert_eq!(call["op"], "harness.read");
+        assert_eq!(call["path"], "skills/x/SKILL.md");
+        assert!(parse_harness_call(r#"{"harness_call":{"op":"mcp.call_tool"}}"#).is_none());
+        assert!(parse_harness_call(r#"{"mcp_call":{"server":"s","tool":"t"}}"#).is_none());
+    }
+
+    #[test]
+    fn spawn_agent_requires_task() {
+        assert!(parse_spawn_agent(r#"{"spawn_agent":{"task":"sub"}}"#).is_some());
+        assert!(parse_spawn_agent(r#"{"spawn_agent":{}}"#).is_none());
+        assert!(parse_spawn_agent(r#"{"complete":{"output":"x"}}"#).is_none());
+    }
+
+    fn spawn_input(events: Value) -> LoopInput {
+        LoopInput {
+            run_id: "parent-run".to_owned(),
+            events: serde_json::to_vec(&events).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    fn spawn_envelope() -> Value {
+        json!({
+            "task": "parent task",
+            "creative": true,
+            "spawn_defaults": {
+                "session_id": "sess",
+                "agent_spec_id": "spec",
+                "spec_version": "1",
+                "spec_digest": "sha256:abc",
+                "profile": "openrouter-wasm"
+            }
+        })
+    }
+
+    #[test]
+    fn build_child_request_inherits_parent_envelope() {
+        let input = spawn_input(json!([{"child_count": 0}]));
+        let spawn = json!({"task": "child task"});
+        let bytes =
+            build_child_request(&spawn, &input, Some(&spawn_envelope())).expect("child request");
+        let req = CreateTaskRun::decode(bytes.as_slice()).expect("proto");
+        assert_eq!(req.session_id, "sess");
+        assert_eq!(req.parent_run_id, "parent-run");
+        assert_eq!(req.task_id, "");
+        assert_eq!(req.requested_profile, "openrouter-wasm");
+        let spec = req.agent_spec_ref.expect("spec");
+        assert_eq!((spec.id.as_str(), spec.version.as_str()), ("spec", "1"));
+        let payload: Value = serde_json::from_slice(&req.task_payload).unwrap();
+        assert_eq!(payload["task"], "child task");
+        assert_eq!(payload["creative"], true);
+        assert_eq!(payload["spawn_defaults"]["session_id"], "sess");
+    }
+
+    #[test]
+    fn build_child_request_guards() {
+        let input = spawn_input(json!([{"child_count": 0}]));
+        let spawn = json!({"task": "x"});
+        assert_eq!(
+            build_child_request(&spawn, &input, None).unwrap_err(),
+            "spawn_not_configured"
+        );
+        let capped = spawn_input(json!([{"child_count": 8}]));
+        assert_eq!(
+            build_child_request(&spawn, &capped, Some(&spawn_envelope())).unwrap_err(),
+            "child_limit"
+        );
+        // Depth spent: a child that inherited spawn_depth=0 cannot spawn.
+        let mut leaf_env = spawn_envelope();
+        leaf_env["spawn_depth"] = json!(0);
+        assert_eq!(
+            build_child_request(&spawn, &input, Some(&leaf_env)).unwrap_err(),
+            "spawn_depth_limit"
+        );
+        // Children inherit depth-1 and the parent's max_children.
+        let ok = build_child_request(&spawn, &input, Some(&spawn_envelope())).expect("spawn");
+        let payload: Value =
+            serde_json::from_slice(&CreateTaskRun::decode(ok.as_slice()).unwrap().task_payload)
+                .unwrap();
+        assert_eq!(payload["spawn_depth"], 2);
+        // duplicate_spawn: a child entry already carries this payload's hash.
+        let env = spawn_envelope();
+        let ok = build_child_request(&spawn, &input, Some(&env)).expect("first");
+        let payload = CreateTaskRun::decode(ok.as_slice()).unwrap().task_payload;
+        let hash = format!("{:x}", Sha256::digest(&payload));
+        let resumed = spawn_input(json!([
+            {
+                "operation": "kernel.child_settled",
+                "run_id": "child-1",
+                "state": "completed",
+                "payload_hash": hash,
+            },
+            {"child_count": 1}
+        ]));
+        assert_eq!(
+            build_child_request(&spawn, &resumed, Some(&env)).unwrap_err(),
+            "duplicate_spawn"
+        );
+    }
+
+    #[test]
+    fn marker_reads_child_count_and_tool_hash() {
+        let events = serde_json::to_vec(&json!([{
+            "operation": "kernel.op_counts",
+            "child_count": 3,
+            "latest_tool_request_hash": "tool-hash",
+            "latest_mcp_request_hash": "mcp-hash"
+        }]))
+        .unwrap();
+        assert_eq!(child_count(&events), 3);
+        assert_eq!(
+            latest_tool_request_hash(&events).as_deref(),
+            Some("tool-hash")
+        );
+        // Older kernels emit only the mcp field — it stands in for tools.
+        let legacy = serde_json::to_vec(&json!([{"latest_mcp_request_hash": "mcp-hash"}])).unwrap();
+        assert_eq!(
+            latest_tool_request_hash(&legacy).as_deref(),
+            Some("mcp-hash")
+        );
     }
 }

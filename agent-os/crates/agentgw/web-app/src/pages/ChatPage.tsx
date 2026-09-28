@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Monitor,
   Plus,
+  Sparkles,
   Square,
   Workflow,
 } from "lucide-react";
@@ -120,6 +121,7 @@ export function ChatPage({
   const [connectors] = useState<AcpConnector[]>(loadConnectors);
   const [connectorSel, setConnectorSel] = useState("http:openrouter");
   const [toolsOn, setToolsOn] = useState(false);
+  const [creativeOn, setCreativeOn] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agentProfile, setAgentProfile] = useState("");
@@ -275,6 +277,21 @@ export function ChatPage({
             }
           : {}),
         ...(toolsOn ? { tools: true, tool_choice: "required" } : {}),
+        // Creative mode: unlocks harness.* ops + spawn_agent in the
+        // loop; spawn_defaults carry this run's identity so children
+        // land in the same session with the same agent spec.
+        ...(creativeOn
+          ? {
+              creative: true,
+              spawn_defaults: {
+                session_id: sid,
+                agent_spec_id: selectedSpec.agent_spec_id,
+                spec_version: selectedSpec.version,
+                spec_digest: selectedSpec.digest,
+                profile: selectedSpec.profile,
+              },
+            }
+          : {}),
       });
       const { run_id } = await createRun({
         sessionId: sid,
@@ -470,10 +487,17 @@ export function ChatPage({
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                toolsOn ? "bg-emerald-500" : "bg-muted-foreground/40",
+                creativeOn || toolsOn
+                  ? "bg-emerald-500"
+                  : "bg-muted-foreground/40",
               )}
             />
-            {toolsOn ? "computer enabled" : "tools off"}
+            {[
+              creativeOn ? "creative" : null,
+              toolsOn ? "computer enabled" : null,
+            ]
+              .filter(Boolean)
+              .join(" · ") || "tools off"}
           </div>
         </header>
 
@@ -656,6 +680,19 @@ export function ChatPage({
               >
                 <Monitor className="size-3" />
                 Computer
+              </button>
+              <button
+                onClick={() => setCreativeOn((value) => !value)}
+                title="Creative mode: the agent can scaffold and register its own skills, workflows, MCP tools, and adapters, and spawn child runs"
+                className={cn(
+                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors",
+                  creativeOn
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+              >
+                <Sparkles className="size-3" />
+                Creative
               </button>
               <div className="flex-1" />
               <span className="hidden text-[10px] text-muted-foreground sm:block">
