@@ -126,11 +126,47 @@ enum ServerSpec {
     },
 }
 
+/// The merged MCP server map: `MCP_SERVERS` env JSON over the file map.
+/// The file defaults to `$AGENTOS_HARNESS_ROOT/mcp-servers.json` (or
+/// `MCP_SERVERS_FILE`) and is re-read per call — servers registered via
+/// `harness.register` go live without a daemon restart. Env entries
+/// win on name collisions so an operator can always override a
+/// registered server.
+fn server_map() -> Result<Value, String> {
+    let file_path = match std::env::var("MCP_SERVERS_FILE") {
+        Ok(p) if !p.trim().is_empty() => Some(std::path::PathBuf::from(p)),
+        _ => crate::harness::root()
+            .ok()
+            .map(|r| crate::harness::mcp_servers_file(&r)),
+    };
+    let mut merged = match file_path {
+        Some(path) => std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .unwrap_or_else(|| json!({})),
+        None => json!({}),
+    };
+    if !merged.is_object() {
+        merged = json!({});
+    }
+    if let Ok(raw) = std::env::var("MCP_SERVERS") {
+        let env_map: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("MCP_SERVERS is not JSON: {e}"))?;
+        if let Some(obj) = env_map.as_object() {
+            let merged_obj = merged.as_object_mut().expect("merged is an object");
+            for (k, v) in obj {
+                merged_obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Ok(merged)
+}
+
 fn server_spec(name: &str) -> Result<ServerSpec, String> {
-    let raw =
-        std::env::var("MCP_SERVERS").map_err(|_| "MCP_SERVERS not configured on the daemon")?;
-    let servers: Value =
-        serde_json::from_str(&raw).map_err(|e| format!("MCP_SERVERS is not JSON: {e}"))?;
+    let servers = server_map()?;
+    if servers.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        return Err("MCP_SERVERS not configured on the daemon".to_owned());
+    }
     let spec = servers
         .get(name)
         .ok_or_else(|| format!("mcp server `{name}` not in MCP_SERVERS"))?;

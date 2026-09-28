@@ -24,10 +24,17 @@
 //! - `MCP_SERVERS` — JSON map of MCP server name → stdio/HTTP spec;
 //!   enables `mcp.list_tools`/`mcp.call_tool`/`mcp.read_resource`
 //!   payloads (`{"op": "mcp.*", "server": <name>, ...}`).
+//! - `MCP_SERVERS_FILE` — optional JSON file merged into that map
+//!   (default `$AGENTOS_HARNESS_ROOT/mcp-servers.json`); re-read per
+//!   call so `harness.register` installs take effect without a restart.
 //! - `MCP_TIMEOUT_MS` — per-call MCP timeout (default 30000), kept
 //!   separate from the model timeout.
+//! - `AGENTOS_HARNESS_ROOT` — root for `harness.*` ops (default
+//!   `~/.agentos/harness`); enables the creative-mode tool surface
+//!   (`{"op": "harness.*", ...}`). Every path stays under the root.
 //! - `FIXTURE_STORE` — durable store path (default `openrouter-effect-store.json`).
 
+mod harness;
 mod mcp;
 
 use std::collections::BTreeMap;
@@ -257,6 +264,38 @@ fn execute(req: EffectExecutionRequest, config: &LlmConfig, store_path: &str) ->
             Ok(text) => {
                 let Ok(result_ref) = data_uri(&text) else {
                     return fail("mcp_result_too_large");
+                };
+                store.insert(
+                    req.operation_id.clone(),
+                    OpRecord {
+                        status: "succeeded".to_owned(),
+                        result_ref: result_ref.clone(),
+                        error_code: String::new(),
+                    },
+                );
+                save_store(store_path, &store);
+                (
+                    EffectExecutionResponse {
+                        effect_id: req.effect_id,
+                        status: "succeeded".to_owned(),
+                        result_ref,
+                        provider_operation_ref: req.operation_id,
+                        error_code: String::new(),
+                    }
+                    .encode_to_vec(),
+                    String::new(),
+                )
+            }
+            Err(code) => fail(&code),
+        };
+    }
+    // `harness.*` payloads dispatch to the creative-mode tool surface
+    // (confined to AGENTOS_HARNESS_ROOT) — same result plumbing.
+    if harness::is_harness_payload(&payload) {
+        return match harness::call(&payload) {
+            Ok(text) => {
+                let Ok(result_ref) = data_uri(&text) else {
+                    return fail("harness_result_too_large");
                 };
                 store.insert(
                     req.operation_id.clone(),

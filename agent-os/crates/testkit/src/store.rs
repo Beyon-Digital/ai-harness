@@ -633,6 +633,18 @@ impl RunRead for MockRunRepo {
         Ok(rows)
     }
 
+    async fn list_children(&mut self, parent: RunId) -> errors::Result<Vec<RunRow>> {
+        let state = lock(&self.state)?;
+        let mut rows: Vec<RunRow> = state
+            .runs
+            .values()
+            .filter(|row| row.parent_run_id == Some(parent))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| row.run_id);
+        Ok(rows)
+    }
+
     async fn list_active(&mut self) -> errors::Result<Vec<RunRow>> {
         let state = lock(&self.state)?;
         let mut rows: Vec<RunRow> = state

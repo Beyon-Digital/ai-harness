@@ -768,6 +768,43 @@ impl RunWorker {
                     }));
                 }
             }
+            // `WaitingChild` resume: every child is terminal (that is
+            // what let the run leave the wait), so feed their outcomes
+            // once as synthetic settled entries — otherwise a loop can
+            // never observe what its children produced.
+            let mut child_count: u64 = 0;
+            if row.state == RunState::WaitingChild {
+                let children = txn.runs().list_children(row.run_id).await?;
+                child_count = children.len() as u64;
+                for child in children.iter().filter(|child| child.state.is_terminal()) {
+                    let (task_excerpt, payload_hash) = txn
+                        .tasks()
+                        .get(child.task_id)
+                        .await?
+                        .map(|task| {
+                            let text = String::from_utf8_lossy(&task.payload);
+                            let mut end = text.len().min(400);
+                            while end > 0 && !text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            (
+                                text[..end].to_owned(),
+                                format!("{:x}", Sha256::digest(&task.payload)),
+                            )
+                        })
+                        .unwrap_or_default();
+                    settled.push(serde_json::json!({
+                        "effect_id": "",
+                        "operation": "kernel.child_settled",
+                        "run_id": child.run_id.to_string(),
+                        "state": format!("{:?}", child.state).to_ascii_lowercase(),
+                        "result_ref": child.output_ref.clone().unwrap_or_default(),
+                        "error_code": child.terminal_reason.clone().unwrap_or_default(),
+                        "task_excerpt": task_excerpt,
+                        "payload_hash": payload_hash,
+                    }));
+                }
+            }
             let drop_n = settled.len().saturating_sub(limits.max_fed_events as usize);
             if drop_n > 0 {
                 tracing::info!(run = %run_id_str(row.run_id), drop_n, "oldest fed events dropped");
@@ -782,6 +819,16 @@ impl RunWorker {
                     .max_by_key(|effect| (effect.step_sequence, effect.updated_at_ms))
                     .map(|effect| effect.request_hash.as_str())
                     .unwrap_or_default();
+                let latest_tool_request_hash = run_effects
+                    .iter()
+                    .filter(|effect| {
+                        effects::is_terminal(effect.state)
+                            && (effect.operation.starts_with("mcp.")
+                                || effect.operation.starts_with("harness."))
+                    })
+                    .max_by_key(|effect| (effect.step_sequence, effect.updated_at_ms))
+                    .map(|effect| effect.request_hash.as_str())
+                    .unwrap_or_default();
                 serde_json::json!({
                     "effect_id": "",
                     "operation": "kernel.op_counts",
@@ -789,7 +836,9 @@ impl RunWorker {
                     "result_ref": "",
                     "error_code": "",
                     "op_counts": counts,
+                    "child_count": child_count,
                     "latest_mcp_request_hash": latest_mcp_request_hash,
+                    "latest_tool_request_hash": latest_tool_request_hash,
                 })
             };
             let pack = |settled: &[serde_json::Value], counts: Option<&serde_json::Value>| {
@@ -887,9 +936,23 @@ impl RunWorker {
                 Ok(())
             }
             DecisionInstruction::SpawnAgent { child_request } => {
+                // Kernel-owned spawn facts: the parent is always the
+                // spawning run, and a child created without a task lands
+                // on the parent's task so the run graph shows it.
+                let mut request = contract::CreateTaskRun::decode(child_request.as_slice())
+                    .map_err(|_| {
+                        worker_error(
+                            ErrorCode::InvalidArgument,
+                            "spawn child request is not a CreateTaskRun",
+                        )
+                    })?;
+                if request.task_id.is_empty() {
+                    request.task_id = row.task_id.to_string();
+                }
+                request.parent_run_id = row.run_id.to_string();
                 self.submit(
                     runtime::CMD_CREATE_TASK_RUN,
-                    child_request,
+                    request.encode_to_vec(),
                     format!("spawn.{}.{}", row.run_id, row.step_sequence),
                 )
                 .await
@@ -1495,15 +1558,10 @@ impl RunWorker {
     /// True when every child run of `row` is terminal.
     async fn children_terminal(&self, row: &kernel_store::models::RunRow) -> errors::Result<bool> {
         let mut txn = self.read_txn().await?;
-        let all = txn.runs().list_by_task(row.task_id).await?;
-        let children_done = all
-            .iter()
-            .filter(|child| child.parent_run_id == Some(row.run_id))
-            .all(|child| child.state.is_terminal());
-        let has_children = all
-            .iter()
-            .any(|child| child.parent_run_id == Some(row.run_id));
-        Ok(has_children && children_done)
+        // Children may live under a different task than the parent —
+        // only `parent_run_id` enumerates them reliably.
+        let children = txn.runs().list_children(row.run_id).await?;
+        Ok(!children.is_empty() && children.iter().all(|child| child.state.is_terminal()))
     }
 
     /// `limits.context` for the run's frozen environment, cached by env

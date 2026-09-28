@@ -126,6 +126,7 @@ nav:
       - Cloud Deployment: guides/cloud-deployment.md
       - Build Adapter: guides/build-adapter.md
       - Build Loop: guides/build-loop.md
+      - Creative Mode: guides/creative-mode.md
       - Docs Site: guides/docs-site.md
   - Reference:
       - Index: reference/README.md
@@ -135,4 +136,5 @@ nav:
       - Errors: reference/error-model.md
       - Compatibility: reference/compatibility.md
       - Component Matrix: reference/component-matrix.md
+      - Codex Parity Gap: reference/codex-parity-gap.md
       - Glossary: reference/glossary.md
