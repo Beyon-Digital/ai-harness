@@ -14,3 +14,4 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "3", features = ["json", "rustls", "platform-verifier"] }
+uuid.workspace = true

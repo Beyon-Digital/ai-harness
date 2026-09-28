@@ -23,7 +23,7 @@ task payload is:
     "agent_spec_id": "<spec id>",
     "spec_version": "<spec version>",
     "spec_digest": "<spec digest>",
-    "profile": "openrouter-wasm"
+    "profile": "local-trusted"
   },
   "max_children": 8
 }

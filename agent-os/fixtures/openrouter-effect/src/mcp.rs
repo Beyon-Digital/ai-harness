@@ -133,12 +133,9 @@ enum ServerSpec {
 /// win on name collisions so an operator can always override a
 /// registered server.
 fn server_map() -> Result<Value, String> {
-    let file_path = match std::env::var("MCP_SERVERS_FILE") {
-        Ok(p) if !p.trim().is_empty() => Some(std::path::PathBuf::from(p)),
-        _ => crate::harness::root()
-            .ok()
-            .map(|r| crate::harness::mcp_servers_file(&r)),
-    };
+    // Same file `harness.register` writes — MCP_SERVERS_FILE wins, then
+    // <root>/mcp-servers.json.
+    let file_path = crate::harness::mcp_servers_file();
     let mut merged = match file_path {
         Some(path) => std::fs::read_to_string(&path)
             .ok()

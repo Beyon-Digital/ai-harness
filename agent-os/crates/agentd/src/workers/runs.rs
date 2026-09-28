@@ -768,31 +768,39 @@ impl RunWorker {
                     }));
                 }
             }
+            // Child bookkeeping is indexed by parent_run_id and cheap, so
+            // compute it on EVERY turn: the loop reads `child_count` and
+            // `child_payload_hashes` from the marker for its spawn cap and
+            // duplicate-spawn guard — feeding them only on a WaitingChild
+            // resume would reset both to zero on the next model turn.
+            let children = txn.runs().list_children(row.run_id).await?;
+            let child_count = children.len() as u64;
+            let mut child_payload_hashes = Vec::with_capacity(children.len());
             // `WaitingChild` resume: every child is terminal (that is
             // what let the run leave the wait), so feed their outcomes
             // once as synthetic settled entries — otherwise a loop can
             // never observe what its children produced.
-            let mut child_count: u64 = 0;
-            if row.state == RunState::WaitingChild {
-                let children = txn.runs().list_children(row.run_id).await?;
-                child_count = children.len() as u64;
-                for child in children.iter().filter(|child| child.state.is_terminal()) {
-                    let (task_excerpt, payload_hash) = txn
-                        .tasks()
-                        .get(child.task_id)
-                        .await?
-                        .map(|task| {
-                            let text = String::from_utf8_lossy(&task.payload);
-                            let mut end = text.len().min(400);
-                            while end > 0 && !text.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            (
-                                text[..end].to_owned(),
-                                format!("{:x}", Sha256::digest(&task.payload)),
-                            )
-                        })
-                        .unwrap_or_default();
+            for child in &children {
+                let (task_excerpt, payload_hash) = txn
+                    .tasks()
+                    .get(child.task_id)
+                    .await?
+                    .map(|task| {
+                        let text = String::from_utf8_lossy(&task.payload);
+                        let mut end = text.len().min(400);
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        (
+                            text[..end].to_owned(),
+                            format!("{:x}", Sha256::digest(&task.payload)),
+                        )
+                    })
+                    .unwrap_or_default();
+                if !payload_hash.is_empty() {
+                    child_payload_hashes.push(serde_json::json!(payload_hash));
+                }
+                if row.state == RunState::WaitingChild && child.state.is_terminal() {
                     settled.push(serde_json::json!({
                         "effect_id": "",
                         "operation": "kernel.child_settled",
@@ -837,6 +845,7 @@ impl RunWorker {
                     "error_code": "",
                     "op_counts": counts,
                     "child_count": child_count,
+                    "child_payload_hashes": child_payload_hashes,
                     "latest_mcp_request_hash": latest_mcp_request_hash,
                     "latest_tool_request_hash": latest_tool_request_hash,
                 })
@@ -885,6 +894,28 @@ impl RunWorker {
                     );
                 }
                 events = pack(&settled, None);
+            }
+            // Still over the cap: degrade `kernel.child_settled` entries
+            // to a compact {run_id, state, error_code, truncated} form —
+            // a child outcome too large to feed whole must not empty the
+            // feed and silently drop every other child's result.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                for event in &mut settled {
+                    if event.get("operation").and_then(|v| v.as_str())
+                        == Some("kernel.child_settled")
+                    {
+                        *event = serde_json::json!({
+                            "effect_id": "",
+                            "operation": "kernel.child_settled",
+                            "run_id": event.get("run_id").cloned().unwrap_or_default(),
+                            "state": event.get("state").cloned().unwrap_or_default(),
+                            "error_code": event.get("error_code").cloned().unwrap_or_default(),
+                            "payload_hash": event.get("payload_hash").cloned().unwrap_or_default(),
+                            "truncated": true,
+                        });
+                    }
+                }
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
             // A cap too small even for the settled batch — emit the
             // empty payload (0 bytes) so the configured bound holds.

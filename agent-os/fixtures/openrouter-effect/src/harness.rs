@@ -26,6 +26,7 @@
 //! daemon restart.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,8 +83,28 @@ pub fn root() -> Result<PathBuf, String> {
 
 /// File the MCP client merges into its `MCP_SERVERS` map — registering
 /// an `mcp_server` writes here so the tool is live on the next call.
-pub fn mcp_servers_file(root: &Path) -> PathBuf {
-    root.join("mcp-servers.json")
+/// `MCP_SERVERS_FILE` wins when set (mcp.rs resolves the same way, so
+/// writer and reader always agree).
+pub fn mcp_servers_file() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("MCP_SERVERS_FILE") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    root().ok().map(|r| r.join("mcp-servers.json"))
+}
+
+/// Write `bytes` to `tmp` only when it does not already exist — a
+/// pre-planted symlink at a fixed tmp name must fail, not redirect the
+/// write outside the root.
+fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, bytes))
+        .map_err(|e| format!("write {}: {e}", tmp.display()))
 }
 
 fn registry_file(root: &Path) -> PathBuf {
@@ -119,15 +140,17 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let candidate = root.join(rel_path);
     // Walk to the deepest existing ancestor; if any existing portion of
     // the path canonicalizes outside the root, a symlink is escaping.
+    // `symlink_metadata` counts a *dangling* symlink as present —
+    // `exists()` would miss it, and a later write would follow it out.
     let canon_root = root
         .canonicalize()
         .map_err(|e| format!("harness root unavailable: {e}"))?;
     let mut probe = candidate.clone();
     loop {
-        if probe.exists() {
+        if probe.symlink_metadata().is_ok() {
             let canon = probe
                 .canonicalize()
-                .map_err(|e| format!("cannot resolve {rel}: {e}"))?;
+                .map_err(|_| format!("cannot resolve {rel} (dangling or escaped link)"))?;
             if !canon.starts_with(&canon_root) {
                 return Err("path escapes the harness root".to_owned());
             }
@@ -209,7 +232,13 @@ fn walk(root: &Path, dir: &Path, depth: u32, out: &mut Vec<Value>) -> Result<(),
         }
         let path = child.path();
         let name = child.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || (path.is_dir() && SKIP_DIRS.contains(&name.as_str())) {
+        // `file_type` does not follow symlinks: a symlinked dir reports
+        // as a link and is never descended into — listing a tree cannot
+        // leak entries from outside the root.
+        let file_type = child.file_type();
+        let is_dir = file_type.as_ref().map(|t| t.is_dir()).unwrap_or(false);
+        let is_link = file_type.map(|t| t.is_symlink()).unwrap_or(false);
+        if name.starts_with('.') || (is_dir && SKIP_DIRS.contains(&name.as_str())) {
             continue;
         }
         let rel = path
@@ -218,10 +247,10 @@ fn walk(root: &Path, dir: &Path, depth: u32, out: &mut Vec<Value>) -> Result<(),
             .unwrap_or_else(|_| name.clone());
         out.push(json!({
             "path": rel,
-            "kind": if path.is_dir() { "dir" } else { "file" },
+            "kind": if is_link { "link" } else if is_dir { "dir" } else { "file" },
             "bytes": child.metadata().map(|m| m.len()).unwrap_or(0),
         }));
-        if path.is_dir() && depth > 0 {
+        if is_dir && depth > 0 {
             walk(root, &path, depth - 1, out)?;
         }
     }
@@ -240,7 +269,14 @@ fn read(payload: &Value) -> Result<String, String> {
         .map(|n| n.clamp(1, MAX_READ_BYTES as u64) as usize)
         .unwrap_or(DEFAULT_READ_BYTES);
     let path = resolve(&root, rel)?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("read {rel}: {e}"))?;
+    // Read at most max_bytes+1 — never pull a huge file into memory
+    // just to truncate the response.
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let file = std::fs::File::open(&path).map_err(|e| format!("read {rel}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read {rel}: {e}"))?;
     let truncated = bytes.len() > max_bytes;
     let mut end = max_bytes.min(bytes.len());
     // Walk back past UTF-8 continuation bytes (0b10xxxxxx) so `end`
@@ -252,7 +288,7 @@ fn read(payload: &Value) -> Result<String, String> {
     Ok(json!({
         "path": rel,
         "content": content,
-        "bytes": bytes.len(),
+        "bytes": size,
         "truncated": truncated,
     })
     .to_string())
@@ -276,16 +312,19 @@ fn write(payload: &Value) -> Result<String, String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let path = resolve(&root, rel)?;
-    let existed = path.exists();
+    // A dangling symlink at the target counts as existing — otherwise
+    // `create_only` misses it and the rename silently replaces the link.
+    let existed = path.symlink_metadata().is_ok();
     if create_only && existed {
         return Err(format!("{rel} already exists (create_only)"));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parents: {e}"))?;
     }
-    // Write-then-rename so a crash mid-write cannot leave a torn file.
+    // Write-then-rename so a crash mid-write cannot leave a torn file;
+    // create_new on the fixed tmp name refuses to follow a planted link.
     let tmp = path.with_extension("tmp-write");
-    std::fs::write(&tmp, content).map_err(|e| format!("write {rel}: {e}"))?;
+    write_tmp(&tmp, content.as_bytes())?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename {rel}: {e}"))?;
     Ok(json!({"path": rel, "bytes": content.len(), "existed": existed}).to_string())
 }
@@ -333,7 +372,7 @@ fn scaffold(payload: &Value) -> Result<String, String> {
     };
     for rel in files.keys() {
         let path = resolve(&root, rel)?;
-        if path.exists() {
+        if path.symlink_metadata().is_ok() {
             return Err(format!("{rel} already exists — pick another name"));
         }
     }
@@ -343,7 +382,7 @@ fn scaffold(payload: &Value) -> Result<String, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create parents: {e}"))?;
         }
-        std::fs::write(&path, content).map_err(|e| format!("write {rel}: {e}"))?;
+        write_tmp(&path, content.as_bytes()).map_err(|e| format!("{rel}: {e}"))?;
         written.push(rel.clone());
     }
     let next = match kind {
@@ -397,9 +436,12 @@ fn workflow_files(name: &str, description: &str) -> BTreeMap<String, String> {
 
 fn adapter_files(name: &str, description: &str, port: &str) -> BTreeMap<String, String> {
     let crate_name = name.replace('_', "-");
+    // The kernel's adapter registry requires `id` to be a UUID — mint
+    // one at scaffold time so the manifest registers as-is.
+    let adapter_id = uuid::Uuid::now_v7().to_string();
     let manifest = json!({
         "manifest_version": 1,
-        "id": name,
+        "id": adapter_id,
         "version": "0.1.0",
         "kind": "adapter",
         "runtime": {"type": "process", "entrypoint": crate_name, "language": "rust"},
@@ -414,8 +456,8 @@ fn adapter_files(name: &str, description: &str, port: &str) -> BTreeMap<String, 
 ## Build\n\nMove this crate under `agent-os/fixtures/`, add it to the workspace\n\
 `members`, then `cargo build -p {crate_name}`.\n\n\
 ## Activate\n\nAdapter bundles are content-addressed and digest-pinned: register\n\
-the manifest with the daemon, then bind `{name}@0.1.0` to a runtime profile's\n\
-`{port}` slot via a config proposal (Pipelines page or `agentctl`).\n"
+the manifest with the daemon, then bind `{adapter_id}@0.1.0` to a runtime\n\
+profile's `{port}` slot via a config proposal (Pipelines page or `agentctl`).\n"
     );
     let cargo = format!(
         "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
@@ -673,6 +715,13 @@ fn validate(payload: &Value) -> Result<String, String> {
                 {
                     issues.push("`runtime.entrypoint` missing".to_owned());
                 }
+                // The kernel registry parses `id` as an AdapterId —
+                // flag non-UUID values before register attempts fail.
+                match manifest.get("id").and_then(Value::as_str) {
+                    Some(id) if uuid::Uuid::parse_str(id).is_ok() => {}
+                    Some(_) => issues.push("`id` must be a UUID".to_owned()),
+                    None => {}
+                }
             }
             Err(e) => issues.push(format!("manifest is not valid JSON: {e}")),
         }
@@ -731,7 +780,7 @@ fn save_registry(path: &Path, entries: &BTreeMap<String, Value>) -> Result<(), S
     let body =
         serde_json::to_string_pretty(&json!({"extensions": entries})).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body).map_err(|e| format!("write registry: {e}"))?;
+    write_tmp(&tmp, body.as_bytes()).map_err(|e| format!("{e} (registry)"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename registry: {e}"))
 }
 
@@ -783,7 +832,11 @@ fn register(payload: &Value) -> Result<String, String> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| root.display().to_string());
-            let file = mcp_servers_file(&root);
+            // Same resolution as mcp.rs — MCP_SERVERS_FILE wins, then
+            // <root>/mcp-servers.json. Writing anywhere else would
+            // register a server the MCP client never sees.
+            let file = mcp_servers_file()
+                .ok_or("AGENTOS_HARNESS_ROOT unset and MCP_SERVERS_FILE unknown")?;
             let mut servers: Value = std::fs::read_to_string(&file)
                 .ok()
                 .and_then(|b| serde_json::from_str(&b).ok())
@@ -794,11 +847,14 @@ fn register(payload: &Value) -> Result<String, String> {
                 "env": env_map,
                 "cwd": cwd,
             });
-            std::fs::write(
-                &file,
-                serde_json::to_string_pretty(&servers).unwrap_or_default(),
-            )
-            .map_err(|e| format!("write mcp-servers.json: {e}"))?;
+            let tmp = file.with_extension("tmp");
+            write_tmp(
+                &tmp,
+                serde_json::to_string_pretty(&servers)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )?;
+            std::fs::rename(&tmp, &file).map_err(|e| format!("write mcp-servers.json: {e}"))?;
             (
                 json!({"command": command, "args": args, "cwd": cwd}),
                 "live",

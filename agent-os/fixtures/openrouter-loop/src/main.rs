@@ -524,7 +524,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                         String::new(),
                     );
                 }
-                if tools_enabled
+                // Creative runs may call tools too: `harness.register
+                // kind=mcp_server` installs a server meant to be invoked
+                // via mcp_call even when computer tools are off.
+                if (tools_enabled || creative)
                     && mcp_hops < MAX_MCP_HOPS
                     && let Some(call) = mcp_call
                 {
@@ -597,7 +600,10 @@ fn decide(request: &domain::generated::contract::PortCallRequest, model: &str) -
                         String::new(),
                     );
                 }
-                if tools_enabled && mcp_hops >= MAX_MCP_HOPS && parse_mcp_call(&content).is_some() {
+                if (tools_enabled || creative)
+                    && mcp_hops >= MAX_MCP_HOPS
+                    && parse_mcp_call(&content).is_some()
+                {
                     return reply(
                         Some(loop_decision::Decision::Fail(Fail {
                             reason_code: "mcp_hop_limit".to_owned(),
@@ -842,19 +848,47 @@ fn child_count(events: &[u8]) -> u64 {
     .unwrap_or(0)
 }
 
-/// Payload hashes of children already fed via `kernel.child_settled` —
-/// blocks a spawn that would duplicate a known child byte-for-byte.
+/// Payload hashes of children already known to the kernel — the marker
+/// carries them every turn; `kernel.child_settled` feed entries (fed
+/// once on resume) are a fallback. Blocks a spawn that would duplicate
+/// a known child byte-for-byte.
 fn child_payload_hashes(events: &[u8]) -> Vec<String> {
-    settled_effects(events)
+    let mut hashes: Vec<String> = match events_doc(events) {
+        Value::Array(events) => events
+            .iter()
+            .find(|event| event.get("child_payload_hashes").is_some())
+            .and_then(|event| event.get("child_payload_hashes"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        value => value
+            .get("child_payload_hashes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    for e in settled_effects(events)
         .iter()
         .filter(|e| e.get("operation").and_then(Value::as_str) == Some("kernel.child_settled"))
-        .filter_map(|e| {
-            e.get("payload_hash")
-                .and_then(Value::as_str)
-                .filter(|h| !h.is_empty())
-                .map(str::to_owned)
-        })
-        .collect()
+    {
+        if let Some(h) = e
+            .get("payload_hash")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+            && !hashes.iter().any(|known| known == h)
+        {
+            hashes.push(h.to_owned());
+        }
+    }
+    hashes
 }
 
 /// `{"harness_call": {"op": "harness.*", ...args}}` out of a model
@@ -963,14 +997,16 @@ fn build_child_request(
     if child_env.get("spawn_defaults").is_none() {
         child_env["spawn_defaults"] = defaults.clone();
     }
-    if child_env.get("spawn_depth").is_none() {
-        child_env["spawn_depth"] = json!(spawn_depth - 1);
-    }
-    if child_env.get("max_children").is_none()
-        && let Some(value) = envelope.and_then(|e| e.get("max_children"))
-    {
-        child_env["max_children"] = value.clone();
-    }
+    // Recursion budgets are parent-owned: the child always inherits the
+    // parent's remaining depth, and its child cap can only narrow — a
+    // caller-supplied envelope may never widen either limit.
+    child_env["spawn_depth"] = json!(spawn_depth - 1);
+    let child_max = child_env
+        .get("max_children")
+        .and_then(Value::as_u64)
+        .unwrap_or(max_children)
+        .min(max_children);
+    child_env["max_children"] = json!(child_max);
     let payload = serde_json::to_vec(&child_env).unwrap_or_default();
     let digest = Sha256::digest(&payload);
     let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
