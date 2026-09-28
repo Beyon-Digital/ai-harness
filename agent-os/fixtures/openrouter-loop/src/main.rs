@@ -63,6 +63,10 @@ const MAX_HARNESS_HOPS: u32 = 16;
 /// Default child-run cap per parent; the envelope's `max_children`
 /// overrides it.
 const DEFAULT_MAX_CHILDREN: u64 = 8;
+/// Default spawn recursion depth; the envelope's `spawn_depth`
+/// overrides it and each child inherits `depth - 1`, so descendants
+/// can't fan out forever even though `max_children` is per-parent.
+const DEFAULT_SPAWN_DEPTH: u64 = 3;
 
 /// The daemon's fixed bootstrap principal/actor identities — required
 /// fields on the `CreateApprovalRequest` draft.
@@ -929,6 +933,13 @@ fn build_child_request(
     if child_count(&input.events) >= max_children {
         return Err("child_limit".to_owned());
     }
+    let spawn_depth = envelope
+        .and_then(|e| e.get("spawn_depth"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_SPAWN_DEPTH);
+    if spawn_depth == 0 {
+        return Err("spawn_depth_limit".to_owned());
+    }
     let task_text = spawn
         .get("task")
         .and_then(Value::as_str)
@@ -951,6 +962,14 @@ fn build_child_request(
     }
     if child_env.get("spawn_defaults").is_none() {
         child_env["spawn_defaults"] = defaults.clone();
+    }
+    if child_env.get("spawn_depth").is_none() {
+        child_env["spawn_depth"] = json!(spawn_depth - 1);
+    }
+    if child_env.get("max_children").is_none()
+        && let Some(value) = envelope.and_then(|e| e.get("max_children"))
+    {
+        child_env["max_children"] = value.clone();
     }
     let payload = serde_json::to_vec(&child_env).unwrap_or_default();
     let digest = Sha256::digest(&payload);
@@ -1643,6 +1662,19 @@ mod tests {
             build_child_request(&spawn, &capped, Some(&spawn_envelope())).unwrap_err(),
             "child_limit"
         );
+        // Depth spent: a child that inherited spawn_depth=0 cannot spawn.
+        let mut leaf_env = spawn_envelope();
+        leaf_env["spawn_depth"] = json!(0);
+        assert_eq!(
+            build_child_request(&spawn, &input, Some(&leaf_env)).unwrap_err(),
+            "spawn_depth_limit"
+        );
+        // Children inherit depth-1 and the parent's max_children.
+        let ok = build_child_request(&spawn, &input, Some(&spawn_envelope())).expect("spawn");
+        let payload: Value =
+            serde_json::from_slice(&CreateTaskRun::decode(ok.as_slice()).unwrap().task_payload)
+                .unwrap();
+        assert_eq!(payload["spawn_depth"], 2);
         // duplicate_spawn: a child entry already carries this payload's hash.
         let env = spawn_envelope();
         let ok = build_child_request(&spawn, &input, Some(&env)).expect("first");

@@ -33,8 +33,12 @@ task payload is:
 - `spawn_defaults` — identity the kernel needs to create children. The chat UI
   fills it automatically; omit it and any `spawn_agent` fails with
   `spawn_not_configured`.
-- `max_children` — optional child cap (default 8), enforced via the kernel
-  event marker's `child_count`.
+- `max_children` — optional cap on direct children (default 8), enforced
+  via the kernel event marker's `child_count`.
+- `spawn_depth` — optional recursion budget (default 3); each child
+  inherits `spawn_depth - 1` and hits `spawn_depth_limit` at 0, so a
+  creative run can't recurse forever even though `max_children` is
+  per-parent.
 
 ## The harness root
 
@@ -103,6 +107,7 @@ run sequentially or fan out as children.
 - Duplicate request hashes (`latest_tool_request_hash` kernel marker) reject
   as `repeated_harness_call`; a child payload identical to an already-fed
   child's rejects as `duplicate_spawn`.
+- `spawn_depth` reaches 0 → `spawn_depth_limit`.
 
 ## Env vars (effect adapter)
 
@@ -110,3 +115,7 @@ run sequentially or fan out as children.
 - `MCP_SERVERS_FILE` — override the merged server file (default
   `<root>/mcp-servers.json`); `MCP_SERVERS` env entries always win on
   collision.
+
+The daemon propagates `AGENTOS_HARNESS_ROOT`, `MCP_SERVERS_FILE`, and
+`HOME` to both adapters through its env allowlist — set them on the
+`agentd` process, not just the shell you launch `agentctl` from.

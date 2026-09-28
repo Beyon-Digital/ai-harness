@@ -1396,6 +1396,11 @@ impl RunWorker {
             "MCP_SERVERS",
             "MCP_TIMEOUT_MS",
             "MCP_ALLOW_ANY_URL",
+            // Creative mode: the harness root for `harness.*` ops and
+            // the merged MCP server file; HOME backs the default root.
+            "AGENTOS_HARNESS_ROOT",
+            "MCP_SERVERS_FILE",
+            "HOME",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
@@ -1707,6 +1712,10 @@ impl RunWorker {
             "ACP_ALLOW_CONNECTOR",
             // Test/debug knob: the fixture loop records each LoopInput.
             "FIXTURE_LOOP_RECORD_DIR",
+            // Creative mode: loop reads the installed-skill index from
+            // the harness root (HOME backs the default root).
+            "AGENTOS_HARNESS_ROOT",
+            "HOME",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()
