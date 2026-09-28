@@ -76,8 +76,8 @@ terminal with outcomes fed as `kernel.child_settled` entries.
 
 | op | payload | result |
 |----|---------|--------|
-| `harness.catalog` | `{path?}` | file tree (≤6 deep, ≤2000 entries) |
-| `harness.list` | `{path?}` | one directory listing |
+| `harness.catalog` | `{}` | op docs + root layout map |
+| `harness.list` | `{path?, depth?}` | file tree (≤6 deep, ≤2000 entries) |
 | `harness.read` | `{path, max_bytes?}` | file contents (≤256KB) |
 | `harness.write` | `{path, content, create_only?}` | atomic write (≤1MiB) |
 | `harness.scaffold` | `{kind, name, description?}` | ready-made extension files |
@@ -88,7 +88,11 @@ terminal with outcomes fed as `kernel.child_settled` entries.
 `kind` is `skill` | `workflow` | `adapter` | `loop` | `mcp_server`.
 Scaffolded `mcp_server` + `harness.register` go **live immediately**: the
 server lands in `mcp-servers.json`, which `mcp.*` ops re-read per call — the
-agent can then invoke it via `mcp.call_tool` in the same run.
+agent can then invoke it via `mcp.call_tool` in the same run. Registration
+is confined: `command` must be a bare runtime (`python3|python|uv|uvx|node|
+npx|deno`), at least one arg must be a script file inside the root, inline
+eval flags and loader-injection env vars are rejected, and the servers file
+itself must resolve inside the root.
 `adapter`/`loop` register as `needs_build`: they still require compiling the
 crate and binding it to a profile (an operator step outside the run).
 
@@ -102,6 +106,9 @@ run sequentially or fan out as children.
 
 ## Budgets and guards
 
+- The kernel rejects `harness.*` effects unless the run's task envelope has
+  `creative: true` — enforced at decision-accept, so no loop adapter can
+  reach the surface from a non-creative run.
 - `MAX_HARNESS_HOPS = 16` `harness.*` ops per run (then the model must finish).
 - `mcp.*` cap stays 4; `child_count` caps children (default 8).
 - Duplicate request hashes (`latest_tool_request_hash` kernel marker) reject

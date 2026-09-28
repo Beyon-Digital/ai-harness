@@ -1072,15 +1072,34 @@ fn skill_index() -> Vec<(String, String)> {
                 front.lines().find_map(|line| {
                     line.trim()
                         .strip_prefix(&format!("{key}:"))
-                        .map(|v| v.trim().trim_matches('"').to_owned())
+                        .map(sanitize_skill_field)
                 })
             };
-            Some((field("name")?, field("description")?))
+            let name = field("name")?;
+            let description = field("description")?;
+            if name.is_empty() || description.is_empty() {
+                return None;
+            }
+            Some((name, description))
         })
         .take(24)
         .collect();
     index.sort();
     index
+}
+
+/// Skill frontmatter is model-written but lands in the SYSTEM prompt —
+/// bound it to one control-free line so a written SKILL.md cannot
+/// smuggle newlines or runaway instruction text into future runs.
+fn sanitize_skill_field(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn latest_effect_matching(events: &[u8], pred: impl Fn(&str) -> bool) -> Option<Value> {

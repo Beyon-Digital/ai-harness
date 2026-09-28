@@ -1,12 +1,12 @@
 //! Read helpers over the kernel-store ports for run-graph services.
 //!
 //! Ancestry is derived exclusively from `runs.parent_run_id` through
-//! [`RunRepo::list_by_task`](kernel_store::repositories::RunRepo::list_by_task);
+//! [`RunRepo::list_children`](kernel_store::repositories::RunRepo::list_children);
 //! the graph stores dependency edges only and never a second ancestry table
 //! (R3.6). Cycle logic stays in `GraphRepo::insert_dependency`, which checks
 //! reachability inside the same immediate transaction as the insert.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use domain::ids::{RunId, TaskId};
 use domain::run::RunState;
@@ -51,26 +51,18 @@ pub async fn find_dependency(
 }
 
 /// Returns every run descended from `root` through `runs.parent_run_id`,
-/// walked in memory within the root's task and ordered by breadth-first
-/// traversal of the run-id-ordered task listing. The root itself is not
-/// included.
+/// walked breadth-first via [`RunRepo::list_children`]. Spawned children
+/// live on their own task (a payload means "new task"), so the walk must
+/// not scope itself to the root's task — a cross-task child would escape
+/// subtree cancellation. The root itself is not included.
 pub async fn descendants(txn: &mut dyn KernelTxn, root: RunId) -> errors::Result<Vec<RunId>> {
-    let root_row = load_run(txn, root).await?;
-    let runs = txn.runs().list_by_task(root_row.task_id).await?;
-
-    let mut children: HashMap<RunId, Vec<RunId>> = HashMap::new();
-    for run in &runs {
-        if let Some(parent) = run.parent_run_id {
-            children.entry(parent).or_default().push(run.run_id);
-        }
-    }
-
+    load_run(txn, root).await?;
     let mut ordered = Vec::new();
     let mut frontier = VecDeque::from([root]);
     while let Some(current) = frontier.pop_front() {
-        for child in children.get(&current).into_iter().flatten() {
-            ordered.push(*child);
-            frontier.push_back(*child);
+        for child in txn.runs().list_children(current).await? {
+            ordered.push(child.run_id);
+            frontier.push_back(child.run_id);
         }
     }
     Ok(ordered)

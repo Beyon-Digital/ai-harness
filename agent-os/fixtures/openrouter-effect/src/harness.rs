@@ -107,6 +107,80 @@ fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", tmp.display()))
 }
 
+/// A unique tmp sibling for `path` — per-operation names mean two
+/// concurrent writes to files sharing a stem (`notes.md` / `notes.json`)
+/// can never collide, and the leading dot keeps tmp files out of
+/// `harness.list` output.
+fn tmp_for(path: &Path) -> PathBuf {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::now_v7().simple()))
+}
+
+/// Write-then-rename so a crash mid-write cannot leave a torn file.
+/// The tmp name is unique per call and removed when the rename fails.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = tmp_for(path);
+    write_tmp(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
+/// `resolve()` for an already-absolute path (env-provided files like
+/// `MCP_SERVERS_FILE` or an `mcp_server` cwd): the deepest existing
+/// ancestor must canonicalize inside the root — reads may follow
+/// operator config anywhere, writes stay confined.
+fn confine(root: &Path, abs: &Path) -> Result<PathBuf, String> {
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| format!("harness root unavailable: {e}"))?;
+    let mut probe = abs.to_path_buf();
+    loop {
+        if probe.symlink_metadata().is_ok() {
+            let canon = probe.canonicalize().map_err(|_| {
+                format!(
+                    "cannot resolve {} (dangling or escaped link)",
+                    abs.display()
+                )
+            })?;
+            if !canon.starts_with(&canon_root) {
+                return Err(format!("{} escapes the harness root", abs.display()));
+            }
+            break;
+        }
+        match probe.parent() {
+            Some(parent) => probe = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    Ok(abs.to_path_buf())
+}
+
+/// Runtimes an `mcp_server` registration may launch — bare names only
+/// (PATH-resolved); the script they run must live inside the root.
+const MCP_RUNTIMES: &[&str] = &["python3", "python", "uv", "uvx", "node", "npx", "deno"];
+
+/// Arg flags that turn a runtime into arbitrary-code-eval — the server
+/// entrypoint must be a file, not a command string.
+const MCP_EVAL_FLAGS: &[&str] = &["-c", "-e", "--eval", "--command", "-p", "--print"];
+
+/// Env keys that let the spawned server preload or redirect code
+/// outside the root.
+const MCP_DENY_ENV_PREFIX: &[&str] = &["LD_", "DYLD_"];
+const MCP_DENY_ENV: &[&str] = &[
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "PYTHONHOME",
+    "BASH_ENV",
+    "ENV",
+    "RUBYOPT",
+    "PERL5OPT",
+    "PERL5LIB",
+];
+
 fn registry_file(root: &Path) -> PathBuf {
     root.join("registry.json")
 }
@@ -316,16 +390,24 @@ fn write(payload: &Value) -> Result<String, String> {
     // `create_only` misses it and the rename silently replaces the link.
     let existed = path.symlink_metadata().is_ok();
     if create_only && existed {
+        // Replay tolerance: an adapter can die after the write but
+        // before its op record — identical content means this call
+        // already landed, so the retry succeeds instead of conflicting.
+        let identical = std::fs::read(&path)
+            .map(|bytes| bytes == content.as_bytes())
+            .unwrap_or(false);
+        if identical {
+            return Ok(
+                json!({"path": rel, "bytes": content.len(), "existed": true, "replayed": true})
+                    .to_string(),
+            );
+        }
         return Err(format!("{rel} already exists (create_only)"));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parents: {e}"))?;
     }
-    // Write-then-rename so a crash mid-write cannot leave a torn file;
-    // create_new on the fixed tmp name refuses to follow a planted link.
-    let tmp = path.with_extension("tmp-write");
-    write_tmp(&tmp, content.as_bytes())?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename {rel}: {e}"))?;
+    write_atomic(&path, content.as_bytes())?;
     Ok(json!({"path": rel, "bytes": content.len(), "existed": existed}).to_string())
 }
 
@@ -370,15 +452,27 @@ fn scaffold(payload: &Value) -> Result<String, String> {
             ));
         }
     };
-    for rel in files.keys() {
-        let path = resolve(&root, rel)?;
-        if path.symlink_metadata().is_ok() {
-            return Err(format!("{rel} already exists — pick another name"));
-        }
-    }
+    // Replay tolerance: an adapter can die after some files landed but
+    // before its op record — a file already holding the scaffolded
+    // content counts as done (the retry completes the scaffold), while
+    // different content is a real conflict.
     let mut written = Vec::new();
+    let mut present = Vec::new();
     for (rel, content) in &files {
         let path = resolve(&root, rel)?;
+        if path.symlink_metadata().is_ok() {
+            match std::fs::read(&path) {
+                Ok(existing) if existing == content.as_bytes() => {
+                    present.push(rel.clone());
+                    continue;
+                }
+                _ => {
+                    return Err(format!(
+                        "{rel} exists with different content — pick another name"
+                    ));
+                }
+            }
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create parents: {e}"))?;
         }
@@ -399,6 +493,7 @@ fn scaffold(payload: &Value) -> Result<String, String> {
         "kind": kind,
         "name": name,
         "files": written,
+        "already_present": present,
         "next": next,
     })
     .to_string())
@@ -779,9 +874,7 @@ fn load_registry(path: &Path) -> BTreeMap<String, Value> {
 fn save_registry(path: &Path, entries: &BTreeMap<String, Value>) -> Result<(), String> {
     let body =
         serde_json::to_string_pretty(&json!({"extensions": entries})).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("tmp");
-    write_tmp(&tmp, body.as_bytes()).map_err(|e| format!("{e} (registry)"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename registry: {e}"))
+    write_atomic(path, body.as_bytes()).map_err(|e| format!("{e} (registry)"))
 }
 
 fn register(payload: &Value) -> Result<String, String> {
@@ -827,16 +920,103 @@ fn register(payload: &Value) -> Result<String, String> {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Confinement: the MCP client spawns `command` under the
+            // adapter account, so a registered server may only be a
+            // standard runtime over a script that lives inside the
+            // harness root — anything else is arbitrary process exec.
+            if command.contains('/') || command.contains('\\') {
+                return Err(
+                    "mcp_server `command` must be a runtime name on PATH, not a path".to_owned(),
+                );
+            }
+            if !MCP_RUNTIMES.contains(&command) {
+                return Err(format!(
+                    "mcp_server `command` must be one of {}",
+                    MCP_RUNTIMES.join("|")
+                ));
+            }
+            if args
+                .iter()
+                .any(|arg| MCP_EVAL_FLAGS.contains(&arg.as_str()))
+            {
+                return Err(
+                    "inline-eval flags are not allowed — the server entrypoint must be a file"
+                        .to_owned(),
+                );
+            }
+            for key in env_map.keys() {
+                let upper = key.to_ascii_uppercase();
+                if MCP_DENY_ENV_PREFIX.iter().any(|p| upper.starts_with(p))
+                    || MCP_DENY_ENV.contains(&upper.as_str())
+                {
+                    return Err(format!("env `{key}` can inject code outside the root"));
+                }
+            }
             let cwd = payload
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| root.display().to_string());
+            let cwd_path = {
+                let cwd_path = Path::new(&cwd);
+                confine(
+                    &root,
+                    &if cwd_path.is_absolute() {
+                        cwd_path.to_path_buf()
+                    } else {
+                        root.join(cwd_path)
+                    },
+                )?
+            };
+            // Every path-shaped arg must stay inside the root, and at
+            // least one arg must be a real file — the server script.
+            let mut entrypoint_ok = false;
+            for arg in &args {
+                let looks_like_path = arg.contains('/')
+                    || arg
+                        .rsplit('.')
+                        .next()
+                        .map(|ext| {
+                            ["py", "js", "mjs", "cjs", "ts", "rb", "pl", "sh"].contains(&ext)
+                        })
+                        .unwrap_or(false);
+                if !looks_like_path {
+                    continue;
+                }
+                let candidate = {
+                    let arg_path = Path::new(arg);
+                    if arg_path.is_absolute() {
+                        arg_path.to_path_buf()
+                    } else {
+                        cwd_path.join(arg_path)
+                    }
+                };
+                let confined = confine(&root, &candidate)
+                    .map_err(|_| format!("arg {arg} escapes the harness root"))?;
+                if confined
+                    .symlink_metadata()
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+                {
+                    entrypoint_ok = true;
+                }
+            }
+            if !entrypoint_ok {
+                return Err(
+                    "mcp_server args must name a server script inside the harness root \
+                     (e.g. `python3 server.py`)"
+                        .to_owned(),
+                );
+            }
             // Same resolution as mcp.rs — MCP_SERVERS_FILE wins, then
-            // <root>/mcp-servers.json. Writing anywhere else would
-            // register a server the MCP client never sees.
-            let file = mcp_servers_file()
-                .ok_or("AGENTOS_HARNESS_ROOT unset and MCP_SERVERS_FILE unknown")?;
+            // <root>/mcp-servers.json — but writes stay confined: an
+            // env override pointing outside the root would let a
+            // creative run rewrite external config.
+            let file = confine(
+                &root,
+                &mcp_servers_file()
+                    .ok_or("AGENTOS_HARNESS_ROOT unset and MCP_SERVERS_FILE unknown")?,
+            )?;
             let mut servers: Value = std::fs::read_to_string(&file)
                 .ok()
                 .and_then(|b| serde_json::from_str(&b).ok())
@@ -845,18 +1025,16 @@ fn register(payload: &Value) -> Result<String, String> {
                 "command": command,
                 "args": args,
                 "env": env_map,
-                "cwd": cwd,
+                "cwd": cwd_path.display().to_string(),
             });
-            let tmp = file.with_extension("tmp");
-            write_tmp(
-                &tmp,
+            write_atomic(
+                &file,
                 serde_json::to_string_pretty(&servers)
                     .unwrap_or_default()
                     .as_bytes(),
             )?;
-            std::fs::rename(&tmp, &file).map_err(|e| format!("write mcp-servers.json: {e}"))?;
             (
-                json!({"command": command, "args": args, "cwd": cwd}),
+                json!({"command": command, "args": args, "cwd": cwd_path.display().to_string()}),
                 "live",
             )
         }
@@ -1021,6 +1199,9 @@ mod tests {
     fn register_mcp_server_goes_live() {
         let _lock = ENV_LOCK.lock().unwrap();
         let guard = RootGuard::new();
+        let script = guard.dir.join("extensions/mytool/server.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "print('ok')").unwrap();
         call(&json!({
             "op": "harness.register", "kind": "mcp_server", "name": "mytool",
             "command": "python3", "args": ["extensions/mytool/server.py"],

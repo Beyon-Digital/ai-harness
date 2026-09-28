@@ -864,6 +864,22 @@ impl RunWorker {
             let marker_value = marker(&op_counts);
             let marker_opt = (!settled.is_empty()).then_some(&marker_value);
             let mut events = pack(&settled, marker_opt);
+            // Bound each child outcome to a decodable text excerpt
+            // BEFORE evicting anything — otherwise the oldest child
+            // result drops out whole while the newest survives, and the
+            // parent's synthesis silently loses completed work.
+            if events.len() > limits.max_fed_event_bytes as usize {
+                for event in &mut settled {
+                    if event.get("operation").and_then(|v| v.as_str())
+                        == Some("kernel.child_settled")
+                        && let Some(result_ref) = event.get("result_ref").and_then(|v| v.as_str())
+                    {
+                        event["result_ref"] =
+                            serde_json::Value::String(bound_child_result_ref(result_ref));
+                    }
+                }
+                events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
+            }
             // Shrink order: old settled entries, then image payloads.
             // Keeping a full newest screenshot when it fits lets a
             // vision-capable model ground its next decision.
@@ -879,21 +895,6 @@ impl RunWorker {
                     }
                 }
                 events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
-            }
-            if events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
-                if let Some(newest) = settled.last_mut()
-                    && let Some(object) = newest.as_object_mut()
-                {
-                    object.insert(
-                        "op_counts".to_owned(),
-                        serde_json::to_value(&op_counts).unwrap_or_default(),
-                    );
-                    object.insert(
-                        "latest_mcp_request_hash".to_owned(),
-                        marker_value["latest_mcp_request_hash"].clone(),
-                    );
-                }
-                events = pack(&settled, None);
             }
             // Still over the cap: degrade `kernel.child_settled` entries
             // to a compact {run_id, state, error_code, truncated} form —
@@ -917,10 +918,45 @@ impl RunWorker {
                 }
                 events = pack(&settled, (!settled.is_empty()).then_some(&marker_value));
             }
-            // A cap too small even for the settled batch — emit the
-            // empty payload (0 bytes) so the configured bound holds.
+            // Marker fallback when the standalone marker is what tips
+            // the cap: inline every guard field — op counts, request
+            // hashes, and the spawn bookkeeping — onto the newest entry
+            // so spawn caps and dedup survive an oversized feed. Runs
+            // AFTER the child degrade pass so inlined fields are never
+            // replaced wholesale.
+            if events.len() > limits.max_fed_event_bytes as usize && !settled.is_empty() {
+                if let Some(newest) = settled.last_mut()
+                    && let Some(object) = newest.as_object_mut()
+                {
+                    object.insert(
+                        "op_counts".to_owned(),
+                        serde_json::to_value(&op_counts).unwrap_or_default(),
+                    );
+                    object.insert(
+                        "latest_mcp_request_hash".to_owned(),
+                        marker_value["latest_mcp_request_hash"].clone(),
+                    );
+                    object.insert(
+                        "latest_tool_request_hash".to_owned(),
+                        marker_value["latest_tool_request_hash"].clone(),
+                    );
+                    object.insert("child_count".to_owned(), serde_json::json!(child_count));
+                    object.insert(
+                        "child_payload_hashes".to_owned(),
+                        marker_value["child_payload_hashes"].clone(),
+                    );
+                }
+                events = pack(&settled, None);
+            }
+            // A cap too small even for the settled batch: keep just the
+            // guard marker when it fits so spawn limits and dedup still
+            // apply; only then emit the empty payload (0 bytes) so the
+            // configured bound holds.
             if events.len() > limits.max_fed_event_bytes as usize {
-                events = Vec::new();
+                events = pack(&[], Some(&marker_value));
+                if events.len() > limits.max_fed_event_bytes as usize {
+                    events = Vec::new();
+                }
             }
             (state, events)
         };
@@ -2047,6 +2083,33 @@ fn run_id_str(run: RunId) -> String {
 
 fn fresh_token(ids: &dyn IdProvider) -> u64 {
     (ids.new_uuid_v7().as_u128() & i64::MAX as u128) as u64
+}
+
+/// Decoded-text budget per fed child outcome — several children's
+/// answers must fit inside the default feed cap as excerpts rather
+/// than the oldest being evicted whole.
+const CHILD_FEED_EXCERPT_BYTES: usize = 4096;
+
+/// Bounds a `data:…;base64,` ref to [`CHILD_FEED_EXCERPT_BYTES`] of
+/// decoded text, re-encoded so the loop's data-URI decode still yields
+/// a readable excerpt (suffixed `[truncated]`). Refs that are not
+/// base64 data URIs pass through untouched.
+fn bound_child_result_ref(result_ref: &str) -> String {
+    let Some((prefix, body)) = result_ref.split_once(";base64,") else {
+        return result_ref.to_owned();
+    };
+    let Some(decoded) = base64_decode(body) else {
+        return result_ref.to_owned();
+    };
+    if decoded.len() <= CHILD_FEED_EXCERPT_BYTES {
+        return result_ref.to_owned();
+    }
+    let mut end = CHILD_FEED_EXCERPT_BYTES;
+    while end > 0 && decoded[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    let excerpt = format!("{}\n[truncated]", String::from_utf8_lossy(&decoded[..end]));
+    format!("{prefix};base64,{}", base64_encode(excerpt.as_bytes()))
 }
 
 fn compact_result_ref_for_loop(result_ref: &str) -> String {

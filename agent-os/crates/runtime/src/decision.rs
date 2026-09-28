@@ -366,6 +366,30 @@ async fn prepare_effect_in_txn(
         .get(run)
         .await?
         .ok_or_else(|| dec_error(ErrorCode::Internal, "run vanished mid-accept"))?;
+    // `harness.*` is the creative-mode surface: the bundled loop only
+    // offers it when the task envelope says `creative: true`, but the
+    // `effect.execute` port accepts payloads from ANY bound loop
+    // adapter — the authorization has to live in the kernel, not in
+    // one loop's prompt logic. Fail closed when the envelope is
+    // missing, unparseable, or silent on the flag.
+    if operation.starts_with("harness.") {
+        let task = txn
+            .tasks()
+            .get(row.task_id)
+            .await?
+            .ok_or_else(|| dec_error(ErrorCode::Internal, "run task vanished mid-accept"))?;
+        let creative = serde_json::from_slice::<serde_json::Value>(&task.payload)
+            .ok()
+            .and_then(|envelope| envelope.get("creative").cloned())
+            .map(|flag| flag.as_bool().unwrap_or(false) || flag.as_str() == Some("true"))
+            .unwrap_or(false);
+        if !creative {
+            return Err(dec_error(
+                ErrorCode::FailedPrecondition,
+                "harness.* operations require `creative: true` in the task envelope",
+            ));
+        }
+    }
     let environment_id = row.resolved_environment_id.ok_or_else(|| {
         dec_error(
             ErrorCode::FailedPrecondition,
